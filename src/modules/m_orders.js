@@ -11,6 +11,18 @@ module.exports = {
       })
     })
   },
+  mOrdersbyUserId: (userId, pages) => {
+    return new Promise((resolve, reject) => {
+      const query=`SELECT * FROM orders WHERE customerID = ${userId} ORDER BY orders.created DESC ${pages}`
+      conn.query(query, (err, result) => {
+        if (!err) {
+          resolve(result)
+        } else {
+          reject(new Error(err))
+        }
+      })
+    })
+  },
   mTotalOrders: (search) => {
     return new Promise((resolve, reject) => {
       conn.query(`SELECT COUNT (*) as total FROM orders ${search}`, (err, result) => {

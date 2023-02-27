@@ -10,5 +10,6 @@ routers
   .post('/detailorder', authentication, orders.addDetailOrder)
   .patch('/orders/:id', authentication, orders.updateOrder)
   .post('/orders/delete/:id',authentication,orders.deleteOrder)
+  .get('/ordersbyUserId',authentication,orders.ordersbyUserId)
 
 module.exports = routers

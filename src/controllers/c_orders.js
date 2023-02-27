@@ -7,7 +7,9 @@ const {
   mReduceStock,
   mAddNewStocks,
   mUpdateOrders,
-  mDeleteOrder
+  mDeleteOrder,
+  mOrdersbyUserId
+  
 } = require("../modules/m_orders");
 const { custom, success, failed } = require("../helpers/response");
 exports.allOrder = async (req, res) => {
@@ -53,6 +55,53 @@ exports.allOrder = async (req, res) => {
     failed(res, "Internal server error!", error.message);
   }
 };
+exports.ordersbyUserId = async (req, res) => {
+  try {
+    // searching
+    console.log("Nex orders asked by user id ")
+    const filter = req.query.filter ? req.query.filter : "ordernumber";
+    const keyword = req.query.keyword ? req.query.keyword : "";
+    const search = filter
+      ? `WHERE ${filter.toString().toLowerCase()} LIKE '%${keyword
+          .toString()
+          .toLowerCase()}%'`
+      : "";
+    // pagination
+    // pagination
+    const userId = req.query.userId;
+    const page = req.query.page ? req.query.page : 1;
+    const limit = req.query.limit ? req.query.limit : 10;
+    const start = page === 1 ? 0 : (page - 1) * limit;
+    const pages = page ? `LIMIT ${start}, ${limit}` : "";
+    const totalPage = await mTotalOrders(search);
+    console.log("USer ID", userId)
+    mOrdersbyUserId(userId, pages)
+      .then((response) => {
+        if (response.length > 0) {
+          const pagination = {
+            page: page,
+            limit: limit,
+            total: totalPage[0].total,
+            totalPage: Math.ceil(totalPage[0].total / limit),
+          };
+          success(res, "Get all order", pagination, response);
+        } else {
+          const pagination = {
+            page: 1,
+            limit: limit,
+            total: 0,
+            totalPage: 0,
+          };
+          custom(res, 404, "Data not found!", pagination, response);
+        }
+      })
+      .catch((error) => {
+        failed(res, "Internal server error!xx", error.message);
+      });
+  } catch (error) {
+    failed(res, "Internal server error!", error.message);
+  }
+};
 exports.detailOrder = (req, res) => {
   const id = req.params.id;
   mDetailOrder(id)
@@ -71,6 +120,7 @@ exports.addOrder = (req, res) => {
   const body = req.body;
   if (
     !body.customer ||
+    !body.customerID ||
     // !body.operator ||
     !body.subtotal ||
     !body.payment ||
@@ -81,6 +131,7 @@ exports.addOrder = (req, res) => {
     const data = {
       ordernumber: `${new Date().valueOf()}`,
       customer: body.customer,
+      customerID: body.customerID,
       operator: body.operator,
       subtotal: body.subtotal,
       payment: body.payment,
