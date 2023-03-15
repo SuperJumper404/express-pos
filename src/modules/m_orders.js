@@ -1,130 +1,145 @@
-const conn = require('../config/db')
+const conn = require("../config/db");
 module.exports = {
-  mAllOrder: (search, pages) => {
+  mAllOrder: () => {
     return new Promise((resolve, reject) => {
-      conn.query(`SELECT * FROM orders ${search} ORDER BY orders.created DESC ${pages}`, (err, result) => {
-        if (!err) {
-          resolve(result)
-        } else {
-          reject(new Error(err))
+      conn.query(
+        `SELECT * FROM orders ORDER BY orders.created DESC`,
+        (err, result) => {
+          if (!err) {
+            resolve(result);
+          } else {
+            reject(new Error(err));
+          }
         }
-      })
-    })
+      );
+    });
   },
-  mOrdersbyUserId: (userId, pages) => {
+  mOrdersbyUserId: (userId) => {
     return new Promise((resolve, reject) => {
-      const query=`SELECT * FROM orders WHERE customerID = ${userId} ORDER BY orders.created DESC ${pages}`
+      const query = `SELECT * FROM orders WHERE customerID = ${userId} ORDER BY orders.created DESC`;
       conn.query(query, (err, result) => {
         if (!err) {
-          resolve(result)
+          resolve(result);
         } else {
-          reject(new Error(err))
+          reject(new Error(err));
         }
-      })
-    })
+      });
+    });
   },
-  mTotalOrders: (search) => {
+  mTotalOrders: () => {
     return new Promise((resolve, reject) => {
-      conn.query(`SELECT COUNT (*) as total FROM orders ${search}`, (err, result) => {
+      conn.query(`SELECT COUNT (*) as total FROM orders`, (err, result) => {
         if (!err) {
-          resolve(result)
+          resolve(result);
         } else {
-          reject(new Error(err))
+          reject(new Error(err));
         }
-      })
-    })
+      });
+    });
   },
   mDetailOrder: (id) => {
     return new Promise((resolve, reject) => {
-      conn.query(`SELECT *, orders.id as id FROM orders LEFT JOIN orderdetail ON orders.id=orderdetail.orderId LEFT JOIN products ON orderdetail.productid=products.id WHERE orders.id='${id}' ORDER BY orders.created DESC`,
+      conn.query(
+        `SELECT *, orders.id as id FROM orders LEFT JOIN orderdetail ON orders.id=orderdetail.orderId LEFT JOIN products ON orderdetail.productid=products.id WHERE orders.id='${id}' ORDER BY orders.created DESC`,
         (err, result) => {
           if (!err) {
-            resolve(result)
+            resolve(result);
           } else {
-            reject(new Error(err))
+            reject(new Error(err));
           }
-        })
-    })
+        }
+      );
+    });
   },
   mAddOrders: (data) => {
     return new Promise((resolve, reject) => {
-      conn.query('INSERT INTO orders SET ? ', data, (err, result) => {
+      conn.query("INSERT INTO orders SET ? ", data, (err, result) => {
         if (!err) {
-          resolve(result)
+          resolve(result);
         } else {
-          reject(new Error(err))
+          reject(new Error(err));
         }
-      })
-    })
+      });
+    });
   },
   mAddDetailOrder: (data) => {
     return new Promise((resolve, reject) => {
-      conn.query('INSERT INTO orderdetail SET ? ', data, (err, result) => {
+      conn.query("INSERT INTO orderdetail SET ? ", data, (err, result) => {
         if (!err) {
-          resolve(result)
+          resolve(result);
         } else {
-          reject(new Error(err))
+          reject(new Error(err));
         }
-      })
-    })
+      });
+    });
   },
   mReduceStock: (qty, productid) => {
     return new Promise((resolve, reject) => {
-      conn.query(`UPDATE products SET stock=stock-'${qty}' WHERE id='${productid}'`, (err, result) => {
-        if (!err) {
-          resolve(result)
-        } else {
-          reject(new Error(err))
+      conn.query(
+        `UPDATE products SET stock=stock-'${qty}' WHERE id='${productid}'`,
+        (err, result) => {
+          if (!err) {
+            resolve(result);
+          } else {
+            reject(new Error(err));
+          }
         }
-      })
-    })
+      );
+    });
   },
   mAddNewStocks: (data) => {
     return new Promise((resolve, reject) => {
-      conn.query('INSERT INTO stocks SET ? ', data, (err, result) => {
+      conn.query("INSERT INTO stocks SET ? ", data, (err, result) => {
         if (!err) {
-          resolve(result)
+          resolve(result);
         } else {
-          reject(new Error(err))
+          reject(new Error(err));
         }
-      })
-    })
+      });
+    });
   },
   mUpdateOrders: (data, id) => {
     return new Promise((resolve, reject) => {
-      conn.query('UPDATE orders SET ? WHERE id = ?', [data, id], (err, result) => {
-        if (!err) {
-          resolve(result)
-        } else {
-          reject(new Error(err))
+      conn.query(
+        "UPDATE orders SET ? WHERE id = ?",
+        [data, id],
+        (err, result) => {
+          if (!err) {
+            resolve(result);
+          } else {
+            reject(new Error(err));
+          }
         }
-      })
-    })
+      );
+    });
   },
   mDeleteOrder: (id) => {
     return new Promise((resolve, reject) => {
-      console.log("delete", id)
-      const result1 = conn.query(`DELETE FROM orders WHERE id = ${id}`, (err, result) => {
-        if (!err) {
-          return result;
-        } else {
-          return err
+      console.log("delete", id);
+      const result1 = conn.query(
+        `DELETE FROM orders WHERE id = ${id}`,
+        (err, result) => {
+          if (!err) {
+            return result;
+          } else {
+            return err;
+          }
         }
-      });
-      const result2 =conn.query(` DELETE FROM orderdetail WHERE orderid = ${id}`, (err, result) => {
-        if (!err) {
-          return result;
-        } else {
-          return err
+      );
+      const result2 = conn.query(
+        ` DELETE FROM orderdetail WHERE orderid = ${id}`,
+        (err, result) => {
+          if (!err) {
+            return result;
+          } else {
+            return err;
+          }
         }
-      })
-      if(result1 instanceof Error ){
-        reject(result1)
-      }else if(result2 instanceof Error)
-      reject(result2)
-      else resolve({result1,result2})
-
-    })
-  }
-
-}
+      );
+      if (result1 instanceof Error) {
+        reject(result1);
+      } else if (result2 instanceof Error) reject(result2);
+      else resolve({ result1, result2 });
+    });
+  },
+};

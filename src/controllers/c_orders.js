@@ -1,6 +1,5 @@
 const {
   mAllOrder,
-  mTotalOrders,
   mDetailOrder,
   mAddOrders,
   mAddDetailOrder,
@@ -8,99 +7,28 @@ const {
   mAddNewStocks,
   mUpdateOrders,
   mDeleteOrder,
-  mOrdersbyUserId
-  
+  mOrdersbyUserId,
 } = require("../modules/m_orders");
 const { custom, success, failed } = require("../helpers/response");
+const response = require("../helpers/response");
 exports.allOrder = async (req, res) => {
-  try {
-    // searching
-    const filter = req.query.filter ? req.query.filter : "ordernumber";
-    const keyword = req.query.keyword ? req.query.keyword : "";
-    const search = filter
-      ? `WHERE ${filter.toString().toLowerCase()} LIKE '%${keyword
-          .toString()
-          .toLowerCase()}%'`
-      : "";
-    // pagination
-    const page = req.query.page ? req.query.page : 1;
-    const limit = req.query.limit ? req.query.limit : 10;
-    const start = page === 1 ? 0 : (page - 1) * limit;
-    const pages = page ? `LIMIT ${start}, ${limit}` : "";
-    const totalPage = await mTotalOrders(search);
-    mAllOrder(search, pages)
-      .then((response) => {
-        if (response.length > 0) {
-          const pagination = {
-            page: page,
-            limit: limit,
-            total: totalPage[0].total,
-            totalPage: Math.ceil(totalPage[0].total / limit),
-          };
-          success(res, "Get all order", pagination, response);
-        } else {
-          const pagination = {
-            page: 1,
-            limit: limit,
-            total: 0,
-            totalPage: 0,
-          };
-          custom(res, 404, "Data not found!", pagination, response);
-        }
-      })
-      .catch((error) => {
-        failed(res, "Internal server error!xx", error.message);
-      });
-  } catch (error) {
-    failed(res, "Internal server error!", error.message);
-  }
+  mAllOrder()
+    .then((response) => {
+      success(res, "Get all order", response);
+    })
+    .catch((error) => {
+      failed(res, "Internal server error!xx", error.message);
+    });
 };
 exports.ordersbyUserId = async (req, res) => {
-  try {
-    // searching
-    console.log("Nex orders asked by user id ")
-    const filter = req.query.filter ? req.query.filter : "ordernumber";
-    const keyword = req.query.keyword ? req.query.keyword : "";
-    const search = filter
-      ? `WHERE ${filter.toString().toLowerCase()} LIKE '%${keyword
-          .toString()
-          .toLowerCase()}%'`
-      : "";
-    // pagination
-    // pagination
-    const userId = req.query.userId;
-    const page = req.query.page ? req.query.page : 1;
-    const limit = req.query.limit ? req.query.limit : 10;
-    const start = page === 1 ? 0 : (page - 1) * limit;
-    const pages = page ? `LIMIT ${start}, ${limit}` : "";
-    const totalPage = await mTotalOrders(search);
-    console.log("USer ID", userId)
-    mOrdersbyUserId(userId, pages)
-      .then((response) => {
-        if (response.length > 0) {
-          const pagination = {
-            page: page,
-            limit: limit,
-            total: totalPage[0].total,
-            totalPage: Math.ceil(totalPage[0].total / limit),
-          };
-          success(res, "Get all order", pagination, response);
-        } else {
-          const pagination = {
-            page: 1,
-            limit: limit,
-            total: 0,
-            totalPage: 0,
-          };
-          custom(res, 404, "Data not found!", pagination, response);
-        }
-      })
-      .catch((error) => {
-        failed(res, "Internal server error!xx", error.message);
-      });
-  } catch (error) {
-    failed(res, "Internal server error!", error.message);
-  }
+  const userId = req.query.userId;
+  mOrdersbyUserId(userId)
+    .then((response) => {
+      success(res, "Get all order", response);
+    })
+    .catch((error) => {
+      failed(res, "Internal server error!xx", error.message);
+    });
 };
 exports.detailOrder = (req, res) => {
   const id = req.params.id;
@@ -146,9 +74,8 @@ exports.addOrder = (req, res) => {
       });
   }
 };
-exports.deleteOrder=( req ,res ) =>{
+exports.deleteOrder = (req, res) => {
   const id = req.params.id;
-  console.log("Delte",id);
   mDeleteOrder(id)
     .then((response) => {
       if (response.length > 0) {
@@ -208,22 +135,32 @@ exports.addDetailOrder = (req, res) => {
       });
   }
 };
-exports.updateOrder = (req, res) => {
+exports.updateOrder = async (req, res) => {
   const id = req.params.id;
   const body = req.body;
   if (!req.body.operator || !req.body.status) {
     custom(res, 400, "Bad request!", null, null);
   } else {
-    mUpdateOrders(body, id)
-      .then((response) => {
-        if (response.affectedRows) {
-          success(res, "Update orders success!", null, null);
-        } else {
-          custom(res, 404, "Id orders not found!", null, null);
-        }
-      })
-      .catch((error) => {
-        failed(res, "Internal server error!", error.message);
-      });
+    let currentStatus = await mDetailOrder(id).then((response) => {
+      return response;
+    });
+    if (
+      (currentStatus[0].status == 1 && body.status == 2) ||
+      (currentStatus[0].status == 2 && body.status == 3) ||
+      (currentStatus[0].status == 1 && body.status == 4) ||
+      (currentStatus[0].status == 2 && body.status == 4)
+    ) {
+      mUpdateOrders(body, id)
+        .then((response) => {
+          if (response.affectedRows) {
+            success(res, "Update orders success!", null, null);
+          } else {
+            custom(res, 404, "Id orders not found!", null, null);
+          }
+        })
+        .catch((error) => {
+          failed(res, "Internal server error!", error.message);
+        });
+    }
   }
 };
