@@ -22,13 +22,12 @@ module.exports = {
       });
     });
   },
-  mAllStock: (search, sorting, pages) => {
+  mAllStock: () => {
     return new Promise((resolve, reject) => {
       conn.query(
         `
       SELECT stocks.id AS id, stocks.productid AS productid, stocks.category AS category, stocks.qty AS qty, stocks.operator AS operator, stocks.remark AS remark, stocks.created AS created, stocks.updated AS updated, users.username AS username, CONCAT_WS(' ', users.firstname, users.lastname) AS name 
-      FROM stocks LEFT JOIN products ON stocks.productId=products.id LEFT JOIN users ON stocks.operator=users.id
-      ${search} ${sorting} ${pages}`,
+      FROM stocks LEFT JOIN products ON stocks.productId=products.id LEFT JOIN users ON stocks.operator=users.id`,
         (err, result) => {
           if (!err) {
             resolve(result);
@@ -39,13 +38,12 @@ module.exports = {
       );
     });
   },
-  mTotalStock: (search) => {
+  mTotalStock: () => {
     return new Promise((resolve, reject) => {
       conn.query(
         `
       SELECT stocks.id AS id, stocks.productid AS productid, stocks.category AS category, stocks.qty AS qty, stocks.operator AS operator, stocks.remark AS remark, stocks.created AS created, stocks.updated AS updated, users.username AS username, CONCAT_WS(' ', users.firstname, users.lastname) AS name, 
-      COUNT (*) AS total FROM stocks LEFT JOIN products ON stocks.productId=products.id LEFT JOIN users ON stocks.operator=users.id
-      ${search}`,
+      COUNT (*) AS total FROM stocks LEFT JOIN products ON stocks.productId=products.id LEFT JOIN users ON stocks.operator=users.id`,
         (error, result) => {
           if (!error) {
             resolve(result);

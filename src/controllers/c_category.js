@@ -24,7 +24,7 @@ module.exports = {
   allCategory: async (req, res) => {
     mAllCategory()
       .then((response) => {
-        success(res, "Get all category!", response);
+        success(res, "Get all category!", null, response);
       })
       .catch((error) => {
         failed(res, "Internal server error!", error.message);

@@ -180,7 +180,7 @@ module.exports = {
   getAllUser: async (req, res) => {
     mGetAllUser()
       .then((response) => {
-        success(res, "Get all data user", response);
+        success(res, "Get all data user", null, response);
       })
       .catch((error) => {
         failed(res, "Internal server error!", error.message);

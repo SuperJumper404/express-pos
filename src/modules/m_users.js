@@ -97,32 +97,26 @@ module.exports = {
       );
     });
   },
-  mGetAllUser: (search, sorting, pages) => {
+  mGetAllUser: () => {
     return new Promise((resolve, reject) => {
-      conn.query(
-        `SELECT * FROM users ${search} ${sorting} ${pages}`,
-        (err, result) => {
-          if (!err) {
-            resolve(result);
-          } else {
-            reject(new Error(err));
-          }
+      conn.query(`SELECT * FROM users`, (err, result) => {
+        if (!err) {
+          resolve(result);
+        } else {
+          reject(new Error(err));
         }
-      );
+      });
     });
   },
-  modelTotalUser: (search) => {
+  modelTotalUser: () => {
     return new Promise((resolve, reject) => {
-      conn.query(
-        `SELECT COUNT (*) as total FROM users ${search}`,
-        (error, result) => {
-          if (!error) {
-            resolve(result);
-          } else {
-            reject(new Error(error));
-          }
+      conn.query(`SELECT COUNT (*) as total FROM users`, (error, result) => {
+        if (!error) {
+          resolve(result);
+        } else {
+          reject(new Error(error));
         }
-      );
+      });
     });
   },
   mDetailUser: (id) => {

@@ -29,9 +29,11 @@ module.exports = {
   allProduct: async (req, res) => {
     mAllProduct()
       .then((response) => {
-        success(res, "Get all data user", response);
+        console.log("normiou");
+        success(res, "Get all data user", null, response);
       })
       .catch((error) => {
+        console.log("erreurezrz");
         failed(res, "Internal server error!", error.message);
       });
   },

@@ -14,7 +14,7 @@ const response = require("../helpers/response");
 exports.allOrder = async (req, res) => {
   mAllOrder()
     .then((response) => {
-      success(res, "Get all order", response);
+      success(res, "Get all order", null, response);
     })
     .catch((error) => {
       failed(res, "Internal server error!xx", error.message);
@@ -24,7 +24,7 @@ exports.ordersbyUserId = async (req, res) => {
   const userId = req.query.userId;
   mOrdersbyUserId(userId)
     .then((response) => {
-      success(res, "Get all order", response);
+      success(res, "Get all order", null, response);
     })
     .catch((error) => {
       failed(res, "Internal server error!xx", error.message);

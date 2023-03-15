@@ -2,7 +2,6 @@ const {
   mAddStock,
   updateProductStock,
   mAllStock,
-  mTotalStock,
   mDetailStock,
   mDetailProductStockId,
 } = require("../modules/m_stocks");
@@ -57,7 +56,7 @@ exports.addStock = (req, res) => {
 exports.allStock = async (req, res) => {
   mAllStock()
     .then((response) => {
-      success(res, "Get all stock", response);
+      success(res, "Get all stock", null, response);
     })
     .catch((error) => {
       failed(res, "Internal server error!", error.message);
