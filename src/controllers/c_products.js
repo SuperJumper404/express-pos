@@ -29,7 +29,6 @@ module.exports = {
   allProduct: async (req, res) => {
     mAllProduct()
       .then((response) => {
-        console.log("normiou");
         success(res, "Get all data user", null, response);
       })
       .catch((error) => {
