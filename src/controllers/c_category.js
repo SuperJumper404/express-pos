@@ -8,7 +8,8 @@ const {
 const { custom, success, failed } = require("../helpers/response");
 module.exports = {
   addCategory: (req, res) => {
-    const body = req.body;
+    let body = req.body;
+    body.shopid = req.shopid;
     if (!body.name) {
       custom(res, 400, "Bad request!", {}, null);
     } else {
@@ -22,7 +23,8 @@ module.exports = {
     }
   },
   allCategory: async (req, res) => {
-    mAllCategory()
+    const filterByShopid = req.shopid;
+    mAllCategory(filterByShopid)
       .then((response) => {
         success(res, "Get all category!", null, response);
       })

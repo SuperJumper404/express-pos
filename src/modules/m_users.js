@@ -86,7 +86,7 @@ module.exports = {
   mProfileMe: (token) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        `SELECT id, username, firstname, lastname, email, token, expired, phone, gender, position, image, status, access, created, updated FROM users WHERE token='${token}'`,
+        `SELECT id,shopid, username, firstname, lastname, email, token, expired, phone, gender, position, image, status, access, created, updated FROM users WHERE token='${token}'`,
         (err, result) => {
           if (!err) {
             resolve(result);
@@ -97,21 +97,26 @@ module.exports = {
       );
     });
   },
-  mGetAllUser: () => {
+  mGetAllUser: (shopid) => {
     return new Promise((resolve, reject) => {
-      conn.query(`SELECT * FROM users`, (err, result) => {
-        if (!err) {
-          resolve(result);
-        } else {
-          reject(new Error(err));
+      conn.query(
+        `SELECT * FROM users WHERE shopid = ?`,
+        [shopid],
+        (err, result) => {
+          if (!err) {
+            resolve(result);
+          } else {
+            reject(new Error(err));
+          }
         }
-      });
+      );
     });
   },
   modelTotalUser: () => {
     return new Promise((resolve, reject) => {
       conn.query(`SELECT COUNT (*) as total FROM users`, (error, result) => {
         if (!error) {
+          collecter;
           resolve(result);
         } else {
           reject(new Error(error));
@@ -122,7 +127,7 @@ module.exports = {
   mDetailUser: (id) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        `SELECT id, username, firstname, lastname, email, token, expired, phone, gender, position, image, status, access, created, updated FROM users WHERE id='${id}'`,
+        `SELECT id, shopid, username, firstname, lastname, email, token, expired, phone, gender, position, image, status, access, created, updated FROM users WHERE id='${id}'`,
         (err, result) => {
           if (!err) {
             resolve(result);

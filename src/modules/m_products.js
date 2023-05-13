@@ -11,10 +11,11 @@ module.exports = {
       });
     });
   },
-  mAllProduct: () => {
+  mAllProduct: (shopid) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        `SELECT *, products.id AS id, products.name AS name, category.name AS category FROM products LEFT JOIN category ON products.categoryId=category.id`,
+        `SELECT *, products.id AS id, products.name AS name, category.name AS category FROM products LEFT JOIN category ON products.categoryId=category.id WHERE products.shopid = ?`,
+        [shopid],
         (err, result) => {
           if (!err) {
             resolve(result);
@@ -23,17 +24,6 @@ module.exports = {
           }
         }
       );
-    });
-  },
-  mTotalProduct: () => {
-    return new Promise((resolve, reject) => {
-      conn.query(`SELECT COUNT (*) as total FROM products`, (error, result) => {
-        if (!error) {
-          resolve(result);
-        } else {
-          reject(new Error(error));
-        }
-      });
     });
   },
   mDetailProduct: (id) => {

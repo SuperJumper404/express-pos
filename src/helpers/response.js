@@ -6,7 +6,7 @@ module.exports = {
       pagination,
       data,
     };
-    res.json(response);
+    res.status(code).json(response);
   },
   success: (res, message, pagination, data) => {
     const response = {

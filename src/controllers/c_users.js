@@ -41,6 +41,7 @@ module.exports = {
             access: body.access,
             status: 1,
             token: token,
+            shopid: req.shopid,
           };
           // create token
 
@@ -107,7 +108,9 @@ module.exports = {
                 id: response[0].id,
                 email: response[0].email,
                 access: response[0].access,
+                shopid: response[0].shopid,
               };
+              // const token = jwt.sign(data, envJWTKEY, { expiresIn: "8000" });
               const token = jwt.sign(data, envJWTKEY, { expiresIn: "1d" });
               const expired = new Date();
               expired.setDate(expired.getDate() + 1);
@@ -178,7 +181,7 @@ module.exports = {
       });
   },
   getAllUser: async (req, res) => {
-    mGetAllUser()
+    mGetAllUser(req.shopid)
       .then((response) => {
         success(res, "Get all data user", null, response);
       })

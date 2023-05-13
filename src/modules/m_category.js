@@ -12,9 +12,13 @@ module.exports = {
       });
     });
   },
-  mAllCategory: () => {
+  mAllCategory: (shopid) => {
+    let query = "SELECT * FROM category";
+    if (shopid) {
+      query = `SELECT * FROM category WHERE shopid = ${shopid}`;
+    }
     return new Promise((resolve, reject) => {
-      conn.query(`SELECT * FROM category`, (err, result) => {
+      conn.query(query, (err, result) => {
         if (!err) {
           resolve(result);
         } else {

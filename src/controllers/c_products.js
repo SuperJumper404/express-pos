@@ -12,6 +12,7 @@ module.exports = {
   addProduct: (req, res) => {
     const body = req.body;
     body.image = req.file.filename;
+    body.shopid = req.shopid;
     if (!body.name || !body.categoryid || !body.price || !body.stock) {
       const locationPath = `./public/products/${req.file.filename}`;
       fs.unlinkSync(locationPath);
@@ -27,7 +28,7 @@ module.exports = {
     }
   },
   allProduct: async (req, res) => {
-    mAllProduct()
+    mAllProduct(req.shopid)
       .then((response) => {
         success(res, "Get all data user", null, response);
       })

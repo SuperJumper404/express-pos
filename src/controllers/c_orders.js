@@ -8,11 +8,13 @@ const {
   mUpdateOrders,
   mDeleteOrder,
   mOrdersbyUserId,
+  mArchiveOrder,
 } = require("../modules/m_orders");
+
 const { custom, success, failed } = require("../helpers/response");
 const response = require("../helpers/response");
 exports.allOrder = async (req, res) => {
-  mAllOrder()
+  mAllOrder(req.shopid)
     .then((response) => {
       success(res, "Get all order", null, response);
     })
@@ -64,6 +66,8 @@ exports.addOrder = (req, res) => {
       subtotal: body.subtotal,
       payment: body.payment,
       status: body.status,
+      created: body.created,
+      shopid: req.shopid,
     };
     mAddOrders(data)
       .then((response) => {
@@ -76,15 +80,18 @@ exports.addOrder = (req, res) => {
 };
 exports.deleteOrder = (req, res) => {
   const id = req.params.id;
+  console.log("DELETE orders", id);
   mDeleteOrder(id)
     .then((response) => {
-      if (response.length > 0) {
+      console.log("REspons Delete", response);
+      if (response[0].affectedRows > 0 || response[1].affectedRows > 0) {
         success(res, "Delete order", null, response);
       } else {
         custom(res, "Id not found!", null, null);
       }
     })
     .catch((error) => {
+      console.log(error);
       failed(res, "Internal server error!", error.message);
     });
 };
@@ -163,4 +170,21 @@ exports.updateOrder = async (req, res) => {
         });
     }
   }
+};
+
+exports.archiveOrder = (req, res) => {
+  const id = req.params.id;
+  console.log("On passe ici", id);
+
+  mArchiveOrder(id)
+    .then((response) => {
+      if (response.affectedRows) {
+        success(res, "Archive order success!", null, null);
+      } else {
+        custom(res, 404, "Id order not found!", null, null);
+      }
+    })
+    .catch((error) => {
+      failed(res, "Internal server error!", error.message);
+    });
 };

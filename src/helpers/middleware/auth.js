@@ -8,16 +8,15 @@ module.exports = {
     if (authorization) {
       let token = authorization.split(" ");
       jwt.verify(token[1], envJWTKEY, (error, decoded) => {
-        console.log("Incomiing ", decoded);
+        // console.log("Incomiing ", decoded);
         if (!error) {
-          res.access = decoded.access;
+          req.access = decoded.access;
+          req.shopid = decoded.shopid;
+          req.id = decoded.id;
+          req.email = decoded.email;
           next();
         } else {
-          if (error.name === "JsonWebTokenError") {
-            custom(res, 401, "", {}, error);
-          } else {
-            custom(res, 401, "Token expaired!", {}, error);
-          }
+          res.status(401).send("Expired Token");
         }
       });
     } else {
@@ -27,7 +26,7 @@ module.exports = {
   authAdmin: (req, res, next) => {
     // console.log("Incomiing rqg ",req)
 
-    const access = res.access;
+    const access = req.access;
     if (access === 0) {
       next();
     } else {
@@ -35,7 +34,7 @@ module.exports = {
     }
   },
   authCashier: (req, res, next) => {
-    const access = res.access;
+    const access = req.access;
     if (access === 1) {
       next();
     } else {
@@ -43,7 +42,7 @@ module.exports = {
     }
   },
   authCustomer: (req, res, next) => {
-    const access = res.access;
+    const access = req.access;
     if (access === 2) {
       next();
     } else {
