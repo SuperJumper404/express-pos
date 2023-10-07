@@ -10,7 +10,11 @@ const fs = require("fs");
 
 module.exports = {
   addProduct: (req, res) => {
+    console.log("New Product To Add  ", req.body.product_customization);
     const body = req.body;
+    if (body.product_customization) {
+      body.product_customization = JSON.parse(body.product_customization);
+    }
     body.image = req.file.filename;
     body.shopid = req.shopid;
     if (!body.name || !body.categoryid || !body.price || !body.stock) {
@@ -20,7 +24,7 @@ module.exports = {
     } else {
       mAddProduct(body)
         .then(() => {
-          custom(res, 201, "Create product success!", {}, null);
+          custom(res, 200, "Create product success!", {}, null);
         })
         .catch((error) => {
           failed(res, "Internal server error!", error.message);

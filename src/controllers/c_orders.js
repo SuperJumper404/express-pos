@@ -65,6 +65,8 @@ exports.addOrder = (req, res) => {
       operator: body.operator,
       subtotal: body.subtotal,
       payment: body.payment,
+      remark: body.remark,
+      phone: body.phone,
       status: body.status,
       created: body.created,
       shopid: req.shopid,
@@ -112,7 +114,6 @@ exports.addDetailOrder = (req, res) => {
       price,
       qty,
       total,
-      remark: null,
     };
     mAddDetailOrder(dataDetail)
       .then(() => {
@@ -123,7 +124,6 @@ exports.addDetailOrder = (req, res) => {
               category: "1",
               qty,
               operator,
-              remark: "Transaction",
             };
             mAddNewStocks(addStock)
               .then(() => {
