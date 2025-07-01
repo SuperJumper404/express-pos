@@ -13,7 +13,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Deploy to EC2 via SSH
         uses: appleboy/ssh-action@v1.0.0
@@ -24,6 +24,7 @@ jobs:
           port: 22
           script: |
             cd /home/ubuntu/smarteat/backend
-            git pull origin staging
-            npm install 
-            pm2 restart all
+            git fetch origin
+            git reset --hard origin/staging
+            npm install
+            npx pm2 start ecosystem.config.js --env staging || npx pm2 restart backend_smart_eat_staging
