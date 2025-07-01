@@ -58,8 +58,14 @@ exports.addOrder = (req, res) => {
   ) {
     custom(res, 400, "Bad request!", null, null);
   } else {
+    const timestamp = new Date().valueOf().toString();
+    const randomValue = Math.floor(Math.random() * 100)
+      .toString()
+      .padStart(2, "0"); // génère un nombre aléatoire entre 00 et 99
+    const combinedValue = timestamp + randomValue;
+    const orderNumber = combinedValue.slice(-4); // prend les 4 derniers chiffres de la valeur combinée
     const data = {
-      ordernumber: `${new Date().valueOf()}`,
+      ordernumber: orderNumber,
       customer: body.customer,
       customerID: body.customerID,
       operator: body.operator,
@@ -104,6 +110,9 @@ exports.addDetailOrder = (req, res) => {
   const qty = req.body.qty;
   const total = req.body.total;
   const operator = req.body.operator;
+  const customizationList = req.body.customizationList;
+
+  console.log("Liste des customization", req.body?.customizationList);
 
   if (!orderid || !productid || !price || !qty || !total || !operator) {
     custom(res, 400, "Bad request!", null, null);
@@ -115,7 +124,7 @@ exports.addDetailOrder = (req, res) => {
       qty,
       total,
     };
-    mAddDetailOrder(dataDetail)
+    mAddDetailOrder(dataDetail, customizationList)
       .then(() => {
         mReduceStock(qty, productid)
           .then(() => {

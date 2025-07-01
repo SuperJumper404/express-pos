@@ -1,16 +1,18 @@
-const { getShopInfo } = require("../controllers/c_shop");
-const { authentication } = require("../helpers/middleware/auth");
+const { getShopInfo, setShopInfo } = require("../controllers/c_shop");
+const { authentication, authAdmin } = require("../helpers/middleware/auth");
 
 const express = require("express");
+const singleUploadShopImg = require("../helpers/middleware/shop");
 const routers = express.Router();
 
-routers.get(
-  "/shopInfo",
-  //   (req) => {
-  //     console.log("HEADERS DEBUg", req.headers);
-  //   },
+routers.get("/shopInfo", authentication, authAdmin, getShopInfo);
+
+routers.patch(
+  "/setShopInfo",
   authentication,
-  getShopInfo
+  authAdmin,
+  singleUploadShopImg,
+  setShopInfo
 );
 // TODO modify shop info   .post("TOBEDEFINe", authentication, authAdmin, deleteUser);
 

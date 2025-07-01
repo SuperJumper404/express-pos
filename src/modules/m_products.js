@@ -24,11 +24,8 @@ WHERE products.id = ?
       [id],
       (err, result) => {
         if (err) {
-          console.log("Error DEtail Product", err);
           return reject(new Error(err));
         }
-        console.log("  IDDDD  DEtail Product", id);
-        console.log("  DEtail Product", result);
         // 2. Formatez le résultat selon la structure souhaitée
         let formattedResult = {
           id: result[0].id,
@@ -71,10 +68,10 @@ WHERE products.id = ?
           }
         });
 
-        console.log(
-          "Formated Detail Product ",
-          JSON.stringify(formattedResult)
-        );
+        // console.log(
+        //   "Formated Detail Product ",
+        //   JSON.stringify(formattedResult)
+        // );
 
         // 3. Retournez le résultat formaté
         resolve([formattedResult]);
@@ -229,7 +226,6 @@ module.exports = {
               .then((allDetailedProducts) => {
                 // Aplatir le tableau de tableaux en un tableau simple
                 const flattenedArray = [].concat(...allDetailedProducts);
-                console.log("AllDetailedProduct", flattenedArray);
                 resolve(flattenedArray);
               })
               .catch((err) => {

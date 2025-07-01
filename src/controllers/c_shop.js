@@ -1,4 +1,4 @@
-const { mGetShopInfo } = require("../modules/m_shop");
+const { mGetShopInfo, mUpdateShopInfo } = require("../modules/m_shop");
 
 const { custom, success, failed } = require("../helpers/response");
 const response = require("../helpers/response");
@@ -12,4 +12,9 @@ exports.getShopInfo = async (req, res) => {
       console.log("Error On getting shop info");
       failed(res, "Error On getting shop info", error.message);
     });
+};
+
+exports.setShopInfo = async (req, res) => {
+  console.log("Set Shop ", req.body);
+  mUpdateShopInfo(req.body, req.shopid);
 };
