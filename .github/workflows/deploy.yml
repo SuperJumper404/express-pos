@@ -23,6 +23,11 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           port: 22
           script: |
+            # Cloner le projet si dossier manquant
+            if [ ! -d /home/ubuntu/smarteat/backend ]; then
+              cd /home/ubuntu/smarteat
+              git clone --branch staging git@github.com:SuperJumper404/express-pos.git backend
+            fi
             cd /home/ubuntu/smarteat/backend
             git fetch origin
             git reset --hard origin/staging
