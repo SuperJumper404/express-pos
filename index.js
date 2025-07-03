@@ -29,6 +29,9 @@ app.use(`${prefix}`, routerCategory);
 app.use(`${prefix}`, routerStock);
 app.use(`${prefix}`, routerOrders);
 app.use(`${prefix}`, routerShop);
+app.get(`${prefix}/testapi`, (req, res) => {
+  res.json({ success: true, message: "API redirigée correctement 👌" });
+});
 app.use(`/api/v1/imgprofile`, express.static("./public/profile"));
 app.use(`/api/v1/imgproducts`, express.static("./public/products"));
 app.listen(envPORT, "0.0.0.0" || 5005, () => {
