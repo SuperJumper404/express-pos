@@ -1,1 +1,1 @@
-module.exports = '/api/v1'
+module.exports = "/baseurl/api/v1";

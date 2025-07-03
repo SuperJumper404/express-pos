@@ -29,8 +29,8 @@ app.use(`${prefix}`, routerCategory);
 app.use(`${prefix}`, routerStock);
 app.use(`${prefix}`, routerOrders);
 app.use(`${prefix}`, routerShop);
-app.use(`${prefix}/imgprofile`, express.static("./public/profile"));
-app.use(`${prefix}/imgproducts`, express.static("./public/products"));
+app.use(`/api/v1/imgprofile`, express.static("./public/profile"));
+app.use(`/api/v1/imgproducts`, express.static("./public/products"));
 app.listen(envPORT, "0.0.0.0" || 5005, () => {
   console.log(`Server is running on http://localhost:${envPORT || 5005}`);
 });
