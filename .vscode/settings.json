@@ -1,4 +1,5 @@
 {
   "workbench.colorTheme": "Atom One Dark",
-  "workbench.preferredHighContrastColorTheme": "Quiet Light"
+  "workbench.preferredHighContrastColorTheme": "Quiet Light",
+  "terminal.integrated.defaultProfile.linux": ""
 }
