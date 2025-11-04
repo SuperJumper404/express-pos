@@ -11,6 +11,17 @@ routers
   .patch("/orders/:id", authentication, orders.updateOrder)
   .post("/orders/delete/:id", authentication, orders.deleteOrder)
   .get("/ordersbyUserId", authentication, orders.ordersbyUserId)
-  .post("/orders/archive/:id", authentication, orders.archiveOrder);
+  .post("/orders/archive/:id", authentication, orders.archiveOrder)
+  .get("/orders/archives", authentication, orders.allArchivedOrders)
+  .get("/detailorder/archive/:id", authentication, orders.detailArchivedOrder)
+  .get("/orderbytoken/:id", orders.orderByToken)
+  .get("/metrics", authentication, orders.metrics);
+// URL : /metrics/abc123/2025-07-01/2025-07-22
+
+// .get(
+//   "/orders/archives/receipt/:id",
+//   authentication,
+//   orders.getReceiptTokenByOrder
+// );
 
 module.exports = routers;

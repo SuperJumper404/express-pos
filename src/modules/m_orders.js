@@ -1,4 +1,6 @@
+const { nanoid } = require("nanoid");
 const conn = require("../config/db");
+
 module.exports = {
   mAllOrder: (shopid) => {
     return new Promise((resolve, reject) => {
@@ -354,8 +356,8 @@ module.exports = {
           return;
         }
 
+        order[0].token = nanoid();
         console.log("Orders selected", order);
-
         // Insérer la commande dans la table archives
         conn.query(`INSERT INTO archives SET ?`, order[0], (err, result) => {
           if (err) {
@@ -425,6 +427,170 @@ module.exports = {
               );
             }
           );
+        });
+      });
+    });
+  },
+  mAllArchivedOrders: (shopid) => {
+    return new Promise((resolve, reject) => {
+      conn.query(
+        `SELECT archives.*, users.username FROM archives JOIN users ON archives.customerID = users.id WHERE archives.shopid = ? ORDER BY archives.created DESC`,
+        [shopid],
+        (err, result) => {
+          if (!err) {
+            resolve(result);
+          } else {
+            reject(new Error(err));
+          }
+        }
+      );
+    });
+  },
+  mDetailArchivedOrder: (id) => {
+    return new Promise((resolve, reject) => {
+      conn.query(
+        `SELECT *, archives.id as id FROM archives LEFT JOIN archivesdetail ON archives.id=archivesdetail.orderId LEFT JOIN products ON archivesdetail.productid=products.id WHERE archives.id='${id}' ORDER BY archives.created DESC`,
+        (err, result) => {
+          if (!err) {
+            //   const customizationPromises = [];
+
+            // result.forEach((row) => {
+            //   const customizationPromise = new Promise(
+            //     (subresolve, subreject) => {
+            //       conn.query(
+            //         `SELECT * FROM orders_customization  LEFT JOIN product_choice ON product_choice.id=orders_customization.product_choice_id WHERE order_id='${row.id}' AND product_id='${row.productid}' `,
+            //         (err, result) => {
+            //           if (!err) {
+            //             const mappedResult = {};
+            //             result.forEach((item) => {
+            //               // Si l'objet result n'a pas encore été initialisé pour cette commande, faites-le maintenant
+            //               if (!mappedResult.order_id) {
+            //                 mappedResult.order_id = item.order_id;
+            //                 mappedResult.product_id = item.product_id;
+            //                 mappedResult.price = item.price;
+            //                 mappedResult.customizationList = [];
+            //               }
+
+            //               // Ajoutez chaque personnalisation à la liste customList
+            //               mappedResult.customizationList.push({
+            //                 name: item.name,
+            //                 product_choice_id: item.product_choice_id,
+            //                 price: item.price,
+            //               });
+            //             });
+            //             console.log("SUB ROW", mappedResult);
+            //             subresolve(mappedResult);
+            //           } else {
+            //             subreject(new Error(err));
+            //           }
+            //         }
+            //       );
+            //     }
+            //   );
+            //   customizationPromises.push(customizationPromise);
+            // });
+            console.log("DEtail Order", result);
+            resolve(result);
+            // Promise.all(customizationPromises)
+            //   .then((customizationResults) => {
+            //     // Maintenant, nous parcourons le tableau de résultat principal
+            //     // et ajoutons les données de personnalisation correspondantes
+            //     const mergedResults = result.map((mainRow) => {
+            //       const customizationResult = customizationResults.find(
+            //         (customRow) => {
+            //           return (
+            //             customRow.order_id === mainRow.id &&
+            //             customRow.product_id === mainRow.productid
+            //           );
+            //         }
+            //       );
+
+            //       if (customizationResult) {
+            //         mainRow.customizationList =
+            //           customizationResult.customizationList;
+            //       }
+
+            //       return mainRow;
+            //     });
+
+            //     console.log("Merged Results", mergedResults);
+            //     resolve(mergedResults);
+            //   })
+            //   .catch((err) => {
+            //     reject(err);
+            //   });
+          } else {
+            reject(new Error(err));
+          }
+        }
+      );
+    });
+  },
+  mDetailArchivedOrderByToken: (token) => {
+    return new Promise((resolve, reject) => {
+      conn.query(
+        `SELECT *, archives.id as id FROM archives LEFT JOIN archivesdetail ON archives.id=archivesdetail.orderId LEFT JOIN products ON archivesdetail.productid=products.id WHERE archives.token='${token}'`,
+        (err, result) => {
+          if (!err) {
+            console.log("DEtail Order", result);
+            resolve(result);
+          } else {
+            reject(new Error(err));
+          }
+        }
+      );
+    });
+  },
+
+  mAllArchivedOrdersWithDetails: (shopId, from, to) => {
+    return new Promise((resolve, reject) => {
+      // Étape 1 : Récupérer les commandes archivées dans la plage de dates
+      const query1 = `
+      SELECT archives.*, users.username 
+      FROM archives 
+      JOIN users ON archives.customerID = users.id 
+      WHERE archives.shopid = ? 
+        AND DATE(archives.created) BETWEEN ? AND ? 
+      ORDER BY archives.created DESC`;
+
+      conn.query(query1, [shopId, from, to], (err, orders) => {
+        if (err) return reject(err);
+        if (!orders.length) return resolve([]);
+
+        const orderIds = orders.map((order) => order.id);
+
+        // Étape 2 : Récupérer les détails pour ces commandes
+        const query2 = `
+        SELECT 
+            archivesdetail.*, 
+            products.*, 
+            archivesdetail.orderId, 
+            archivesdetail.qty, 
+            archivesdetail.price AS detailPrice, 
+            products.price AS productPrice 
+        FROM archivesdetail 
+        LEFT JOIN products ON archivesdetail.productid = products.id 
+        WHERE archivesdetail.orderId IN (?)`;
+
+        conn.query(query2, [orderIds], (err, details) => {
+          if (err) return reject(err);
+
+          // Étape 3 : Organiser les détails par commande
+          const detailsMap = {};
+          for (const detail of details) {
+            if (!detailsMap[detail.orderId]) {
+              detailsMap[detail.orderId] = [];
+            }
+            detailsMap[detail.orderId].push(detail);
+          }
+
+          // Étape 4 : Associer les détails aux commandes
+          const enrichedOrders = orders.map((order) => ({
+            ...order,
+            details: detailsMap[order.id] || [],
+          }));
+
+          resolve(enrichedOrders);
         });
       });
     });

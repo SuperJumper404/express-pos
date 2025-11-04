@@ -11,6 +11,7 @@ module.exports = {
       });
     });
   },
+  /*
   mUpdateShopInfo: (data, id) => {
     return new Promise((resolve, reject) => {
       try {
@@ -61,6 +62,49 @@ module.exports = {
       } catch (error) {
         reject(new Error("Erreur interne: " + error.message));
       }
+    });
+  },*/
+  mUpdateShopInfo: (data, id) => {
+    return new Promise((resolve, reject) => {
+      if (!data || typeof data !== "object" || !id) {
+        return reject(new Error("Les données ou l'ID sont manquants"));
+      }
+
+      const sql = `
+  UPDATE shop
+  SET
+    shop_name = ?,
+    shop_description = ?,
+    shop_phone = ?,
+    shop_adress = ?,
+    hours = ?,
+    shop_payment_methods = ?,
+    shop_profile_image = ?,
+    shop_status = ?,
+    shop_printer_ip = ? 
+  WHERE id = ?
+`;
+      const values = [
+        data.shop_name,
+        data.shop_description,
+        data.shop_phone,
+        data.shop_adress,
+        JSON.stringify(data.hours),
+        JSON.stringify(data.shop_payment_methods),
+        data.shop_profile_image,
+        data.shop_status,
+        data.shop_printer_ip,
+        id, // ou req.shopid si c’est ça ta variable
+      ];
+
+      console.log("Data to update", data);
+      conn.query(sql, values, (err, result) => {
+        if (err) {
+          reject(new Error("Erreur SQL : " + JSON.stringify(err.message)));
+        } else {
+          resolve(result);
+        }
+      });
     });
   },
 };
