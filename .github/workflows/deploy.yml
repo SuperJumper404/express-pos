@@ -8,7 +8,7 @@ on:
 
 jobs:
   deploy:
-    runs-on: smarteat-runner
+    runs-on: smarteat-runner-backend
 
     steps:
       - name: Deploy on server
