@@ -6,6 +6,7 @@ const routerCategory = require("./src/routers/r_category");
 const routerStock = require("./src/routers/stocks");
 const routerOrders = require("./src/routers/r_orders");
 const routerShop = require("./src/routers/r_shop");
+const routerPrinting = require("./src/routers/r_printing");
 const { envPORT } = require("./src/helpers/env");
 const prefix = require("./src/config/prefix");
 const app = express();
@@ -32,6 +33,7 @@ app.use(`${prefix}`, routerCategory);
 app.use(`${prefix}`, routerStock);
 app.use(`${prefix}`, routerOrders);
 app.use(`${prefix}`, routerShop);
+app.use(`${prefix}`, routerPrinting);
 app.get(`${prefix}/testapi`, (req, res) => {
   res.json({ success: true, message: "API redirigée correctement 👌" });
 });

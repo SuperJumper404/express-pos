@@ -192,9 +192,10 @@ exports.updateOrder = async (req, res) => {
 
 exports.archiveOrder = (req, res) => {
   const id = req.params.id;
-  console.log("On passe ici", id);
+  const payment_method = req.body.payment_method;
+  console.log("On passe ici", id, req);
 
-  mArchiveOrder(id)
+  mArchiveOrder(id, payment_method)
     .then((response) => {
       if (response.affectedRows) {
         success(res, "Archive order success!", null, null);
@@ -255,10 +256,12 @@ exports.metrics = async (req, res) => {
   let { from, to } = req.query;
 
   if (!from) {
+    console.warn("Paramètre 'from' manquant, utilisation de la date du jour");
     from = new Date().toISOString().split("T")[0]; // date du jour
   }
 
   if (!to) {
+    console.warn("Paramètre 'to' manquant, utilisation de la date du jour");
     to = from; // tu peux modifier selon la logique métier
   }
 
@@ -272,7 +275,7 @@ exports.metrics = async (req, res) => {
   };
 
   metrics.averageOrder = Number(
-    metrics.totalRevenue / metrics.totalOrders
+    metrics.totalRevenue / metrics.totalOrders,
   ).toFixed(2);
 
   metrics.averageOrderPreparationTime =
@@ -281,8 +284,8 @@ exports.metrics = async (req, res) => {
   metrics.paymentsSummary = getPaymentsSummary(allOrders);
   metrics.topProducts = getTopProducts(allOrders);
   // TODO: ta logique de récupération des métriques ici
-  console.log(JSON.stringify(allOrders, null, 2));
-  console.log(metrics);
+  console.log("All Orderss", JSON.stringify(allOrders, null, 2));
+  console.log("Metrics:", metrics);
   res.json({
     message: "Métriques récupérées avec succès",
     shopId,
@@ -360,7 +363,8 @@ function getTopProducts(allOrders) {
 
 function getAverageOrderPreparationTime(orders) {
   const validOrders = orders.filter(
-    (o) => o.created && o.finished && new Date(o.finished) > new Date(o.created)
+    (o) =>
+      o.created && o.finished && new Date(o.finished) > new Date(o.created),
   );
 
   if (validOrders.length === 0) return 0;

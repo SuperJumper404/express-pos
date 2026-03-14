@@ -10,7 +10,7 @@ module.exports = {
           } else {
             reject(new Error(error));
           }
-        }
+        },
       );
     });
   },
@@ -38,7 +38,7 @@ module.exports = {
           } else {
             reject(new Error(err));
           }
-        }
+        },
       );
     });
   },
@@ -53,7 +53,7 @@ module.exports = {
           } else {
             reject(new Error(err));
           }
-        }
+        },
       );
     });
   },
@@ -68,7 +68,7 @@ module.exports = {
           } else {
             reject(new Error(err));
           }
-        }
+        },
       );
     });
   },
@@ -86,14 +86,14 @@ module.exports = {
   mProfileMe: (token) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        `SELECT id,shopid, username, firstname, lastname, email, token, expired, phone, gender, position, image, status, access, created, updated FROM users WHERE token='${token}'`,
+        `SELECT id,shopid, username, email, token, expired, phone, gender, position, image, status, access, created, updated FROM users WHERE token='${token}'`,
         (err, result) => {
           if (!err) {
             resolve(result);
           } else {
             reject(new Error(error));
           }
-        }
+        },
       );
     });
   },
@@ -108,7 +108,7 @@ module.exports = {
           } else {
             reject(new Error(err));
           }
-        }
+        },
       );
     });
   },
@@ -127,14 +127,14 @@ module.exports = {
   mDetailUser: (id) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        `SELECT id, shopid, username, firstname, lastname, email, token, expired, phone, gender, position, image, status, access, created, updated FROM users WHERE id='${id}'`,
+        `SELECT id, shopid, username, email, token, expired, phone, gender, position, image, status, access, created, updated FROM users WHERE id='${id}'`,
         (err, result) => {
           if (!err) {
             resolve(result);
           } else {
             reject(new Error(err));
           }
-        }
+        },
       );
     });
   },
@@ -149,7 +149,7 @@ module.exports = {
           } else {
             reject(new Error(err));
           }
-        }
+        },
       );
     });
   },

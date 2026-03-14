@@ -77,11 +77,14 @@ module.exports = {
     shop_description = ?,
     shop_phone = ?,
     shop_adress = ?,
+    shop_siret = ?,
     hours = ?,
+    shop_social_media = ?,
     shop_payment_methods = ?,
     shop_profile_image = ?,
     shop_status = ?,
-    shop_printer_ip = ? 
+    shop_printer_ip = ?,
+    smart_print_app = ? 
   WHERE id = ?
 `;
       const values = [
@@ -89,11 +92,14 @@ module.exports = {
         data.shop_description,
         data.shop_phone,
         data.shop_adress,
+        data.shop_siret,
         JSON.stringify(data.hours),
+        JSON.stringify(data.shop_social_media),
         JSON.stringify(data.shop_payment_methods),
         data.shop_profile_image,
         data.shop_status,
         data.shop_printer_ip,
+        data.smart_print_app,
         id, // ou req.shopid si c’est ça ta variable
       ];
 

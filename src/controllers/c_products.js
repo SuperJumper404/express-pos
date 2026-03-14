@@ -4,6 +4,8 @@ const {
   mDetailProduct,
   mUpdateProduct,
   mDeleteProduct,
+  mUsedProduct,
+  mArchiveProduct,
 } = require("../modules/m_products");
 const { success, custom, failed } = require("../helpers/response");
 const fs = require("fs");
@@ -64,7 +66,11 @@ module.exports = {
       body.image = req.file.filename;
       const path = `./public/products/${detail[0].image}`;
       if (fs.existsSync(path)) {
-        fs.unlinkSync(path);
+        try {
+          fs.unlinkSync(path);
+        } catch (err) {
+          console.error(err);
+        }
       }
       mUpdateProduct(body, id)
         .then(() => {
@@ -87,19 +93,33 @@ module.exports = {
     try {
       const id = req.params.id;
       const callDetail = await mDetailProduct(id);
-      mDeleteProduct(id)
-        .then((response) => {
-          if (response.affectedRows) {
-            const locationPath = `./public/products/${callDetail[0].image}`;
-            fs.unlinkSync(locationPath);
-            success(res, "Delete product success!", {}, null);
-          } else {
-            custom(res, 404, "Id product not found!", null, null);
-          }
-        })
-        .catch((error) => {
-          failed(res, "Internal server error!", error.message);
-        });
+      const isUsedProduct = await mUsedProduct(id);
+      console.log("isUsedProduct", isUsedProduct);
+      if (isUsedProduct[0].cnt > 0) {
+        console.log("Product used, archive it", id);
+        await mArchiveProduct(id)
+          .then(() => {
+            success(res, "Archive product success!", {}, null);
+          })
+          .catch((error) => {
+            failed(res, "Internal server error!", error.message);
+          });
+      } else {
+        console.log("Product not used, delete it", id);
+        mDeleteProduct(id)
+          .then((response) => {
+            if (response.affectedRows) {
+              const locationPath = `./public/products/${callDetail[0].image}`;
+              fs.unlinkSync(locationPath);
+              success(res, "Delete product success!", {}, null);
+            } else {
+              custom(res, 404, "Id product not found!", null, null);
+            }
+          })
+          .catch((error) => {
+            failed(res, "Internal server error!", error.message);
+          });
+      }
     } catch (error) {
       failed(res, "Internal server error!", error.message);
     }

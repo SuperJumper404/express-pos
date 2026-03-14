@@ -18,7 +18,7 @@ routers.patch(
   authentication,
   authAdmin,
   singleUploadShopImg,
-  updateShopInfo
+  updateShopInfo,
 );
 // TODO modify shop info   .post("TOBEDEFINe", authentication, authAdmin, deleteUser);
 

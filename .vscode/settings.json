@@ -1,5 +1,7 @@
 {
   "workbench.colorTheme": "Atom One Dark",
   "workbench.preferredHighContrastColorTheme": "Quiet Light",
-  "terminal.integrated.defaultProfile.linux": ""
+  "terminal.integrated.defaultProfile.linux": "",
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.formatOnSave": true
 }

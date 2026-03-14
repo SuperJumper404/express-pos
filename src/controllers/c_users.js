@@ -30,7 +30,7 @@ module.exports = {
           const password = await bcrypt.hashSync(body.password, salt);
           const token = jwt.sign(
             { username: body.username, phone: body.phone, create: new Date() },
-            envJWTKEY
+            envJWTKEY,
           );
           const data = {
             username: body.username,
@@ -95,6 +95,7 @@ module.exports = {
       });
   },
   login: (req, res) => {
+    console.log("Login body", req.body);
     const body = req.body;
     mCheckEmail(body.email)
       .then(async (response) => {
@@ -136,7 +137,7 @@ module.exports = {
                 422,
                 `Your account isn't activated yet! Check your email!`,
                 {},
-                null
+                null,
               );
             }
           } else {

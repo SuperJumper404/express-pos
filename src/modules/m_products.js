@@ -6,7 +6,7 @@ const mDetailProduct = function (id) {
     conn.query(
       `SELECT 
       products.*, 
-  category.name AS category ,
+  category.name AS category , category.id AS categoryid,
   product_customization.id AS customization_id,
   product_customization.name AS customization_name,
   product_customization.description AS customization_description,
@@ -32,10 +32,12 @@ WHERE products.id = ?
           name: result[0].name,
           shopid: result[0].shopid,
           description: result[0].description,
-          categoryid: result[0].category,
+          category: result[0].category,
+          categoryid: result[0].categoryid,
           price: result[0].price,
           stock: result[0].stock,
           image: result[0].image,
+          archived: result[0].archived,
           product_customization: [],
         };
 
@@ -44,7 +46,7 @@ WHERE products.id = ?
             // Nous nous assurons qu'il y a un choix valide pour cette customisation
             let existingCustomization =
               formattedResult.product_customization.find(
-                (c) => c.name === row.customization_name
+                (c) => c.name === row.customization_name,
               );
 
             if (!existingCustomization) {
@@ -75,7 +77,7 @@ WHERE products.id = ?
 
         // 3. Retournez le résultat formaté
         resolve([formattedResult]);
-      }
+      },
     );
   });
 };
@@ -146,7 +148,7 @@ module.exports = {
                             insertCustomization(index + 1);
                           }
                         }
-                      }
+                      },
                     );
                   });
                 } else if (index === data.product_customization.length - 1) {
@@ -154,7 +156,7 @@ module.exports = {
                 } else {
                   insertCustomization(index + 1);
                 }
-              }
+              },
             );
           })(0); // Commencez par la première customisation
         } else {
@@ -234,7 +236,7 @@ module.exports = {
           } else {
             reject(new Error(err));
           }
-        }
+        },
       );
     });
   },
@@ -326,7 +328,7 @@ module.exports = {
                           resolve(true);
                         }
                       }
-                    }
+                    },
                   );
                 } else {
                   choice.product_customization_id = customizationId;
@@ -346,7 +348,7 @@ module.exports = {
                           resolve(true);
                         }
                       }
-                    }
+                    },
                   );
                 }
               });
@@ -362,7 +364,7 @@ module.exports = {
                     return reject(new Error(err));
                   }
                   handleChoices(customization.id);
-                }
+                },
               );
             } else {
               customization.product_id = id;
@@ -375,11 +377,11 @@ module.exports = {
                     return reject(new Error(err));
                   }
                   handleChoices(result.insertId);
-                }
+                },
               );
             }
           });
-        }
+        },
       );
     });
   },
@@ -400,7 +402,7 @@ module.exports = {
                     console.log(err);
                     return reject(new Error(err));
                   }
-                }
+                },
               );
             });
             result.forEach((row) => {
@@ -412,7 +414,7 @@ module.exports = {
                     console.log(err);
                     return reject(new Error(err));
                   }
-                }
+                },
               );
             });
             conn.query(
@@ -423,14 +425,14 @@ module.exports = {
                   console.log(err);
                   return reject(new Error(err));
                 } else resolve({ message: "Products deleted", result });
-              }
+              },
             );
             resolve(result);
           } else {
             console.log("Error", err);
             reject(new Error(err));
           }
-        }
+        },
       );
 
       // conn.query("DELETE FROM products WHERE id = ?", [id], (err, result) => {
@@ -440,6 +442,33 @@ module.exports = {
       //     reject(new Error(err));
       //   }
       // });
+    });
+  },
+  mUsedProduct(id) {
+    return new Promise((resolve, reject) => {
+      conn.query(
+        "SELECT COUNT(*) AS cnt FROM archivesdetail WHERE productid = ?",
+        [id],
+        (err, result) => {
+          if (err) {
+            reject(new Error(err));
+          } else {
+            resolve(result);
+          }
+        },
+      );
+    });
+  },
+  mArchiveProduct(id) {
+    return new Promise((resolve, reject) => {
+      conn.query(
+        "UPDATE products SET archived = 1 WHERE id = ?",
+        [id],
+        (err, result) => {
+          if (err) return reject(err);
+          resolve(result); // result.affectedRows should be 1 if updated
+        },
+      );
     });
   },
 };

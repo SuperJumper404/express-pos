@@ -1,36 +1,39 @@
-name: Deploy to EC2
+name: Deploy Backend to EC2
 
 on:
   push:
     branches:
       - staging
-
   workflow_dispatch:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: smarteat-runner
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Deploy to EC2 via SSH
-        uses: appleboy/ssh-action@v1.0.0
+      - name: Deploy on server
+        uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
+          host: 192.168.1.179
+          username: webserversmarteat
+          password: root
           port: 22
+          script_stop: true
           script: |
-            # Cloner le projet si dossier manquant
-            if [ ! -d /home/ubuntu/smarteat/backend ]; then
-              cd /home/ubuntu/smarteat
-              mkdir backend
-              git clone --branch staging git@github.com:SuperJumper404/express-pos.git backend
-            fi
-            cd /home/ubuntu/smarteat/backend
-            git fetch origin
-            git reset --hard origin/staging
+            set -e
+
+            APP_DIR=/home/webserversmarteat/smarteat/backend
+            APP_NAME=backend_smart_eat_staging
+            BRANCH=staging
+            REPO_URL=https://github.com/SuperJumper404/express-pos.git
+
+            rm -rf "$APP_DIR"
+            git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
+
+            cd "$APP_DIR"
+
             npm install
-            npx pm2 start ecosystem.config.js --env staging || npx pm2 restart backend_smart_eat_staging
+
+            pm2 delete "$APP_NAME" || true
+            pm2 start ecosystem.config.js --env staging --name "$APP_NAME"
+            pm2 save

@@ -13,7 +13,7 @@ module.exports = {
           } else {
             reject(new Error(err));
           }
-        }
+        },
       );
     });
   },
@@ -46,25 +46,32 @@ module.exports = {
   mDetailOrder: (id) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        `SELECT *, orders.id as id FROM orders LEFT JOIN orderdetail ON orders.id=orderdetail.orderId LEFT JOIN products ON orderdetail.productid=products.id WHERE orders.id='${id}' ORDER BY orders.created DESC`,
+        `SELECT *, orders.id as id, orderdetail.id as orderDetailsId FROM orders LEFT JOIN orderdetail ON orders.id=orderdetail.orderId LEFT JOIN products ON orderdetail.productid=products.id WHERE orders.id='${id}' ORDER BY orders.created DESC`,
         (err, result) => {
           if (!err) {
             const customizationPromises = [];
 
             result.forEach((row) => {
+              console.log("ROW FIRST", row);
               const customizationPromise = new Promise(
                 (subresolve, subreject) => {
                   conn.query(
-                    `SELECT * FROM orders_customization  LEFT JOIN product_choice ON product_choice.id=orders_customization.product_choice_id WHERE order_id='${row.id}' AND product_id='${row.productid}' `,
+                    `SELECT * FROM orders_customization  LEFT JOIN product_choice ON product_choice.id=orders_customization.product_choice_id WHERE order_id='${row.id}' AND product_id='${row.productid}' AND order_details_id='${row.orderDetailsId}' `,
                     (err, result) => {
+                      console.log(
+                        "CUSTOMIZATION RESULT",
+                        JSON.stringify(result, null, 2),
+                      );
                       if (!err) {
                         const mappedResult = {};
                         result.forEach((item) => {
-                          // Si l'objet result n'a pas encore été initialisé pour cette commande, faites-le maintenant
+                          console.log("ITEM", item);
                           if (!mappedResult.order_id) {
                             mappedResult.order_id = item.order_id;
                             mappedResult.product_id = item.product_id;
                             mappedResult.price = item.price;
+                            mappedResult.order_details_id =
+                              item.order_details_id;
                             mappedResult.customizationList = [];
                           }
 
@@ -80,36 +87,44 @@ module.exports = {
                       } else {
                         subreject(new Error(err));
                       }
-                    }
+                    },
                   );
-                }
+                },
               );
               customizationPromises.push(customizationPromise);
             });
-            console.log("DEtail Order", result);
             Promise.all(customizationPromises)
               .then((customizationResults) => {
                 // Maintenant, nous parcourons le tableau de résultat principal
                 // et ajoutons les données de personnalisation correspondantes
+                console.log(
+                  "Customization Results",
+                  JSON.stringify(customizationResults, null, 2),
+                );
                 const mergedResults = result.map((mainRow) => {
+                  console.log("MAIN ROW", mainRow);
                   const customizationResult = customizationResults.find(
                     (customRow) => {
                       return (
                         customRow.order_id === mainRow.id &&
-                        customRow.product_id === mainRow.productid
+                        customRow.product_id === mainRow.productid &&
+                        customRow.order_details_id === mainRow.orderDetailsId
                       );
-                    }
+                    },
                   );
-
+                  console.log("FOUND CUSTOMIZATION", customizationResult);
                   if (customizationResult) {
                     mainRow.customizationList =
                       customizationResult.customizationList;
                   }
-
+                  console.log("MERGED ROW", mainRow);
                   return mainRow;
                 });
 
-                console.log("Merged Results", mergedResults);
+                console.log(
+                  "Merged Results",
+                  JSON.stringify(mergedResults, null, 2),
+                );
                 resolve(mergedResults);
               })
               .catch((err) => {
@@ -118,7 +133,7 @@ module.exports = {
           } else {
             reject(new Error(err));
           }
-        }
+        },
       );
     });
   },
@@ -136,6 +151,7 @@ module.exports = {
   mAddDetailOrder: (data, customizationList) => {
     return new Promise((resolve, reject) => {
       conn.query("INSERT INTO orderdetail SET ? ", data, (err, result) => {
+        console.log("ADD DETAIL ORDER", err, result);
         if (!err) {
           let insertPromises = [];
           console.log("FLAG", customizationList);
@@ -143,6 +159,7 @@ module.exports = {
             customizationList.forEach((element) => {
               const orderCustomizationData = {
                 order_id: data.orderid,
+                order_details_id: result.insertId,
                 product_id: data.productid,
                 product_choice_id: element.id,
               };
@@ -157,7 +174,7 @@ module.exports = {
                     } else {
                       innerReject(new Error(err));
                     }
-                  }
+                  },
                 );
               });
               insertPromises.push(promise);
@@ -186,7 +203,7 @@ module.exports = {
           } else {
             reject(new Error(err));
           }
-        }
+        },
       );
     });
   },
@@ -212,7 +229,7 @@ module.exports = {
           } else {
             reject(new Error(err));
           }
-        }
+        },
       );
     });
   },
@@ -232,7 +249,7 @@ module.exports = {
               return;
             }
             resolve([result1, result2]);
-          }
+          },
         );
       });
     });
@@ -347,7 +364,7 @@ module.exports = {
   //     });
   //   });
   // },
-  mArchiveOrder: (id) => {
+  mArchiveOrder: (id, payment_method) => {
     return new Promise((resolve, reject) => {
       // Récupérer les détails de la commande
       conn.query(`SELECT * FROM orders WHERE id = ?`, [id], (err, order) => {
@@ -357,6 +374,7 @@ module.exports = {
         }
 
         order[0].token = nanoid();
+        order[0].used_payment_method = payment_method;
         console.log("Orders selected", order);
         // Insérer la commande dans la table archives
         conn.query(`INSERT INTO archives SET ?`, order[0], (err, result) => {
@@ -397,7 +415,7 @@ module.exports = {
                       reject(err);
                       return;
                     }
-                  }
+                  },
                 );
               }
 
@@ -421,11 +439,11 @@ module.exports = {
                       }
 
                       resolve(result);
-                    }
+                    },
                   );
-                }
+                },
               );
-            }
+            },
           );
         });
       });
@@ -442,7 +460,7 @@ module.exports = {
           } else {
             reject(new Error(err));
           }
-        }
+        },
       );
     });
   },
@@ -522,7 +540,7 @@ module.exports = {
           } else {
             reject(new Error(err));
           }
-        }
+        },
       );
     });
   },
@@ -537,7 +555,7 @@ module.exports = {
           } else {
             reject(new Error(err));
           }
-        }
+        },
       );
     });
   },
