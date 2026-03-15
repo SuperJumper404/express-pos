@@ -12,7 +12,11 @@
     "db:up": "dbmate --migrations-dir=db/migrations up",
     "db:migrate": "dbmate --migrations-dir=db/migrations migrate",
     "db:rollback": "dbmate --migrations-dir=db/migrations rollback",
-    "db:up:staging": "dotenv -e .env.staging -- dbmate --migrations-dir=db/migrations up"
+    "db:up:staging": "dotenv -e .env.staging -- dbmate --migrations-dir=db/migrations up",
+    "env:encrypt:staging": "dotenvx encrypt -f .env.staging",
+    "env:encrypt:production": "dotenvx encrypt -f .env.production",
+    "env:decrypt:staging": "dotenvx decrypt -f .env.staging",
+    "env:decrypt:production": "dotenvx decrypt -f .env.production"
   },
   "author": "Tomi Mandala Putra",
   "license": "ISC",
@@ -30,6 +34,7 @@
     "nodemon": "^2.0.7"
   },
   "devDependencies": {
+    "@dotenvx/dotenvx": "^1.55.1",
     "cross-env": "^10.1.0",
     "dbmate": "^2.31.0"
   }

@@ -33,6 +33,10 @@ jobs:
             cd "$APP_DIR"
 
             npm install
+
+            export DOTENV_PRIVATE_KEY_STAGING='${{ secrets.DOTENV_PRIVATE_KEY_STAGING }}'
+            npx dotenvx decrypt -f .env.staging
+
             #Migrations
             npm run db:up:staging
 
