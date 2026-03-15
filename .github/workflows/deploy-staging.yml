@@ -39,6 +39,8 @@ jobs:
             set -a
             . ./.env.staging
             set +a
+            cat .env.staging
+            printenv
 
             #Migrations
             npm run db:up:staging

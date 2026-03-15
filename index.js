@@ -40,5 +40,5 @@ app.get(`${prefix}/testapi`, (req, res) => {
 app.use(`/api/v1/imgprofile`, express.static("./public/shop"));
 app.use(`/api/v1/imgproducts`, express.static("./public/products"));
 app.listen(envPORT, "0.0.0.0" || 5005, () => {
-  console.log(`Server is running on  http://localhost:${envPORT || 5005}`);
+  console.log(`Server is running onn  http://localhost:${envPORT || 5005}`);
 });
