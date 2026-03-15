@@ -19,6 +19,7 @@ module.exports = {
     }
     body.image = req.file.filename;
     body.shopid = req.shopid;
+    body.created = new Date();
     if (!body.name || !body.categoryid || !body.price || !body.stock) {
       const locationPath = `./public/products/${req.file.filename}`;
       fs.unlinkSync(locationPath);
