@@ -4,7 +4,7 @@
   "description": "Restfull API pos using expressJS etc.",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "echo \"Error: no test sspecified\" && exit 1",
     "start": " cross-env NODE_ENV=local nodemon index.js",
     "startAndWatch": "cross-env NODE_ENV=local nodemon --watch src index.js",
     "network": " cross-env NODE_ENV=local nodemon index.js ",
