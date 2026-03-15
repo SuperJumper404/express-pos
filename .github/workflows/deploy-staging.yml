@@ -37,10 +37,10 @@ jobs:
             export DOTENV_PRIVATE_KEY_STAGING='${{ secrets.DOTENV_PRIVATE_KEY_STAGING }}'
             npx dotenvx decrypt -f .env.staging
             ls -la
+            cat .env.staging
             set -a
             . ./.env.staging
             set +a
-            cat .env.staging
             printenv
 
             #Migrations
