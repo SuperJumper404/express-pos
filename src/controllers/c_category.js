@@ -10,6 +10,7 @@ module.exports = {
   addCategory: (req, res) => {
     let body = req.body;
     body.shopid = req.shopid;
+    body.created = new Date();
     if (!body.name) {
       custom(res, 400, "Bad request!", {}, null);
     } else {
