@@ -83,6 +83,7 @@ exports.addOrder = (req, res) => {
       phone: body.phone,
       status: body.status,
       created: new Date().toISOString().slice(0, 19).replace("T", " "),
+      finished: new Date().toISOString().slice(0, 19).replace("T", " "),
       shopid: req.shopid,
     };
     mAddOrders(data)
