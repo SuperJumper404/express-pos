@@ -36,6 +36,9 @@ jobs:
 
             export DOTENV_PRIVATE_KEY_STAGING='${{ secrets.DOTENV_PRIVATE_KEY_STAGING }}'
             npx dotenvx decrypt -f .env.staging
+            set -a
+            . ./.env.staging
+            set +a
 
             #Migrations
             npm run db:up:staging
