@@ -1,5 +1,5 @@
 const multer = require("multer");
-const { envPUBLICIMAGEPATH } = require("./src/helpers/env");
+const { envPUBLICIMAGEPATH } = require("../env");
 const path = require("path");
 const limitFile = 3; // Megabyte
 

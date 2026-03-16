@@ -8,7 +8,7 @@ const {
   mArchiveProduct,
 } = require("../modules/m_products");
 const path = require("path");
-const { envPUBLICIMAGEPATH } = require("./src/helpers/env");
+const { envPUBLICIMAGEPATH } = require("../helpers/env");
 const { success, custom, failed } = require("../helpers/response");
 const fs = require("fs");
 
