@@ -42,6 +42,7 @@ module.exports = {
             status: 1,
             token: token,
             shopid: req.shopid,
+            created: new Date(),
           };
           // create token
 
