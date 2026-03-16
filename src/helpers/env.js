@@ -16,6 +16,7 @@ module.exports = {
   envEMAIL: process.env.EMAIL,
   envAPIKEY: process.env.MAILAPIKEY,
   envSECRETKEY: process.env.MAILSECRETKEY,
+  envPUBLICIMAGEPATH: process.env.PUBLICIMAGEPATH,
 };
 
 console.log("Loaded env file:", `.env.${env}`);
