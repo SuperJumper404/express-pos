@@ -194,7 +194,7 @@ exports.updateOrder = async (req, res) => {
 exports.archiveOrder = (req, res) => {
   const id = req.params.id;
   const payment_method = req.body.payment_method;
-  console.log("On passe ici", id, req);
+  console.log("On passe icii", id, req);
 
   mArchiveOrder(id, payment_method)
     .then((response) => {
