@@ -49,5 +49,5 @@ app.use(
   express.static(path.join(envPUBLICIMAGEPATH, "shop")),
 );
 app.listen(envPORT, "0.0.0.0" || 5005, () => {
-  console.log(`Server is running onn  http://localhost:${envPORT || 5005}`);
+  console.log(`Server is running onn  http://localhosst:${envPORT || 5005}`);
 });
