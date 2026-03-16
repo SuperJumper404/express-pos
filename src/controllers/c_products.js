@@ -7,6 +7,8 @@ const {
   mUsedProduct,
   mArchiveProduct,
 } = require("../modules/m_products");
+const path = require("path");
+const { envPUBLICIMAGEPATH } = require("./src/helpers/env");
 const { success, custom, failed } = require("../helpers/response");
 const fs = require("fs");
 
@@ -21,7 +23,11 @@ module.exports = {
     body.shopid = req.shopid;
     body.created = new Date();
     if (!body.name || !body.categoryid || !body.price || !body.stock) {
-      const locationPath = `./public/products/${req.file.filename}`;
+      const locationPath = path.join(
+        envPUBLICIMAGEPATH,
+        "products",
+        req.file.filename,
+      );
       fs.unlinkSync(locationPath);
       custom(res, 400, "Bad request", {}, null);
     } else {
@@ -65,7 +71,7 @@ module.exports = {
     const detail = await mDetailProduct(id);
     if (req.file) {
       body.image = req.file.filename;
-      const path = `./public/products/${detail[0].image}`;
+      const path = path.join(envPUBLICIMAGEPATH, "products", detail[0].image);
       if (fs.existsSync(path)) {
         try {
           fs.unlinkSync(path);
@@ -110,7 +116,11 @@ module.exports = {
         mDeleteProduct(id)
           .then((response) => {
             if (response.affectedRows) {
-              const locationPath = `./public/products/${callDetail[0].image}`;
+              const locationPath = path.join(
+                envPUBLICIMAGEPATH,
+                "products",
+                callDetail[0].image,
+              );
               fs.unlinkSync(locationPath);
               success(res, "Delete product success!", {}, null);
             } else {
