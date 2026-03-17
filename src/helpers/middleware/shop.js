@@ -4,13 +4,18 @@ const limitFile = 3; // Megabyte
 
 const { custom, failed } = require("../response");
 
-// setting diskStorage
 const multerStorage = multer.diskStorage({
   destination: (req, file, callback) => {
-    callback(null, `./public/shop`);
+    try {
+      const dest = path.join(envPUBLICIMAGEPATH, "shop");
+      callback(null, dest);
+    } catch (err) {
+      console.error("Multer destination error:", err);
+      callback(err);
+    }
   },
   filename: (req, file, callback) => {
-    callback(null, `${Date.now()}${path.extname(file.originalname)}`); // ext originalname => img.png/img.jpg
+    callback(null, `${Date.now()}${path.extname(file.originalname)}`);
   },
 });
 
@@ -36,7 +41,7 @@ const multerUploadImg = multer({
           error: "Wrong type extention!",
           code: "typeExtWrong",
         },
-        false
+        false,
       );
     }
   },
@@ -56,7 +61,7 @@ const singleUploadShopImg = (req, res, next) => {
             400,
             `File size exceeds the ${limitFile} Mb limit`,
             {},
-            null
+            null,
           );
         } else if (error.code === "typeExtWrong") {
           return custom(res, 400, "Wrong type extention!", {}, null);

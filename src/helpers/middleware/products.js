@@ -20,6 +20,7 @@ const multerStorage = multer.diskStorage({
     callback(null, `${Date.now()}${path.extname(file.originalname)}`);
   },
 });
+
 // setting conneting multer with storage
 const multerUploadImg = multer({
   storage: multerStorage,
