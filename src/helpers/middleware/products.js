@@ -6,16 +6,20 @@ const limitFile = 3; // Megabyte
 const { custom, failed } = require("../response");
 
 // setting diskStorage
-
 const multerStorage = multer.diskStorage({
   destination: (req, file, callback) => {
-    callback(null, path.join(envPUBLICIMAGEPATH, "products"));
+    try {
+      const dest = path.join(envPUBLICIMAGEPATH, "products");
+      callback(null, dest);
+    } catch (err) {
+      console.error("Multer destination error:", err);
+      callback(err);
+    }
   },
   filename: (req, file, callback) => {
     callback(null, `${Date.now()}${path.extname(file.originalname)}`);
   },
 });
-
 // setting conneting multer with storage
 const multerUploadImg = multer({
   storage: multerStorage,

@@ -10,6 +10,19 @@ const routerShop = require("./src/routers/r_shop");
 const routerPrinting = require("./src/routers/r_printing");
 const { envPORT, envPUBLICIMAGEPATH } = require("./src/helpers/env");
 const prefix = require("./src/config/prefix");
+
+const fs = require("fs");
+
+const productsPath = path.join(envPUBLICIMAGEPATH, "products");
+const shopPath = path.join(envPUBLICIMAGEPATH, "shop");
+
+if (!fs.existsSync(productsPath)) {
+  fs.mkdirSync(productsPath, { recursive: true });
+}
+if (!fs.existsSync(shopPath)) {
+  fs.mkdirSync(shopPath, { recursive: true });
+}
+
 const app = express();
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
@@ -38,7 +51,7 @@ app.use(`${prefix}`, routerPrinting);
 app.get(`${prefix}/testapi`, (req, res) => {
   res.json({ success: true, message: "API redirigée correctement 👌" });
 });
-
+console.log("Public Image Path:", envPUBLICIMAGEPATH);
 app.use(
   "/api/v1/imgproducts",
   express.static(path.join(envPUBLICIMAGEPATH, "products")),
