@@ -29,10 +29,10 @@ const DEFAULT_SHOP_HOURS = [
 ];
 
 const DEFAULT_SHOP_SOCIAL_MEDIA = {
-  instagram: "https://www.instagram.com/freebala._/",
-  snapchat: "https://www.instagram.com/freebala._/",
-  facebook: "https://www.instagram.com/freebala._/",
-  tiktok: "https://www.instagram.com/freebala._/",
+  instagram: "https://www.instagram.com/",
+  snapchat: "https://www.snapchat.com/",
+  facebook: "https://www.facebook.com/",
+  tiktok: "https://www.tiktok.com/",
   twitter: "",
 };
 
@@ -100,7 +100,12 @@ exports.createAndInitializeShop = async (req, res) => {
 
     const createdShop = await mCreateAndInitializeShop(data);
 
-    success(res, "Shop created and initialized successfully", null, createdShop);
+    success(
+      res,
+      "Shop created and initialized successfully",
+      null,
+      createdShop,
+    );
   } catch (error) {
     failed(res, "Error while creating and initializing shop", error.message);
   }
