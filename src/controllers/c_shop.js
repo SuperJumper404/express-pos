@@ -12,6 +12,30 @@ const path = require("path");
 const bcrypt = require("bcrypt");
 const { nanoid } = require("nanoid");
 
+const DEFAULT_SHOP_PAYMENT_METHODS = [
+  "Tickets Restaurants",
+  "Cheques",
+  "Especes",
+];
+
+const DEFAULT_SHOP_HOURS = [
+  { dayName: "Lundi", isOpen: true, from: 8, to: 20 },
+  { dayName: "Mardi", isOpen: true, from: 8, to: 20 },
+  { dayName: "Mercredi", isOpen: false, from: 8, to: 20 },
+  { dayName: "Jeudi", isOpen: true, from: 8, to: "19" },
+  { dayName: "Vendredi", isOpen: true, from: 8, to: 20 },
+  { dayName: "Samedi", isOpen: true, from: 8, to: "19" },
+  { dayName: "Dimanche", isOpen: true, from: 0, to: 0 },
+];
+
+const DEFAULT_SHOP_SOCIAL_MEDIA = {
+  instagram: "https://www.instagram.com/freebala._/",
+  snapchat: "https://www.instagram.com/freebala._/",
+  facebook: "https://www.instagram.com/freebala._/",
+  tiktok: "https://www.instagram.com/freebala._/",
+  twitter: "",
+};
+
 exports.getCreateShopBackoffice = (req, res) => {
   res.sendFile(path.join(__dirname, "../../public/backoffice/shop-init.html"));
 };
@@ -55,9 +79,7 @@ exports.createAndInitializeShop = async (req, res) => {
       shop_mail: body.shop_mail,
       shop_phone: body.shop_phone,
       shop_description: body.shop_description || "",
-      shop_payment_methods: Array.isArray(body.shop_payment_methods)
-        ? body.shop_payment_methods
-        : [],
+      shop_payment_methods: DEFAULT_SHOP_PAYMENT_METHODS,
       shop_adress: body.shop_adress,
       shop_siret: body.shop_siret || null,
       admin_mail: body.admin_mail,
@@ -67,15 +89,12 @@ exports.createAndInitializeShop = async (req, res) => {
       click_and_collect_email: clickAndCollectEmail,
       click_and_collect_password: hashedPassword,
       click_and_collect_clearpass: body.admin_password,
-      hours: Array.isArray(body.hours) ? body.hours : [],
-      shop_social_media:
-        body.shop_social_media && typeof body.shop_social_media === "object"
-          ? body.shop_social_media
-          : {},
+      hours: DEFAULT_SHOP_HOURS,
+      shop_social_media: DEFAULT_SHOP_SOCIAL_MEDIA,
       shop_profile_image: body.shop_profile_image || "",
       shop_status: body.shop_status || "inactive",
       shop_printer_ip: body.shop_printer_ip || "",
-      smart_print_app: body.smart_print_app ? 1 : 0,
+      smart_print_app: 1,
       created,
     };
 
