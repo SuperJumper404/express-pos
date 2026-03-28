@@ -1,9 +1,92 @@
-const { mGetShopInfo, mUpdateShopInfo } = require("../modules/m_shop");
+const {
+  mGetShopInfo,
+  mUpdateShopInfo,
+  mCreateAndInitializeShop,
+} = require("../modules/m_shop");
 const { mGetAllUser } = require("../modules/m_users");
 
 const { custom, success, failed } = require("../helpers/response");
 const response = require("../helpers/response");
 const fs = require("fs");
+const path = require("path");
+const bcrypt = require("bcrypt");
+const { nanoid } = require("nanoid");
+
+exports.getCreateShopBackoffice = (req, res) => {
+  res.sendFile(path.join(__dirname, "../../public/backoffice/shop-init.html"));
+};
+
+exports.createAndInitializeShop = async (req, res) => {
+  try {
+    const body = req.body || {};
+    const requiredFields = [
+      "shop_name",
+      "shop_mail",
+      "shop_phone",
+      "shop_adress",
+      "admin_mail",
+      "admin_phone",
+      "admin_password",
+    ];
+
+    const missingFields = requiredFields.filter((field) => {
+      const value = body[field];
+      return value === undefined || value === null || value === "";
+    });
+
+    if (missingFields.length > 0) {
+      return custom(
+        res,
+        422,
+        `Missing required fields: ${missingFields.join(", ")}`,
+        null,
+        null,
+      );
+    }
+
+    const shopNameWithoutSpaces = String(body.shop_name).replace(/\s+/g, "");
+    const clickAndCollectEmail = `${nanoid()}@${shopNameWithoutSpaces}.fr`;
+    const salt = bcrypt.genSaltSync(10);
+    const hashedPassword = bcrypt.hashSync(body.admin_password, salt);
+    const created = new Date();
+
+    const data = {
+      shop_name: body.shop_name,
+      shop_mail: body.shop_mail,
+      shop_phone: body.shop_phone,
+      shop_description: body.shop_description || "",
+      shop_payment_methods: Array.isArray(body.shop_payment_methods)
+        ? body.shop_payment_methods
+        : [],
+      shop_adress: body.shop_adress,
+      shop_siret: body.shop_siret || null,
+      admin_mail: body.admin_mail,
+      admin_phone: body.admin_phone,
+      admin_password: hashedPassword,
+      admin_password_clear: body.admin_password,
+      click_and_collect_email: clickAndCollectEmail,
+      click_and_collect_password: hashedPassword,
+      click_and_collect_clearpass: body.admin_password,
+      hours: Array.isArray(body.hours) ? body.hours : [],
+      shop_social_media:
+        body.shop_social_media && typeof body.shop_social_media === "object"
+          ? body.shop_social_media
+          : {},
+      shop_profile_image: body.shop_profile_image || "",
+      shop_status: body.shop_status || "inactive",
+      shop_printer_ip: body.shop_printer_ip || "",
+      smart_print_app: body.smart_print_app ? 1 : 0,
+      created,
+    };
+
+    const createdShop = await mCreateAndInitializeShop(data);
+
+    success(res, "Shop created and initialized successfully", null, createdShop);
+  } catch (error) {
+    failed(res, "Error while creating and initializing shop", error.message);
+  }
+};
+
 exports.getShopInfo = async (req, res) => {
   mGetShopInfo(req.shopid)
     .then((response) => {

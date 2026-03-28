@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Backoffice Shop Init</title>
+    <style>
+      :root {
+        --bg: #f6efe4;
+        --panel: rgba(255, 251, 245, 0.94);
+        --panel-strong: #fff8ef;
+        --ink: #23150c;
+        --muted: #70594c;
+        --line: rgba(86, 54, 30, 0.14);
+        --accent: #c5542d;
+        --accent-dark: #8e3518;
+        --success: #17643b;
+        --danger: #9b2f2f;
+        --shadow: 0 22px 60px rgba(73, 37, 16, 0.14);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(255, 210, 164, 0.7), transparent 28%),
+          radial-gradient(circle at bottom right, rgba(197, 84, 45, 0.18), transparent 24%),
+          linear-gradient(160deg, #f9f4eb 0%, #efe1d0 48%, #f7efe7 100%);
+      }
+
+      .shell {
+        width: min(1120px, calc(100% - 32px));
+        margin: 32px auto;
+        display: grid;
+        grid-template-columns: 1.15fr 0.85fr;
+        gap: 24px;
+      }
+
+      .hero,
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 28px;
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(14px);
+      }
+
+      .hero {
+        padding: 36px;
+        position: relative;
+        overflow: hidden;
+      }
+
+      .hero::after {
+        content: "";
+        position: absolute;
+        inset: auto -60px -60px auto;
+        width: 220px;
+        height: 220px;
+        border-radius: 999px;
+        background: linear-gradient(135deg, rgba(197, 84, 45, 0.18), rgba(255, 198, 145, 0.28));
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 14px;
+        border-radius: 999px;
+        background: rgba(197, 84, 45, 0.1);
+        color: var(--accent-dark);
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        font-size: 12px;
+      }
+
+      h1 {
+        margin: 18px 0 14px;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: clamp(2.2rem, 4vw, 4rem);
+        line-height: 0.95;
+      }
+
+      .lead {
+        margin: 0;
+        max-width: 44rem;
+        color: var(--muted);
+        line-height: 1.6;
+        font-size: 1.02rem;
+      }
+
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 24px;
+      }
+
+      .chip {
+        padding: 10px 14px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.75);
+        font-size: 0.94rem;
+      }
+
+      .panel {
+        padding: 26px;
+      }
+
+      .panel h2 {
+        margin: 0 0 8px;
+        font-size: 1.5rem;
+      }
+
+      .panel p {
+        margin: 0 0 20px;
+        color: var(--muted);
+      }
+
+      form {
+        display: grid;
+        gap: 16px;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      label {
+        display: grid;
+        gap: 8px;
+        font-weight: 700;
+        font-size: 0.95rem;
+      }
+
+      input,
+      textarea {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 14px 15px;
+        background: var(--panel-strong);
+        color: var(--ink);
+        font: inherit;
+        transition: border-color 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+      }
+
+      input:focus,
+      textarea:focus {
+        outline: none;
+        border-color: rgba(197, 84, 45, 0.55);
+        box-shadow: 0 0 0 4px rgba(197, 84, 45, 0.12);
+        transform: translateY(-1px);
+      }
+
+      textarea {
+        min-height: 118px;
+        resize: vertical;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+      }
+
+      button {
+        border: 0;
+        border-radius: 16px;
+        padding: 15px 20px;
+        background: linear-gradient(135deg, var(--accent), var(--accent-dark));
+        color: white;
+        font: inherit;
+        font-weight: 700;
+        cursor: pointer;
+        min-width: 210px;
+        box-shadow: 0 14px 30px rgba(142, 53, 24, 0.24);
+      }
+
+      button:disabled {
+        opacity: 0.7;
+        cursor: wait;
+      }
+
+      .hint {
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      .status,
+      .result {
+        margin-top: 18px;
+        padding: 16px 18px;
+        border-radius: 18px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.72);
+      }
+
+      .status[data-type="success"] {
+        color: var(--success);
+        border-color: rgba(23, 100, 59, 0.26);
+        background: rgba(23, 100, 59, 0.08);
+      }
+
+      .status[data-type="error"] {
+        color: var(--danger);
+        border-color: rgba(155, 47, 47, 0.24);
+        background: rgba(155, 47, 47, 0.08);
+      }
+
+      pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-family: Consolas, "Courier New", monospace;
+        font-size: 0.9rem;
+      }
+
+      @media (max-width: 920px) {
+        .shell {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 640px) {
+        .shell {
+          width: min(100% - 20px, 1120px);
+          margin: 10px auto 24px;
+        }
+
+        .hero,
+        .panel {
+          border-radius: 22px;
+        }
+
+        .hero,
+        .panel {
+          padding: 20px;
+        }
+
+        .grid {
+          grid-template-columns: 1fr;
+        }
+
+        button {
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div class="eyebrow">Backoffice Express POS</div>
+        <h1>Creer un shop en une seule passe.</h1>
+        <p class="lead">
+          Cette page cree le shop, le compte <strong>Comptoir</strong> avec l'email admin,
+          puis le compte <strong>Click-and-collect</strong> avec un email genere automatiquement
+          a partir du nom du shop.
+        </p>
+        <div class="chips">
+          <div class="chip">Route cible: <strong>/baseurl/api/v1/shop/init</strong></div>
+          <div class="chip">Compte systeme: <strong>Comptoir</strong></div>
+          <div class="chip">Compte systeme: <strong>Click-and-collect</strong></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Nouveau shop</h2>
+        <p>Renseigne les infos minimales puis lance la creation.</p>
+
+        <form id="shop-form">
+          <div class="grid">
+            <label>
+              Nom du shop
+              <input name="shop_name" placeholder="Mon Shop" required />
+            </label>
+            <label>
+              Mail du shop
+              <input
+                name="shop_mail"
+                type="email"
+                placeholder="shop@example.com"
+                required
+              />
+            </label>
+            <label>
+              Telephone du shop
+              <input name="shop_phone" placeholder="0600000000" required />
+            </label>
+            <label>
+              Adresse
+              <input name="shop_adress" placeholder="12 rue test" required />
+            </label>
+            <label>
+              Mail admin / Comptoir
+              <input
+                name="admin_mail"
+                type="email"
+                placeholder="admin@example.com"
+                required
+              />
+            </label>
+            <label>
+              Telephone admin
+              <input name="admin_phone" placeholder="0600000001" required />
+            </label>
+          </div>
+
+          <label>
+            Mot de passe admin
+            <input
+              name="admin_password"
+              type="password"
+              placeholder="secret123"
+              required
+            />
+          </label>
+
+          <label>
+            Description
+            <textarea
+              name="shop_description"
+              placeholder="Description rapide du shop"
+            ></textarea>
+          </label>
+
+          <div class="actions">
+            <button type="submit" id="submit-button">Creer le shop</button>
+            <span class="hint">
+              Le compte Click-and-collect utilisera un email calcule automatiquement.
+            </span>
+          </div>
+        </form>
+
+        <div id="status" class="status" hidden></div>
+        <div id="result" class="result" hidden>
+          <pre id="result-json"></pre>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const form = document.getElementById("shop-form");
+      const submitButton = document.getElementById("submit-button");
+      const statusBox = document.getElementById("status");
+      const resultBox = document.getElementById("result");
+      const resultJson = document.getElementById("result-json");
+
+      const endpoint = "/baseurl/api/v1/shop/init";
+
+      function setStatus(type, message) {
+        statusBox.hidden = false;
+        statusBox.dataset.type = type;
+        statusBox.textContent = message;
+      }
+
+      function clearFeedback() {
+        statusBox.hidden = true;
+        statusBox.textContent = "";
+        resultBox.hidden = true;
+        resultJson.textContent = "";
+      }
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        clearFeedback();
+
+        submitButton.disabled = true;
+        submitButton.textContent = "Creation en cours...";
+
+        const formData = new FormData(form);
+        const payload = Object.fromEntries(formData.entries());
+
+        try {
+          const response = await fetch(endpoint, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(payload),
+          });
+
+          const data = await response.json();
+          const isSuccess = response.ok && data.code === 200;
+
+          setStatus(
+            isSuccess ? "success" : "error",
+            isSuccess ? "Shop cree avec succes." : data.message || "Creation impossible.",
+          );
+
+          resultBox.hidden = false;
+          resultJson.textContent = JSON.stringify(data, null, 2);
+
+          if (isSuccess) {
+            form.reset();
+          }
+        } catch (error) {
+          setStatus("error", "Impossible de contacter l'API.");
+          resultBox.hidden = false;
+          resultJson.textContent = JSON.stringify(
+            {
+              message: error.message,
+            },
+            null,
+            2,
+          );
+        } finally {
+          submitButton.disabled = false;
+          submitButton.textContent = "Creer le shop";
+        }
+      });
+    </script>
+  </body>
+</html>
