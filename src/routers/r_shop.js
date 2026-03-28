@@ -1,4 +1,6 @@
 const {
+  createAndInitializeShop,
+  getCreateShopBackoffice,
   getShopInfo,
   setShopInfo,
   updateShopInfo,
@@ -10,6 +12,8 @@ const express = require("express");
 const singleUploadShopImg = require("../helpers/middleware/shop");
 const routers = express.Router();
 
+routers.get("/shop/init/backoffice", getCreateShopBackoffice);
+routers.post("/shop/init", createAndInitializeShop);
 routers.get("/shopInfo", authentication, authAdmin, getShopInfo);
 routers.get("/shopInfo/click-and-collect/:shopid", getShopInfoClickAndCollect);
 
