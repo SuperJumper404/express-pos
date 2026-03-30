@@ -126,7 +126,7 @@ module.exports = {
                 // send response user by id
                 mDetailUser(response[0].id)
                   .then((response) => {
-                    success(res, "Login success!", null, response);
+                    success(res, "Connexion réussie !", null, response);
                   })
                   .catch((error) => {
                     failed(res, "Internal Server Error!", error.message);
@@ -136,16 +136,16 @@ module.exports = {
               custom(
                 res,
                 422,
-                `Your account isn't activated yet! Check your email!`,
+                `Votre compte n'est pas encore activé! Vérifiez votre email !`,
                 {},
                 null,
               );
             }
           } else {
-            custom(res, 422, "Your password is wrong!", {}, null);
+            custom(res, 422, "Votre mot de passe est incorrect !", {}, null);
           }
         } else {
-          custom(res, 422, "Email not registered!", {}, null);
+          custom(res, 422, "Votre email n'est pas enregistré", {}, null);
         }
       })
       .catch((error) => {
@@ -162,9 +162,9 @@ module.exports = {
     mUpdateUser(data, id)
       .then((response) => {
         if (response.affectedRows) {
-          success(res, "Logout success!", {}, true);
+          success(res, "Déconnexion réussie !", {}, true);
         } else {
-          custom(res, 404, "Id user not found!", null, false);
+          custom(res, 404, "Utilisateur non trouvé !", null, false);
         }
       })
       .catch((error) => {
