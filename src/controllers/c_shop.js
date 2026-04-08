@@ -207,6 +207,7 @@ exports.updateShopInfo = async (req, res) => {
     shop_phone: prefer(req.body.shop_phone, shopInfo.shop_phone),
     shop_adress: prefer(req.body.shop_adress, shopInfo.shop_adress),
     shop_siret: prefer(req.body.shop_siret, shopInfo.shop_siret),
+    activate_tva: prefer(req.body.activate_tva, shopInfo.activate_tva),
     hours: prefer(
       req.body.shop_hours,
       JSON.parse(JSON.stringify(shopInfo.hours)),

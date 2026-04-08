@@ -71,10 +71,14 @@ module.exports = {
     const detail = await mDetailProduct(id);
     if (req.file) {
       body.image = req.file.filename;
-      const path = path.join(envPUBLICIMAGEPATH, "products", detail[0].image);
-      if (fs.existsSync(path)) {
+      const imagePath = path.join(
+        envPUBLICIMAGEPATH,
+        "products",
+        detail[0].image,
+      );
+      if (fs.existsSync(imagePath)) {
         try {
-          fs.unlinkSync(path);
+          fs.unlinkSync(imagePath);
         } catch (err) {
           console.error(err);
         }

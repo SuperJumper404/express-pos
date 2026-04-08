@@ -366,27 +366,35 @@ module.exports = {
   // },
   mArchiveOrder: (id, payment_method) => {
     return new Promise((resolve, reject) => {
-      // Récupérer les détails de la commande
-      conn.query(`SELECT * FROM orders WHERE id = ?`, [id], (err, order) => {
+      conn.query(`SELECT * FROM orders WHERE id = ?`, [id], (err, orders) => {
         if (err) {
           reject(err);
           return;
         }
 
-        order[0].token = nanoid();
-        order[0].used_payment_method = payment_method;
-        console.log("Orders selected", order);
-        // Insérer la commande dans la table archives
-        conn.query(`INSERT INTO archives SET ?`, order[0], (err, result) => {
+        if (!orders || orders.length === 0) {
+          reject(new Error("Commande introuvable"));
+          return;
+        }
+
+        const orderData = { ...orders[0] };
+        delete orderData.id;
+
+        orderData.token = nanoid();
+        orderData.used_payment_method = payment_method;
+
+        conn.query(`INSERT INTO archives SET ?`, orderData, (err, result) => {
           if (err) {
             console.log("Error in Archive", err);
             reject(err);
             return;
           }
 
-          console.log("Result", result);
+          console.log("Result archive", result);
 
-          // Récupérer les détails de la commande
+          // id généré dans la table archives
+          const archiveOrderId = result.insertId;
+
           conn.query(
             `SELECT * FROM orderdetail WHERE orderId = ?`,
             [id],
@@ -395,14 +403,41 @@ module.exports = {
                 reject(err);
                 return;
               }
-              console.log("aaa", orderDetails);
-              // Insérer les détails de la commande dans la table archives
+
+              console.log("orderDetails", orderDetails);
+
+              const deleteOriginalData = () => {
+                conn.query(
+                  `DELETE FROM orderdetail WHERE orderId = ?`,
+                  [id],
+                  (err) => {
+                    if (err) {
+                      reject(err);
+                      return;
+                    }
+
+                    conn.query(
+                      `DELETE FROM orders WHERE id = ?`,
+                      [id],
+                      (err, result) => {
+                        if (err) {
+                          reject(err);
+                          return;
+                        }
+
+                        resolve(result);
+                      },
+                    );
+                  },
+                );
+              };
+
               if (orderDetails.length > 0) {
                 conn.query(
                   `INSERT INTO archivesdetail (orderId, productid, qty, total, price) VALUES ?`,
                   [
                     orderDetails.map((detail) => [
-                      detail.orderid,
+                      archiveOrderId, // <- ici on met l'id de archives
                       detail.productid,
                       detail.qty,
                       detail.total,
@@ -415,34 +450,15 @@ module.exports = {
                       reject(err);
                       return;
                     }
+
+                    console.log("orders detail archive", result);
+
+                    deleteOriginalData();
                   },
                 );
+              } else {
+                deleteOriginalData();
               }
-
-              // Supprimer la commande de la table orders et orderdetail
-              conn.query(
-                `DELETE FROM orders WHERE id = ?`,
-                [id],
-                (err, result) => {
-                  if (err) {
-                    reject(err);
-                    return;
-                  }
-
-                  conn.query(
-                    `DELETE FROM orderdetail WHERE orderId = ?`,
-                    [id],
-                    (err, result) => {
-                      if (err) {
-                        reject(err);
-                        return;
-                      }
-
-                      resolve(result);
-                    },
-                  );
-                },
-              );
             },
           );
         });
