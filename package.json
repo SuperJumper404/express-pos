@@ -19,7 +19,9 @@
     "env:decrypt:staging": "dotenvx decrypt -f .env.staging",
     "env:decrypt:production": "dotenvx decrypt -f .env.production",
     "docker:compose:staging": "docker compose --env-file .env.staging -f docker-compose.staging.yml up -d",
-    "docker:compose:production": "docker compose --env-file .env.production -f docker-compose.production.yml up -d"
+    "docker:compose:production": "docker compose --env-file .env.production -f docker-compose.production.yml up -d",
+    "github:deploy:staging": "gh workflow run \"Deploy Backend to Staging\" --ref staging -f mode=pm2",
+    "github:deploy:docker-staging": "gh workflow run \"Deploy Backend to Staging\" --ref staging -f mode=compose"
   },
   "author": "Tomi Mandala Putra",
   "license": "ISC",

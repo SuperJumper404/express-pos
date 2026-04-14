@@ -1,17 +1,61 @@
 name: Deploy Backend to Staging
 
 on:
-  push:
-    branches:
-      - staging
+  # push:
+  #   branches:
+  #     - staging
+
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "Mode de déploiement"
+        required: true
+        type: choice
+        options:
+          - compose
+          - pm2
 
 jobs:
-  deploy:
+  deploy-compose:
+    if: ${{ github.event_name == 'push' || inputs.mode == 'compose' }}
     runs-on: smarteat-runner-backend
 
     steps:
-      - name: Deploy on server
+      - name: Deploy on server with Docker Compose
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 192.168.1.99
+          username: vscodeserver
+          password: roottoorroot
+          port: 22
+          script_stop: true
+          script: |
+            set -e
+
+            APP_DIR=/home/webserversmarteat/smarteat/backend
+            BRANCH=staging
+            REPO_URL=https://github.com/SuperJumper404/express-pos.git
+            COMPOSE_FILE=docker-compose.staging.yml
+
+            rm -rf "$APP_DIR"
+            git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
+
+            cd "$APP_DIR"
+
+            export DOTENV_PRIVATE_KEY_STAGING='${{ secrets.DOTENV_PRIVATE_KEY_STAGING }}'
+            npx dotenvx decrypt -f .env.staging
+
+            docker compose --env-file .env.staging -f "$COMPOSE_FILE" down --remove-orphans || true
+            docker compose --env-file .env.staging -f "$COMPOSE_FILE" up -d --force-recreate
+
+            docker compose --env-file .env.staging -f "$COMPOSE_FILE" ps
+
+  deploy-pm2:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'pm2' }}
+    runs-on: smarteat-runner-backend
+
+    steps:
+      - name: Deploy on server with PM2
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 192.168.1.179
@@ -36,14 +80,11 @@ jobs:
 
             export DOTENV_PRIVATE_KEY_STAGING='${{ secrets.DOTENV_PRIVATE_KEY_STAGING }}'
             npx dotenvx decrypt -f .env.staging
-            ls -la
-            cat .env.staging
+
             set -a
             . ./.env.staging
             set +a
-            printenv
 
-            #Migrations
             npm run db:up:staging
 
             pm2 delete "$APP_NAME" || true
