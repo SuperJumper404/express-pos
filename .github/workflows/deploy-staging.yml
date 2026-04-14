@@ -42,8 +42,8 @@ jobs:
 
             cd "$APP_DIR"
 
-            export DOTENV_PRIVATE_KEY_STAGING='${{ secrets.DOTENV_PRIVATE_KEY_STAGING }}'
-            npx dotenvx decrypt -f .env.staging
+            # export DOTENV_PRIVATE_KEY_STAGING='${{ secrets.DOTENV_PRIVATE_KEY_STAGING }}'
+            # npx dotenvx decrypt -f .env.staging
 
             docker compose --env-file .env.staging -f "$COMPOSE_FILE" down --remove-orphans || true
             docker compose --env-file .env.staging -f "$COMPOSE_FILE" up -d --force-recreate
