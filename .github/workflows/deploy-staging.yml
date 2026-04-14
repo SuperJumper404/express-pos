@@ -35,7 +35,7 @@ jobs:
             APP_DIR=/home/vscodeserver/smarteat/backend
             BRANCH=staging
             REPO_URL=https://github.com/SuperJumper404/express-pos.git
-            COMPOSE_FILE=docker-compose.staging.yml
+            COMPOSE_FILE=compose.yml
 
             rm -rf "$APP_DIR"
             git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
