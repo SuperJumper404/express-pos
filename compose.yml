@@ -36,9 +36,12 @@ services:
       MYSQL_DATABASE: ${COMPOSE_DB_NAME:-pointofsale}
       MYSQL_USER: ${COMPOSE_DB_USER:-app}
       MYSQL_PASSWORD: ${COMPOSE_DB_PASS:-root}
+    ports:
+      - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
-      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - ./db/mysql/init:/docker-entrypoint-initdb.d:ro
+      - ./db/mysql/conf.d:/etc/mysql/conf.d:ro
     healthcheck:
       test:
         [
