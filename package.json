@@ -17,7 +17,9 @@
     "env:encrypt:staging": "dotenvx encrypt -f .env.staging",
     "env:encrypt:production": "dotenvx encrypt -f .env.production",
     "env:decrypt:staging": "dotenvx decrypt -f .env.staging",
-    "env:decrypt:production": "dotenvx decrypt -f .env.production"
+    "env:decrypt:production": "dotenvx decrypt -f .env.production",
+    "docker:compose:staging": "docker compose --env-file .env.staging -f docker-compose.staging.yml up -d",
+    "docker:compose:production": "docker compose --env-file .env.production -f docker-compose.production.yml up -d"
   },
   "author": "Tomi Mandala Putra",
   "license": "ISC",
