@@ -67,3 +67,6 @@ yarn start
 ---
 
 Pour changer de variable d'environnement, il faut soit modifier NODE_ENV avant l'execuction de index.js ou alors ecosystem.config.js
+-installer docker
+
+- passer le user de VM en admin
