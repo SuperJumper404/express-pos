@@ -32,7 +32,7 @@ jobs:
           script: |
             set -e
 
-            APP_DIR=/home/webserversmarteat/smarteat/backend
+            APP_DIR=/home/vscodeserver/smarteat/backend
             BRANCH=staging
             REPO_URL=https://github.com/SuperJumper404/express-pos.git
             COMPOSE_FILE=docker-compose.staging.yml
