@@ -1,14 +1,14 @@
 services:
   app:
     image: node:20-alpine
-    container_name: express_pos_app_staging
+    container_name: express_pos_app_${APP_ENV}
     working_dir: /app
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
     env_file:
-      - .env.staging
+      - ${ENV_FILE}
     command: sh -c "npm install --include=dev && npm run db:up && node index.js"
     volumes:
       - .:/app
@@ -19,11 +19,11 @@ services:
 
   db:
     image: mysql:8.0.33
-    container_name: express_pos_db_staging
+    container_name: express_pos_db_${APP_ENV}
     restart: unless-stopped
     command: --default-authentication-plugin=mysql_native_password
     env_file:
-      - .env.staging
+      - ${ENV_FILE}
     ports:
       - "3306:3306"
     volumes:
@@ -43,13 +43,13 @@ services:
 
   phpmyadmin:
     image: phpmyadmin:latest
-    container_name: express_pos_phpmyadmin_staging
+    container_name: express_pos_phpmyadmin_${APP_ENV}
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
     env_file:
-      - .env.staging
+      - ${ENV_FILE}
     ports:
       - "8089:80"
 

@@ -33,7 +33,7 @@ jobs:
             set -e
 
             APP_DIR=/home/smarteatprod/smarteat/backend
-            BRANCH=staging
+            BRANCH=master
             REPO_URL=https://github.com/SuperJumper404/express-pos.git
             COMPOSE_FILE=compose.yml
 
@@ -42,7 +42,7 @@ jobs:
 
             cd "$APP_DIR"
 
-            # export DOTENV_PRIVATE_KEY_STAGING='${{ secrets.DOTENV_PRIVATE_KEY_STAGING }}'
+            # export DOTENV_PRIVATE_KEY_PRODUCTION='${{ secrets.DOTENV_PRIVATE_KEY_PRODUCTION }}'
             # npx dotenvx decrypt -f .env.production
 
             docker compose --env-file .env.production -f "$COMPOSE_FILE" down --remove-orphans || true
@@ -67,8 +67,8 @@ jobs:
             set -e
 
             APP_DIR=/home/smarteatprod/smarteat/backend
-            APP_NAME=backend_smart_eat_staging
-            BRANCH=staging
+            APP_NAME=backend_smart_eat_production
+            BRANCH=master
             REPO_URL=https://github.com/SuperJumper404/express-pos.git
 
             rm -rf "$APP_DIR"
