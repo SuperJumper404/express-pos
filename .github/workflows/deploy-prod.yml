@@ -43,12 +43,12 @@ jobs:
             cd "$APP_DIR"
 
             # export DOTENV_PRIVATE_KEY_STAGING='${{ secrets.DOTENV_PRIVATE_KEY_STAGING }}'
-            # npx dotenvx decrypt -f .env.staging
+            # npx dotenvx decrypt -f .env.production
 
-            docker compose --env-file .env.staging -f "$COMPOSE_FILE" down --remove-orphans || true
-            docker compose --env-file .env.staging -f "$COMPOSE_FILE" up -d --force-recreate
+            docker compose --env-file .env.production -f "$COMPOSE_FILE" down --remove-orphans || true
+            docker compose --env-file .env.production -f "$COMPOSE_FILE" up -d --force-recreate
 
-            docker compose --env-file .env.staging -f "$COMPOSE_FILE" ps
+            docker compose --env-file .env.production -f "$COMPOSE_FILE" ps
 
   deploy-pm2:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'pm2' }}
@@ -78,15 +78,15 @@ jobs:
 
             npm install
 
-            export DOTENV_PRIVATE_KEY_STAGING='${{ secrets.DOTENV_PRIVATE_KEY_STAGING }}'
-            npx dotenvx decrypt -f .env.staging
+            # export DOTENV_PRIVATE_KEY_PRODUCTION='${{ secrets.DOTENV_PRIVATE_KEY_PRODUCTION }}'
+            # npx dotenvx decrypt -f .env.production
 
             set -a
-            . ./.env.staging
+            . ./.env.production
             set +a
 
-            npm run db:up:staging
+            npm run db:up:production
 
             pm2 delete "$APP_NAME" || true
-            pm2 start ecosystem.config.js --env staging --name "$APP_NAME"
+            pm2 start ecosystem.config.js --env production --name "$APP_NAME"
             pm2 save
