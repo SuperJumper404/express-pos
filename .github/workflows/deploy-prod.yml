@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Mode de déploiement"
+        description: "Modes de déploiement"
         required: true
         type: choice
         options:
