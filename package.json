@@ -18,10 +18,12 @@
     "env:encrypt:production": "dotenvx encrypt -f .env.production",
     "env:decrypt:staging": "dotenvx decrypt -f .env.staging",
     "env:decrypt:production": "dotenvx decrypt -f .env.production",
-    "docker:compose:staging": "docker compose --env-file .env.staging -f docker-compose.staging.yml up -d",
-    "docker:compose:production": "docker compose --env-file .env.production -f docker-compose.production.yml up -d",
+    "docker:compose:staging": "docker compose --env-file .env.staging -f compose.yml up -d",
+    "docker:compose:production": "docker compose --env-file .env.production -f compose.yml up -d",
     "github:deploy:staging": "gh workflow run \"Deploy Backend to Staging\" --ref staging -f mode=pm2",
-    "github:deploy:docker-staging": "gh workflow run \"Deploy Backend to Staging\" --ref staging -f mode=compose"
+    "github:deploy:docker-staging": "gh workflow run \"Deploy Backend to Staging\" --ref staging -f mode=compose",
+    "github:deploy:production": "gh workflow run \"Deploy Backend to Production\" --ref master -f mode=pm2",
+    "github:deploy:docker-production": "gh workflow run \"Deploy Backend to Production\" --ref master -f mode=compose"
   },
   "author": "Tomi Mandala Putra",
   "license": "ISC",
