@@ -9,6 +9,7 @@ const {
 } = require("../modules/m_products");
 const path = require("path");
 const { envPUBLICIMAGEPATH } = require("../helpers/env");
+const { isMissing, parseMoney } = require("../helpers/money");
 const { success, custom, failed } = require("../helpers/response");
 const fs = require("fs");
 
@@ -18,11 +19,30 @@ module.exports = {
     const body = req.body;
     if (body.product_customization) {
       body.product_customization = JSON.parse(body.product_customization);
+      body.product_customization = body.product_customization.map(
+        (customization) => ({
+          ...customization,
+          items: (customization.items || []).map((item) => ({
+            ...item,
+            price: parseMoney(item.price) || 0,
+          })),
+        }),
+      );
+    }
+    const parsedPrice = parseMoney(body.price);
+    if (parsedPrice !== null) {
+      body.price = parsedPrice;
     }
     body.image = req.file.filename;
     body.shopid = req.shopid;
     body.created = new Date();
-    if (!body.name || !body.categoryid || !body.price || !body.stock) {
+    if (
+      !body.name ||
+      !body.categoryid ||
+      isMissing(body.price) ||
+      parsedPrice === null ||
+      !body.stock
+    ) {
       const locationPath = path.join(
         envPUBLICIMAGEPATH,
         "products",
@@ -67,6 +87,13 @@ module.exports = {
   updateProduct: async (req, res) => {
     const body = req.body;
     body.updated = new Date();
+    if (!isMissing(body.price)) {
+      const parsedPrice = parseMoney(body.price);
+      if (parsedPrice === null) {
+        return custom(res, 400, "Bad request", {}, null);
+      }
+      body.price = parsedPrice;
+    }
     const id = req.params.id;
     const detail = await mDetailProduct(id);
     if (req.file) {

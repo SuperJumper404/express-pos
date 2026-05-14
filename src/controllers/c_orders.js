@@ -17,6 +17,7 @@ const {
 
 const { custom, success, failed } = require("../helpers/response");
 const { envJWTKEY } = require("../helpers/env");
+const { isMissing, parseMoney } = require("../helpers/money");
 
 const jwt = require("jsonwebtoken");
 const response = require("../helpers/response");
@@ -56,11 +57,13 @@ exports.detailOrder = (req, res) => {
 };
 exports.addOrder = (req, res) => {
   const body = req.body;
+  const subtotal = parseMoney(body.subtotal);
   if (
     !body.customer ||
     !body.customerID ||
     // !body.operator ||
-    !body.subtotal ||
+    isMissing(body.subtotal) ||
+    subtotal === null ||
     !body.payment ||
     !body.status
   ) {
@@ -77,7 +80,7 @@ exports.addOrder = (req, res) => {
       customer: body.customer,
       customerID: body.customerID,
       operator: body.operator,
-      subtotal: body.subtotal,
+      subtotal,
       payment: body.payment,
       remark: body.remark,
       phone: body.phone,
@@ -115,15 +118,22 @@ exports.deleteOrder = (req, res) => {
 exports.addDetailOrder = (req, res) => {
   const orderid = req.body.orderid;
   const productid = req.body.productid;
-  const price = req.body.price;
+  const price = parseMoney(req.body.price);
   const qty = req.body.qty;
-  const total = req.body.total;
+  const total = parseMoney(req.body.total);
   const operator = req.body.operator;
   const customizationList = req.body.customizationList;
 
   console.log("Liste des customization", req.body?.customizationList);
 
-  if (!orderid || !productid || !price || !qty || !total || !operator) {
+  if (
+    !orderid ||
+    !productid ||
+    price === null ||
+    !qty ||
+    total === null ||
+    !operator
+  ) {
     custom(res, 400, "Bad request!", null, null);
   } else {
     const dataDetail = {
