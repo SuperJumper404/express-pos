@@ -1,0 +1,21 @@
+-- migrate:up
+
+ALTER TABLE `products` MODIFY COLUMN `price` DECIMAL(10,2) NOT NULL;
+ALTER TABLE `product_choice` MODIFY COLUMN `price` DECIMAL(10,2) DEFAULT 0.00;
+ALTER TABLE `orders` MODIFY COLUMN `subtotal` DECIMAL(10,2) NOT NULL;
+ALTER TABLE `orderdetail` MODIFY COLUMN `price` DECIMAL(10,2) NOT NULL;
+ALTER TABLE `orderdetail` MODIFY COLUMN `total` DECIMAL(10,2) NOT NULL;
+ALTER TABLE `archives` MODIFY COLUMN `subtotal` DECIMAL(10,2) NOT NULL;
+ALTER TABLE `archivesdetail` MODIFY COLUMN `price` DECIMAL(10,2) NOT NULL;
+ALTER TABLE `archivesdetail` MODIFY COLUMN `total` DECIMAL(10,2) NOT NULL;
+
+-- migrate:down
+
+ALTER TABLE `products` MODIFY COLUMN `price` INT(10) NOT NULL;
+ALTER TABLE `product_choice` MODIFY COLUMN `price` INT(11) DEFAULT 0;
+ALTER TABLE `orders` MODIFY COLUMN `subtotal` INT(11) NOT NULL;
+ALTER TABLE `orderdetail` MODIFY COLUMN `price` INT(11) NOT NULL;
+ALTER TABLE `orderdetail` MODIFY COLUMN `total` INT(11) NOT NULL;
+ALTER TABLE `archives` MODIFY COLUMN `subtotal` INT(11) NOT NULL;
+ALTER TABLE `archivesdetail` MODIFY COLUMN `price` INT(11) NOT NULL;
+ALTER TABLE `archivesdetail` MODIFY COLUMN `total` INT(11) NOT NULL;
