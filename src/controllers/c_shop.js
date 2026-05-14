@@ -167,68 +167,76 @@ exports.setShopInfo = async (req, res) => {
   console.log("Set Shop ", req.body);
   console.log("Set Shop ", req);
   console.log("Set Shop ", JSON.stringify(req.body));
-  failed(res, "Error On getting shop info");
-
-  // mUpdateShopInfo(req.body, req.shopid);
+  try {
+    await mUpdateShopInfo(req.body, req.shopid);
+    success(res, "Shop info updated", null, null);
+  } catch (error) {
+    failed(res, "Error On updating shop info", error.message);
+  }
 };
 
 exports.updateShopInfo = async (req, res) => {
-  console.log("Set Shop ", req.body);
-  const rows = await mGetShopInfo(req.shopid);
-  const shopInfo = rows[0];
-  console.log("shopInof", shopInfo);
-  console.log("Filename", req.file);
-  if (req.file && req.file.filename !== shopInfo.shop_profile_image) {
-    console.log("Nouveau file name");
-    if (shopInfo.shop_profile_image !== "") {
-      const path = `./public/profile/${shopInfo.shop_profile_image}`;
-      if (fs.existsSync(path)) {
-        console.log("Ancienne IMG supprimer ", path);
-        fs.unlinkSync(path);
+  try {
+    console.log("Set Shop ", req.body);
+    const rows = await mGetShopInfo(req.shopid);
+    const shopInfo = rows[0];
+    if (!shopInfo) {
+      return custom(res, 404, "Shop introuvable.", null, null);
+    }
+    console.log("shopInof", shopInfo);
+    console.log("Filename", req.file);
+    if (req.file && req.file.filename !== shopInfo.shop_profile_image) {
+      console.log("Nouveau file name");
+      if (shopInfo.shop_profile_image !== "") {
+        const path = `./public/profile/${shopInfo.shop_profile_image}`;
+        if (fs.existsSync(path)) {
+          console.log("Ancienne IMG supprimer ", path);
+          fs.unlinkSync(path);
+        }
       }
     }
-  }
-  const prefer = (value, fallback) => {
-    console.log(" EQ", value, fallback);
-    return value !== undefined && value !== "" ? value : fallback;
-  };
+    const prefer = (value, fallback) => {
+      console.log(" EQ", value, fallback);
+      return value !== undefined && value !== "" ? value : fallback;
+    };
 
-  console.log(
-    "Payment Methods",
-    req.body.shop_payment_methods,
-    shopInfo.shop_payment_methods,
-  );
-  const data = {
-    shop_name: prefer(req.body.shop_name, shopInfo.shop_name),
-    shop_description: prefer(
-      req.body.shop_description,
-      shopInfo.shop_description,
-    ),
-    shop_phone: prefer(req.body.shop_phone, shopInfo.shop_phone),
-    shop_adress: prefer(req.body.shop_adress, shopInfo.shop_adress),
-    shop_siret: prefer(req.body.shop_siret, shopInfo.shop_siret),
-    activate_tva: prefer(req.body.activate_tva, shopInfo.activate_tva),
-    hours: prefer(
-      req.body.shop_hours,
-      JSON.parse(JSON.stringify(shopInfo.hours)),
-    ),
-    shop_social_media: prefer(
-      req.body.shop_social_media,
-      JSON.parse(JSON.stringify(shopInfo.shop_social_media)),
-    ),
-
-    shop_payment_methods: prefer(
+    console.log(
+      "Payment Methods",
       req.body.shop_payment_methods,
-      JSON.parse(JSON.stringify(shopInfo.shop_payment_methods)),
-    ),
-    shop_profile_image: req.file?.filename || shopInfo.shop_profile_image,
-    shop_status: prefer(req.body.shop_status, shopInfo.shop_status),
-    shop_printer_ip: prefer(req.body.shop_printer_ip, shopInfo.shop_printer_ip),
-    smart_print_app: prefer(req.body.smart_print_app, shopInfo.smart_print_app),
-  };
-  console.log("Full Shop Data", data);
-  mUpdateShopInfo(data, req.shopid);
-  // console.log("Set Shop ", req);//
-  // console.log("Set Shop ", JSON.stringify(req.body));
-  failed(res, "Error On getting shop info");
+      shopInfo.shop_payment_methods,
+    );
+    const data = {
+      shop_name: prefer(req.body.shop_name, shopInfo.shop_name),
+      shop_description: prefer(
+        req.body.shop_description,
+        shopInfo.shop_description,
+      ),
+      shop_phone: prefer(req.body.shop_phone, shopInfo.shop_phone),
+      shop_adress: prefer(req.body.shop_adress, shopInfo.shop_adress),
+      shop_siret: prefer(req.body.shop_siret, shopInfo.shop_siret),
+      activate_tva: prefer(req.body.activate_tva, shopInfo.activate_tva),
+      hours: prefer(
+        req.body.shop_hours,
+        JSON.parse(JSON.stringify(shopInfo.hours)),
+      ),
+      shop_social_media: prefer(
+        req.body.shop_social_media,
+        JSON.parse(JSON.stringify(shopInfo.shop_social_media)),
+      ),
+
+      shop_payment_methods: prefer(
+        req.body.shop_payment_methods,
+        JSON.parse(JSON.stringify(shopInfo.shop_payment_methods)),
+      ),
+      shop_profile_image: req.file?.filename || shopInfo.shop_profile_image,
+      shop_status: prefer(req.body.shop_status, shopInfo.shop_status),
+      shop_printer_ip: prefer(req.body.shop_printer_ip, shopInfo.shop_printer_ip),
+      smart_print_app: prefer(req.body.smart_print_app, shopInfo.smart_print_app),
+    };
+    console.log("Full Shop Data", data);
+    await mUpdateShopInfo(data, req.shopid);
+    success(res, "Shop info updated", null, null);
+  } catch (error) {
+    failed(res, "Error On updating shop info", error.message);
+  }
 };

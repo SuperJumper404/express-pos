@@ -54,7 +54,7 @@ exports.detailOrder = (req, res) => {
       if (response.length > 0) {
         success(res, "Detail order", null, response);
       } else {
-        custom(res, "Id not found!", null, null);
+        custom(res, 404, "Commande introuvable.", null, null);
       }
     })
     .catch((error) => {
@@ -113,7 +113,7 @@ exports.deleteOrder = (req, res) => {
       if (response[0].affectedRows > 0 || response[1].affectedRows > 0) {
         success(res, "Delete order", null, response);
       } else {
-        custom(res, "Id not found!", null, null);
+        custom(res, 404, "Commande introuvable.", null, null);
       }
     })
     .catch((error) => {
@@ -186,6 +186,9 @@ exports.updateOrder = async (req, res) => {
     let currentStatus = await mDetailOrder(id).then((response) => {
       return response;
     });
+    if (!currentStatus.length) {
+      return custom(res, 404, "Commande introuvable.", null, null);
+    }
     if (
       (currentStatus[0].status == 1 && body.status == 2) ||
       (currentStatus[0].status == 2 && body.status == 3) ||
@@ -203,6 +206,8 @@ exports.updateOrder = async (req, res) => {
         .catch((error) => {
           failed(res, "Internal server error!", error.message);
         });
+    } else {
+      custom(res, 422, "Changement de statut non autorisé pour cette commande.", null, null);
     }
   }
 };
@@ -243,7 +248,7 @@ exports.detailArchivedOrder = (req, res) => {
       if (response.length > 0) {
         success(res, "Detail order", null, response);
       } else {
-        custom(res, "Id not found!", null, null);
+        custom(res, 404, "Commande archivée introuvable.", null, null);
       }
     })
 
@@ -261,7 +266,7 @@ exports.orderByToken = (req, res) => {
       const data = { orderDetail: response, shopInfo };
       success(res, "Detail order", null, data);
     } else {
-      failed(res, "Id not found!", "Aucun Ticket Dispo");
+      failed(res, "Ticket introuvable.", "Aucun Ticket Dispo", 404);
     }
   });
 };

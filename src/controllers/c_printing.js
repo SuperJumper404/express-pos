@@ -67,13 +67,13 @@ exports.addPrintingJob = async (req, res) => {
     // }
     console.log("AddPrintingJob for shopId =", shopId, " XML =", xml);
     if (!xml) {
-      return failed(res, "Missing XML in request.");
+      return failed(res, "Données d'impression manquantes.", "Missing XML in request.", 400);
     }
     setMultiple(shopId, { shopId, ticketType, xml });
-    return res.send(xml);
+    return success(res, "Travail d'impression ajouté.", null, { ticketType });
   } catch (err) {
     console.error("Error addPrintingJob", err);
-    return failed(res, "Unexpected error");
+    return failed(res, "Erreur inattendue pendant l'impression.", err.message);
   }
 };
 
@@ -91,12 +91,12 @@ exports.getPrintingJob = async (req, res) => {
         res.send(printJob.xml);
         return;
       }
-      return success(res, { job: null });
+      return success(res, "Aucun travail d'impression disponible.", null, { job: null });
     } else {
-      return failed(res, "Missing shop ID");
+      return failed(res, "Identifiant boutique manquant.", "Missing shop ID", 400);
     }
   } catch (err) {
     console.error("Error getPrintingJob", err);
-    return failed(res, "Unexpected error");
+    return failed(res, "Erreur inattendue pendant la récupération d'impression.", err.message);
   }
 };

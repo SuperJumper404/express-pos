@@ -23,7 +23,7 @@ module.exports = {
     mCheckEmail(body.email)
       .then(async (response) => {
         if (response.length >= 1) {
-          custom(res, 422, "Email has been register!", {}, null);
+          custom(res, 422, "Cet email est déjà enregistré.", {}, null);
         } else {
           console.log("Adding USer");
           const salt = await bcrypt.genSaltSync(10);
@@ -49,7 +49,7 @@ module.exports = {
           mRegister(data)
             .then(() => {
               console.log("Double Good");
-              success("New User Registered");
+              success(res, "Compte créé avec succès.", {}, null);
               // mCreateActivation(token, body.email).then(() => {
               //   // send email
               //   mailer.register(body.email, body.username, token).then(() => {
@@ -136,16 +136,16 @@ module.exports = {
               custom(
                 res,
                 422,
-                `Votre compte n'est pas encore activé! Vérifiez votre email !`,
+              `Votre compte n'est pas encore activé ! Vérifiez votre email.`,
                 {},
                 null,
               );
             }
           } else {
-            custom(res, 422, "Votre mot de passe est incorrect !", {}, null);
+            custom(res, 422, "Votre mot de passe est incorrect.", {}, null);
           }
         } else {
-          custom(res, 422, "Votre email n'est pas enregistré", {}, null);
+          custom(res, 422, "Votre email n'est pas enregistré.", {}, null);
         }
       })
       .catch((error) => {

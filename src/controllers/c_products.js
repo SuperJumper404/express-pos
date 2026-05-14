@@ -56,7 +56,7 @@ module.exports = {
     } else {
       mAddProduct(body)
         .then(() => {
-          custom(res, 200, "Create product success!", {}, null);
+          custom(res, 201, "Create product success!", {}, null);
         })
         .catch((error) => {
           failed(res, "Internal server error!", error.message);

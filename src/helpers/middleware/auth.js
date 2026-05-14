@@ -1,4 +1,4 @@
-const { custom } = require("../response");
+const { custom, failed } = require("../response");
 const jwt = require("jsonwebtoken");
 const { envJWTKEY } = require("../env");
 console.log("Secret Key JWt", envJWTKEY);
@@ -16,11 +16,11 @@ module.exports = {
           req.email = decoded.email;
           next();
         } else {
-          res.status(401).send("Expired Token");
+          failed(res, "Session expirée, veuillez vous reconnecter.", error.message, 401);
         }
       });
     } else {
-      custom(res, 401, "Token required!", {}, null);
+      custom(res, 401, "Token requis, veuillez vous reconnecter.", {}, null);
     }
   },
   authAdmin: (req, res, next) => {
@@ -30,7 +30,7 @@ module.exports = {
     if (access === 0) {
       next();
     } else {
-      custom(res, 401, "Access denied!, Only for admin", {}, null);
+      custom(res, 403, "Accès refusé, réservé aux administrateurs.", {}, null);
     }
   },
   authCashier: (req, res, next) => {
@@ -38,7 +38,7 @@ module.exports = {
     if (access === 1) {
       next();
     } else {
-      custom(res, 401, "Access denied!, Only for cashier", {}, null);
+      custom(res, 403, "Accès refusé, réservé aux caissiers.", {}, null);
     }
   },
   authCustomer: (req, res, next) => {
@@ -46,7 +46,7 @@ module.exports = {
     if (access === 2) {
       next();
     } else {
-      custom(res, 401, "Access denied!, Only for customer", {}, null);
+      custom(res, 403, "Accès refusé, réservé aux clients.", {}, null);
     }
   },
 };
