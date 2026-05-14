@@ -22,6 +22,12 @@ const { isMissing, parseMoney } = require("../helpers/money");
 const jwt = require("jsonwebtoken");
 const response = require("../helpers/response");
 const { mGetShopInfo } = require("../modules/m_shop");
+
+const moneyOrZero = (value) => {
+  const parsed = parseMoney(value);
+  return parsed === null ? 0 : parsed;
+};
+
 exports.allOrder = async (req, res) => {
   mAllOrder(req.shopid)
     .then((response) => {
@@ -279,15 +285,20 @@ exports.metrics = async (req, res) => {
   console.log(`Fetching metrics for shop ${shopId} from ${from} to ${to}`);
   const allOrders = await mAllArchivedOrdersWithDetails(shopId, from, to);
   let metrics = {
-    totalRevenue: allOrders.reduce((total, current) => {
-      return total + (current.subtotal || 0); // ou current.prix_total selon ton champ
-    }, 0),
+    totalRevenue: Number(
+      allOrders
+        .reduce((total, current) => {
+          return total + moneyOrZero(current.subtotal); // ou current.prix_total selon ton champ
+        }, 0)
+        .toFixed(2),
+    ),
     totalOrders: allOrders.length,
   };
 
-  metrics.averageOrder = Number(
-    metrics.totalRevenue / metrics.totalOrders,
-  ).toFixed(2);
+  metrics.averageOrder =
+    metrics.totalOrders > 0
+      ? Number((metrics.totalRevenue / metrics.totalOrders).toFixed(2))
+      : 0;
 
   metrics.averageOrderPreparationTime =
     getAverageOrderPreparationTime(allOrders);
@@ -312,7 +323,7 @@ function getPaymentsSummary(orders) {
 
   for (const order of orders) {
     const type = order.payment || "Autres";
-    const montant = order.subtotal || 0;
+    const montant = moneyOrZero(order.subtotal);
 
     if (!paymentTotals[type]) {
       paymentTotals[type] = 0;
@@ -345,8 +356,8 @@ function getTopProducts(allOrders) {
 
     for (const item of order.details) {
       const name = item.name || "inconnu";
-      const qty = item.qty || 0;
-      const revenue = item.total || 0;
+      const qty = Number(item.qty || 0);
+      const revenue = moneyOrZero(item.total);
 
       if (!productStats[name]) {
         productStats[name] = {
