@@ -13,20 +13,23 @@ const { isMissing, parseMoney } = require("../helpers/money");
 const { success, custom, failed } = require("../helpers/response");
 const fs = require("fs");
 
+const normalizeProductCustomizations = (customizations) =>
+  customizations.map((customization) => ({
+    ...customization,
+    items: (customization.items || []).map((item) => ({
+      ...item,
+      price: parseMoney(item.price) || 0,
+    })),
+  }));
+
 module.exports = {
   addProduct: (req, res) => {
     console.log("New Product To Add  ", req.body.product_customization);
     const body = req.body;
     if (body.product_customization) {
       body.product_customization = JSON.parse(body.product_customization);
-      body.product_customization = body.product_customization.map(
-        (customization) => ({
-          ...customization,
-          items: (customization.items || []).map((item) => ({
-            ...item,
-            price: parseMoney(item.price) || 0,
-          })),
-        }),
+      body.product_customization = normalizeProductCustomizations(
+        body.product_customization,
       );
     }
     const parsedPrice = parseMoney(body.price);
@@ -93,6 +96,11 @@ module.exports = {
         return custom(res, 400, "Bad request", {}, null);
       }
       body.price = parsedPrice;
+    }
+    if (body.product_customization) {
+      body.product_customization = normalizeProductCustomizations(
+        body.product_customization,
+      );
     }
     const id = req.params.id;
     const detail = await mDetailProduct(id);
