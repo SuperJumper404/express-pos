@@ -40,7 +40,7 @@ const multerUploadImg = multer({
     } else {
       callback(
         {
-          error: "Wrong type extention!",
+          error: "Type de fichier non autorisé.",
           code: "typeExtWrong",
         },
         false,
@@ -61,14 +61,14 @@ const singleUploadProductImg = (req, res, next) => {
           return custom(
             res,
             400,
-            `File size exceeds the ${limitFile} Mb limit`,
+            `Le fichier dépasse la limite de ${limitFile} Mo.`,
             {},
             null,
           );
         } else if (error.code === "typeExtWrong") {
-          return custom(res, 400, "Wrong type extention!", {}, null);
+          return custom(res, 400, "Type de fichier non autorisé.", {}, null);
         } else {
-          return failed(res, "Internal server error!", []);
+          return failed(res, "Erreur serveur.", []);
         }
       } else {
         next();

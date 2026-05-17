@@ -31,20 +31,20 @@ const moneyOrZero = (value) => {
 exports.allOrder = async (req, res) => {
   mAllOrder(req.shopid)
     .then((response) => {
-      success(res, "Get all order", null, response);
+      success(res, "Commandes récupérées.", null, response);
     })
     .catch((error) => {
-      failed(res, "Internal server error!xx", error.message);
+      failed(res, "Erreur serveur.", error.message);
     });
 };
 exports.ordersbyUserId = async (req, res) => {
   const userId = req.query.userId;
   mOrdersbyUserId(userId)
     .then((response) => {
-      success(res, "Get all order", null, response);
+      success(res, "Commandes récupérées.", null, response);
     })
     .catch((error) => {
-      failed(res, "Internal server error!xx", error.message);
+      failed(res, "Erreur serveur.", error.message);
     });
 };
 exports.detailOrder = (req, res) => {
@@ -52,13 +52,13 @@ exports.detailOrder = (req, res) => {
   mDetailOrder(id)
     .then((response) => {
       if (response.length > 0) {
-        success(res, "Detail order", null, response);
+        success(res, "Détail de la commande récupéré.", null, response);
       } else {
         custom(res, 404, "Commande introuvable.", null, null);
       }
     })
     .catch((error) => {
-      failed(res, "Internal server error!", error.message);
+      failed(res, "Erreur serveur.", error.message);
     });
 };
 exports.addOrder = (req, res) => {
@@ -73,7 +73,7 @@ exports.addOrder = (req, res) => {
     !body.payment ||
     !body.status
   ) {
-    custom(res, 400, "Bad request!", null, null);
+    custom(res, 400, "Requête invalide.", null, null);
   } else {
     const timestamp = new Date().valueOf().toString();
     const randomValue = Math.floor(Math.random() * 100)
@@ -97,10 +97,10 @@ exports.addOrder = (req, res) => {
     };
     mAddOrders(data)
       .then((response) => {
-        custom(res, 201, "Add orders success!", null, response);
+        custom(res, 201, "Commande créée avec succès.", null, response);
       })
       .catch((error) => {
-        failed(res, "Internal server error!", error.message);
+        failed(res, "Erreur serveur.", error.message);
       });
   }
 };
@@ -111,14 +111,14 @@ exports.deleteOrder = (req, res) => {
     .then((response) => {
       console.log("REspons Delete", response);
       if (response[0].affectedRows > 0 || response[1].affectedRows > 0) {
-        success(res, "Delete order", null, response);
+        success(res, "Commande supprimée avec succès.", null, response);
       } else {
         custom(res, 404, "Commande introuvable.", null, null);
       }
     })
     .catch((error) => {
       console.log(error);
-      failed(res, "Internal server error!", error.message);
+      failed(res, "Erreur serveur.", error.message);
     });
 };
 exports.addDetailOrder = (req, res) => {
@@ -140,7 +140,7 @@ exports.addDetailOrder = (req, res) => {
     total === null ||
     !operator
   ) {
-    custom(res, 400, "Bad request!", null, null);
+    custom(res, 400, "Requête invalide.", null, null);
   } else {
     const dataDetail = {
       orderid,
@@ -161,18 +161,18 @@ exports.addDetailOrder = (req, res) => {
             };
             mAddNewStocks(addStock)
               .then(() => {
-                success(res, "Success Add Detail", null, null);
+                success(res, "Détail de commande ajouté avec succès.", null, null);
               })
               .catch((error) => {
-                failed(res, "Internal server error!", error.message);
+                failed(res, "Erreur serveur.", error.message);
               });
           })
           .catch((error) => {
-            failed(res, "Internal server error!", error.message);
+            failed(res, "Erreur serveur.", error.message);
           });
       })
       .catch((error) => {
-        failed(res, "Internal server error!", error.message);
+        failed(res, "Erreur serveur.", error.message);
       });
   }
 };
@@ -181,7 +181,7 @@ exports.updateOrder = async (req, res) => {
   let body = req.body;
   body.finished = new Date().toISOString().slice(0, 19).replace("T", " ");
   if (!req.body.operator || !req.body.status) {
-    custom(res, 400, "Bad request!", null, null);
+    custom(res, 400, "Requête invalide.", null, null);
   } else {
     let currentStatus = await mDetailOrder(id).then((response) => {
       return response;
@@ -198,13 +198,13 @@ exports.updateOrder = async (req, res) => {
       mUpdateOrders(body, id)
         .then((response) => {
           if (response.affectedRows) {
-            success(res, "Update orders success!", null, null);
+            success(res, "Commande mise à jour avec succès.", null, null);
           } else {
-            custom(res, 404, "Id orders not found!", null, null);
+            custom(res, 404, "Commande introuvable.", null, null);
           }
         })
         .catch((error) => {
-          failed(res, "Internal server error!", error.message);
+          failed(res, "Erreur serveur.", error.message);
         });
     } else {
       custom(res, 422, "Changement de statut non autorisé pour cette commande.", null, null);
@@ -220,13 +220,13 @@ exports.archiveOrder = (req, res) => {
   mArchiveOrder(id, payment_method)
     .then((response) => {
       if (response.affectedRows) {
-        success(res, "Archive order success!", null, null);
+        success(res, "Commande archivée avec succès.", null, null);
       } else {
-        custom(res, 404, "Id order not found!", null, null);
+        custom(res, 404, "Commande introuvable.", null, null);
       }
     })
     .catch((error) => {
-      failed(res, "Internal server error!", error.message);
+      failed(res, "Erreur serveur.", error.message);
     });
 };
 
@@ -234,10 +234,10 @@ exports.allArchivedOrders = async (req, res) => {
   console.log("Controler History");
   mAllArchivedOrders(req.shopid)
     .then((response) => {
-      success(res, "Get all order", null, response);
+      success(res, "Commandes récupérées.", null, response);
     })
     .catch((error) => {
-      failed(res, "Internal server error!xx", error.message);
+      failed(res, "Erreur serveur.", error.message);
     });
 };
 
@@ -246,14 +246,14 @@ exports.detailArchivedOrder = (req, res) => {
   mDetailArchivedOrder(id)
     .then((response) => {
       if (response.length > 0) {
-        success(res, "Detail order", null, response);
+        success(res, "Détail de la commande récupéré.", null, response);
       } else {
         custom(res, 404, "Commande archivée introuvable.", null, null);
       }
     })
 
     .catch((error) => {
-      failed(res, "Internal server error!", error.message);
+      failed(res, "Erreur serveur.", error.message);
     });
 };
 exports.orderByToken = (req, res) => {
@@ -264,7 +264,7 @@ exports.orderByToken = (req, res) => {
       const shopInfo = await mGetShopInfo(response[0].shopid).then();
       console.log(shopInfo);
       const data = { orderDetail: response, shopInfo };
-      success(res, "Detail order", null, data);
+      success(res, "Détail de la commande récupéré.", null, data);
     } else {
       failed(res, "Ticket introuvable.", "Aucun Ticket Dispo", 404);
     }

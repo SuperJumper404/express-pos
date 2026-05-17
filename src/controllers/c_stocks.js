@@ -15,7 +15,7 @@ exports.addStock = (req, res) => {
     !body.operator ||
     !body.remark
   ) {
-    custom(res, 400, "Bad request", {}, null);
+    custom(res, 400, "Requête invalide.", {}, null);
   } else {
     mAddStock(body)
       .then(() => {
@@ -23,43 +23,43 @@ exports.addStock = (req, res) => {
           const addQty = `stock+'${body.qty}' WHERE id='${body.productid}'`;
           updateProductStock(addQty)
             .then(() => {
-              success(res, "Success add", null, null);
+              success(res, "Stock ajouté avec succès.", null, null);
             })
             .catch((error) => {
-              failed(res, "Internal server error!", error.message);
+              failed(res, "Erreur serveur.", error.message);
             });
         } else if (body.category === "1") {
           const reduceQty = `stock-'${body.qty}' WHERE id='${body.productid}'`;
           updateProductStock(reduceQty)
             .then(() => {
-              success(res, "Success reduce", null, null);
+              success(res, "Stock réduit avec succès.", null, null);
             })
             .catch((error) => {
-              failed(res, "Internal server error!", error.message);
+              failed(res, "Erreur serveur.", error.message);
             });
         } else {
           const adjusmentQty = `'${body.qty}' WHERE id='${body.productid}'`;
           updateProductStock(adjusmentQty)
             .then(() => {
-              success(res, "Success adjusment", null, null);
+              success(res, "Stock ajusté avec succès.", null, null);
             })
             .catch((error) => {
-              failed(res, "Internal server error!", error.message);
+              failed(res, "Erreur serveur.", error.message);
             });
         }
       })
       .catch((error) => {
-        failed(res, "Internal server error!", error.message);
+        failed(res, "Erreur serveur.", error.message);
       });
   }
 };
 exports.allStock = async (req, res) => {
   mAllStock()
     .then((response) => {
-      success(res, "Get all stock", null, response);
+      success(res, "Stocks récupérés.", null, response);
     })
     .catch((error) => {
-      failed(res, "Internal server error!", error.message);
+      failed(res, "Erreur serveur.", error.message);
     });
 };
 exports.detailStocks = (req, res) => {
@@ -67,13 +67,13 @@ exports.detailStocks = (req, res) => {
   mDetailStock(id)
     .then((response) => {
       if (response.length > 0) {
-        success(res, "Detail stock!", null, response);
+        success(res, "Détail du stock récupéré.", null, response);
       } else {
-        custom(res, 404, "Id stock not found!", null, []);
+        custom(res, 404, "Stock introuvable.", null, []);
       }
     })
     .catch((error) => {
-      failed(res, "Internal server error!", error.message);
+      failed(res, "Erreur serveur.", error.message);
     });
 };
 exports.detailProductStocksId = (req, res) => {
@@ -81,12 +81,12 @@ exports.detailProductStocksId = (req, res) => {
   mDetailProductStockId(productId)
     .then((response) => {
       if (response.length > 0) {
-        success(res, "Detail stock product id!", null, response);
+        success(res, "Stock du produit récupéré.", null, response);
       } else {
-        custom(res, 404, "Product id not found!", null, []);
+        custom(res, 404, "Produit introuvable.", null, []);
       }
     })
     .catch((error) => {
-      failed(res, "Internal server error!", error.message);
+      failed(res, "Erreur serveur.", error.message);
     });
 };

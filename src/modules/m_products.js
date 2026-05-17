@@ -38,6 +38,7 @@ WHERE products.id = ?
           stock: result[0].stock,
           image: result[0].image,
           archived: result[0].archived,
+          is_hidden: result[0].is_hidden,
           product_customization: [],
         };
 

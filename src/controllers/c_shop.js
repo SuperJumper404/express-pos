@@ -36,6 +36,22 @@ const DEFAULT_SHOP_SOCIAL_MEDIA = {
   twitter: "",
 };
 
+const parseStoredJson = (value, fallback) => {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+
+  if (typeof value !== "string") {
+    return value;
+  }
+
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    return fallback;
+  }
+};
+
 exports.getCreateShopBackoffice = (req, res) => {
   res.sendFile(path.join(__dirname, "../../public/backoffice/shop-init.html"));
 };
@@ -62,7 +78,7 @@ exports.createAndInitializeShop = async (req, res) => {
       return custom(
         res,
         422,
-        `Missing required fields: ${missingFields.join(", ")}`,
+        `Champs requis manquants : ${missingFields.join(", ")}`,
         null,
         null,
       );
@@ -102,12 +118,12 @@ exports.createAndInitializeShop = async (req, res) => {
 
     success(
       res,
-      "Shop created and initialized successfully",
+      "Boutique créée et initialisée avec succès.",
       null,
       createdShop,
     );
   } catch (error) {
-    failed(res, "Error while creating and initializing shop", error.message);
+    failed(res, "Erreur lors de la création et de l'initialisation de la boutique.", error.message);
   }
 };
 
@@ -115,11 +131,11 @@ exports.getShopInfo = async (req, res) => {
   mGetShopInfo(req.shopid)
     .then((response) => {
       console.log("Shop Info", response);
-      success(res, "Shop Info", null, response);
+      success(res, "Informations boutique récupérées.", null, response);
     })
     .catch((error) => {
       console.log("Error On getting shop info");
-      failed(res, "Error On getting shop info", error.message);
+      failed(res, "Erreur lors de la récupération des informations boutique.", error.message);
     });
 };
 
@@ -156,10 +172,10 @@ exports.getShopInfoClickAndCollect = async (req, res) => {
     };
 
     // Une seule réponse HTTP
-    success(res, "Shop Info Click and collect", null, data);
+    success(res, "Informations click and collect récupérées.", null, data);
   } catch (error) {
     console.log("Error On getting shop info click and collect", error);
-    failed(res, "Error On getting shop info click and collect", error.message);
+    failed(res, "Erreur lors de la récupération des informations click and collect.", error.message);
   }
 };
 
@@ -169,9 +185,9 @@ exports.setShopInfo = async (req, res) => {
   console.log("Set Shop ", JSON.stringify(req.body));
   try {
     await mUpdateShopInfo(req.body, req.shopid);
-    success(res, "Shop info updated", null, null);
+    success(res, "Informations boutique mises à jour.", null, null);
   } catch (error) {
-    failed(res, "Error On updating shop info", error.message);
+    failed(res, "Erreur lors de la mise à jour des informations boutique.", error.message);
   }
 };
 
@@ -217,16 +233,16 @@ exports.updateShopInfo = async (req, res) => {
       activate_tva: prefer(req.body.activate_tva, shopInfo.activate_tva),
       hours: prefer(
         req.body.shop_hours,
-        JSON.parse(JSON.stringify(shopInfo.hours)),
+        parseStoredJson(shopInfo.hours, DEFAULT_SHOP_HOURS),
       ),
       shop_social_media: prefer(
         req.body.shop_social_media,
-        JSON.parse(JSON.stringify(shopInfo.shop_social_media)),
+        parseStoredJson(shopInfo.shop_social_media, DEFAULT_SHOP_SOCIAL_MEDIA),
       ),
 
       shop_payment_methods: prefer(
         req.body.shop_payment_methods,
-        JSON.parse(JSON.stringify(shopInfo.shop_payment_methods)),
+        parseStoredJson(shopInfo.shop_payment_methods, DEFAULT_SHOP_PAYMENT_METHODS),
       ),
       shop_profile_image: req.file?.filename || shopInfo.shop_profile_image,
       shop_status: prefer(req.body.shop_status, shopInfo.shop_status),
@@ -235,8 +251,8 @@ exports.updateShopInfo = async (req, res) => {
     };
     console.log("Full Shop Data", data);
     await mUpdateShopInfo(data, req.shopid);
-    success(res, "Shop info updated", null, null);
+    success(res, "Informations boutique mises à jour.", null, null);
   } catch (error) {
-    failed(res, "Error On updating shop info", error.message);
+    failed(res, "Erreur lors de la mise à jour des informations boutique.", error.message);
   }
 };

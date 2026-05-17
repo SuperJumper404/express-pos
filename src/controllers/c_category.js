@@ -12,14 +12,14 @@ module.exports = {
     body.shopid = req.shopid;
     body.created = new Date();
     if (!body.name) {
-      custom(res, 400, "Bad request!", {}, null);
+      custom(res, 400, "Requête invalide.", {}, null);
     } else {
       mAddCategory(body)
         .then(() => {
-          custom(res, 201, "Create category success!", {}, null);
+          custom(res, 201, "Catégorie créée avec succès.", {}, null);
         })
         .catch((error) => {
-          failed(res, "Internal server error!", error.message);
+          failed(res, "Erreur serveur.", error.message);
         });
     }
   },
@@ -27,10 +27,10 @@ module.exports = {
     const filterByShopid = req.shopid;
     mAllCategory(filterByShopid)
       .then((response) => {
-        success(res, "Get all category!", null, response);
+        success(res, "Catégories récupérées.", null, response);
       })
       .catch((error) => {
-        failed(res, "Internal server error!", error.message);
+        failed(res, "Erreur serveur.", error.message);
       });
   },
   detailCategory: (req, res) => {
@@ -38,13 +38,13 @@ module.exports = {
     mDetailCategory(id)
       .then((response) => {
         if (response.length > 0) {
-          success(res, "Detail category", null, response);
+          success(res, "Détail de la catégorie récupéré.", null, response);
         } else {
-          custom(res, 404, "Id category not found!", null, null);
+          custom(res, 404, "Catégorie introuvable.", null, null);
         }
       })
       .catch((error) => {
-        failed(res, "Internal server error!", error.message);
+        failed(res, "Erreur serveur.", error.message);
       });
   },
   updateCategory: async (req, res) => {
@@ -54,13 +54,13 @@ module.exports = {
     mUpdateCategory(body, id)
       .then((response) => {
         if (response.affectedRows) {
-          success(res, "Update category success!", null, null);
+          success(res, "Catégorie mise à jour avec succès.", null, null);
         } else {
-          custom(res, 404, "Id category not found!", null, null);
+          custom(res, 404, "Catégorie introuvable.", null, null);
         }
       })
       .catch((error) => {
-        failed(res, "Internal server error!", error.message);
+        failed(res, "Erreur serveur.", error.message);
       });
   },
   deleteCategory: async (req, res) => {
@@ -69,16 +69,16 @@ module.exports = {
       mDeleteCategory(id)
         .then((response) => {
           if (response.affectedRows) {
-            success(res, "Delete category success!", null, null);
+            success(res, "Catégorie supprimée avec succès.", null, null);
           } else {
-            custom(res, 404, "Id category not found!", null, null);
+            custom(res, 404, "Catégorie introuvable.", null, null);
           }
         })
         .catch((error) => {
-          failed(res, "Internal server error!", error.message);
+          failed(res, "Erreur serveur.", error.message);
         });
     } catch (error) {
-      failed(res, "Internal server error!", error.message);
+      failed(res, "Erreur serveur.", error.message);
     }
   },
 };

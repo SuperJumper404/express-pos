@@ -62,12 +62,12 @@ module.exports = {
               // })
             })
             .catch((error) => {
-              failed(res, "Internal Server Error!", error.message);
+              failed(res, "Erreur serveur.", error.message);
             });
         }
       })
       .catch((error) => {
-        failed(res, "Internal server error!", error.message);
+        failed(res, "Erreur serveur.", error.message);
       });
   },
   activation: (req, res) => {
@@ -81,18 +81,18 @@ module.exports = {
           .then(() => {
             mDeleteActivation(response[0].id)
               .then(() => {
-                success(res, "Activated", {}, null);
+                success(res, "Compte activé.", {}, null);
               })
               .catch((error) => {
-                failed(res, "Internal Server Error!", error.message);
+                failed(res, "Erreur serveur.", error.message);
               });
           })
           .catch((error) => {
-            failed(res, "Internal Server Error!", error.message);
+            failed(res, "Erreur serveur.", error.message);
           });
       })
       .catch((error) => {
-        failed(res, "Internal Server Error!", error.message);
+        failed(res, "Erreur serveur.", error.message);
       });
   },
   login: (req, res) => {
@@ -129,7 +129,7 @@ module.exports = {
                     success(res, "Connexion réussie !", null, response);
                   })
                   .catch((error) => {
-                    failed(res, "Internal Server Error!", error.message);
+                    failed(res, "Erreur serveur.", error.message);
                   });
               });
             } else {
@@ -149,7 +149,7 @@ module.exports = {
         }
       })
       .catch((error) => {
-        failed(res, "Internal Server Error!", error.message);
+        failed(res, "Erreur serveur.", error.message);
       });
   },
   logout: (req, res) => {
@@ -168,7 +168,7 @@ module.exports = {
         }
       })
       .catch((error) => {
-        failed(res, "Internal Server Error!", error.message);
+        failed(res, "Erreur serveur.", error.message);
       });
   },
   profileMe: (req, res) => {
@@ -176,29 +176,29 @@ module.exports = {
     const token = authorization.split(" ");
     mProfileMe(token[1])
       .then((response) => {
-        success(res, "Data profile!", null, response);
+        success(res, "Profil récupéré.", null, response);
       })
       .catch((error) => {
-        failed(res, "Internal Server Error!", error.message);
+        failed(res, "Erreur serveur.", error.message);
       });
   },
   getAllUser: async (req, res) => {
     mGetAllUser(req.shopid)
       .then((response) => {
-        success(res, "Get all data user", null, response);
+        success(res, "Utilisateurs récupérés.", null, response);
       })
       .catch((error) => {
-        failed(res, "Internal server error!", error.message);
+        failed(res, "Erreur serveur.", error.message);
       });
   },
   getDetailUser: (req, res) => {
     const id = req.params.id;
     mDetailUser(id)
       .then((response) => {
-        success(res, "Detail user", null, response);
+        success(res, "Détail utilisateur récupéré.", null, response);
       })
       .catch((error) => {
-        failed(res, "Internal Server Error!", error.message);
+        failed(res, "Erreur serveur.", error.message);
       });
   },
   updateUser: async (req, res) => {
@@ -211,10 +211,10 @@ module.exports = {
         body.image = req.file.filename;
         mUpdateUser(body, id)
           .then(() => {
-            success(res, "Update profile sucess!", {}, null);
+            success(res, "Profil mis à jour avec succès.", {}, null);
           })
           .catch((error) => {
-            failed(res, "Internal server error!", null || error.message);
+            failed(res, "Erreur serveur.", null || error.message);
           });
       } else {
         body.image = req.file.filename;
@@ -224,19 +224,19 @@ module.exports = {
         }
         mUpdateUser(body, id)
           .then(() => {
-            success(res, "Update profile success", {}, null);
+            success(res, "Profil mis à jour avec succès.", {}, null);
           })
           .catch((error) => {
-            failed(res, "Internal server error!", null || error.message);
+            failed(res, "Erreur serveur.", null || error.message);
           });
       }
     } else {
       mUpdateUser(body, id)
         .then(() => {
-          success(res, "Update success", {}, null);
+          success(res, "Mise à jour effectuée.", {}, null);
         })
         .catch((error) => {
-          failed(res, "Internal Server Error!", error.message);
+          failed(res, "Erreur serveur.", error.message);
         });
     }
   },
@@ -249,21 +249,21 @@ module.exports = {
           if (response.affectedRows) {
             // select image profile
             if (callDetail[0].image === "defaultuser.png") {
-              success(res, "Delete success!", {}, null);
+              success(res, "Utilisateur supprimé avec succès.", {}, null);
             } else {
               const locationPath = `./public/profile/${callDetail[0].image}`;
               fs.unlinkSync(locationPath);
-              success(res, "Delete success.", {}, null);
+              success(res, "Utilisateur supprimé avec succès.", {}, null);
             }
           } else {
-            custom(res, 404, "Id user not found!", null, null);
+            custom(res, 404, "Utilisateur introuvable.", null, null);
           }
         })
         .catch((error) => {
-          failed(res, "Internal server error!", error.message);
+          failed(res, "Erreur serveur.", error.message);
         });
     } catch (error) {
-      failed(res, "Internal server error!", error.message);
+      failed(res, "Erreur serveur.", error.message);
     }
   },
 };

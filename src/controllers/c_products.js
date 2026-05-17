@@ -22,10 +22,19 @@ const normalizeProductCustomizations = (customizations) =>
     })),
   }));
 
+const normalizeProductVisibility = (body) => {
+  if (body.is_hidden === undefined) {
+    return;
+  }
+
+  body.is_hidden = [true, 1, "1", "true"].includes(body.is_hidden) ? 1 : 0;
+};
+
 module.exports = {
   addProduct: (req, res) => {
     console.log("New Product To Add  ", req.body.product_customization);
     const body = req.body;
+    normalizeProductVisibility(body);
     if (body.product_customization) {
       body.product_customization = JSON.parse(body.product_customization);
       body.product_customization = normalizeProductCustomizations(
@@ -39,6 +48,7 @@ module.exports = {
     body.image = req.file.filename;
     body.shopid = req.shopid;
     body.created = new Date();
+    body.is_hidden = body.is_hidden || 0;
     if (
       !body.name ||
       !body.categoryid ||
@@ -52,25 +62,25 @@ module.exports = {
         req.file.filename,
       );
       fs.unlinkSync(locationPath);
-      custom(res, 400, "Bad request", {}, null);
+      custom(res, 400, "Requête invalide.", {}, null);
     } else {
       mAddProduct(body)
         .then(() => {
-          custom(res, 201, "Create product success!", {}, null);
+          custom(res, 201, "Produit créé avec succès.", {}, null);
         })
         .catch((error) => {
-          failed(res, "Internal server error!", error.message);
+          failed(res, "Erreur serveur.", error.message);
         });
     }
   },
   allProduct: async (req, res) => {
     mAllProduct(req.shopid)
       .then((response) => {
-        success(res, "Get all data user", null, response);
+        success(res, "Produits récupérés.", null, response);
       })
       .catch((error) => {
         console.log("erreurezrz");
-        failed(res, "Internal server error!", error.message);
+        failed(res, "Erreur serveur.", error.message);
       });
   },
   detailProduct: (req, res) => {
@@ -78,22 +88,23 @@ module.exports = {
     mDetailProduct(id)
       .then((response) => {
         if (response.length > 0) {
-          success(res, "Detail product!", null, response);
+          success(res, "Détail du produit récupéré.", null, response);
         } else {
-          custom(res, 404, "Id product not found!", null, []);
+          custom(res, 404, "Produit introuvable.", null, []);
         }
       })
       .catch((error) => {
-        failed(res, "Internal server error!", error.message);
+        failed(res, "Erreur serveur.", error.message);
       });
   },
   updateProduct: async (req, res) => {
     const body = req.body;
     body.updated = new Date();
+    normalizeProductVisibility(body);
     if (!isMissing(body.price)) {
       const parsedPrice = parseMoney(body.price);
       if (parsedPrice === null) {
-        return custom(res, 400, "Bad request", {}, null);
+        return custom(res, 400, "Requête invalide.", {}, null);
       }
       body.price = parsedPrice;
     }
@@ -120,18 +131,18 @@ module.exports = {
       }
       mUpdateProduct(body, id)
         .then(() => {
-          success(res, "Update image product success!", {}, null);
+          success(res, "Image du produit mise à jour avec succès.", {}, null);
         })
         .catch((error) => {
-          failed(res, "Internal server error!", error.message);
+          failed(res, "Erreur serveur.", error.message);
         });
     } else {
       mUpdateProduct(body, id)
         .then(() => {
-          success(res, "Update product success!", {}, null);
+          success(res, "Produit mis à jour avec succès.", {}, null);
         })
         .catch((error) => {
-          failed(res, "Internal server error!", error.message);
+          failed(res, "Erreur serveur.", error.message);
         });
     }
   },
@@ -145,10 +156,10 @@ module.exports = {
         console.log("Product used, archive it", id);
         await mArchiveProduct(id)
           .then(() => {
-            success(res, "Archive product success!", {}, null);
+            success(res, "Produit archivé avec succès.", {}, null);
           })
           .catch((error) => {
-            failed(res, "Internal server error!", error.message);
+            failed(res, "Erreur serveur.", error.message);
           });
       } else {
         console.log("Product not used, delete it", id);
@@ -161,17 +172,17 @@ module.exports = {
                 callDetail[0].image,
               );
               fs.unlinkSync(locationPath);
-              success(res, "Delete product success!", {}, null);
+              success(res, "Produit supprimé avec succès.", {}, null);
             } else {
-              custom(res, 404, "Id product not found!", null, null);
+              custom(res, 404, "Produit introuvable.", null, null);
             }
           })
           .catch((error) => {
-            failed(res, "Internal server error!", error.message);
+            failed(res, "Erreur serveur.", error.message);
           });
       }
     } catch (error) {
-      failed(res, "Internal server error!", error.message);
+      failed(res, "Erreur serveur.", error.message);
     }
   },
 };
