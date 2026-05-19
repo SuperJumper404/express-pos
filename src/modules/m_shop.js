@@ -38,6 +38,7 @@ module.exports = {
           shop_social_media: JSON.stringify(data.shop_social_media),
           shop_profile_image: data.shop_profile_image,
           shop_status: data.shop_status,
+          kitchen_closed: data.kitchen_closed || 0,
           shop_printer_ip: data.shop_printer_ip,
           smart_print_app: data.smart_print_app,
         };
@@ -216,6 +217,7 @@ module.exports = {
     shop_payment_methods = ?,
     shop_profile_image = ?,
     shop_status = ?,
+    kitchen_closed = ?,
     shop_printer_ip = ?,
     smart_print_app = ? 
   WHERE id = ?
@@ -232,6 +234,7 @@ module.exports = {
         JSON.stringify(data.shop_payment_methods),
         data.shop_profile_image,
         data.shop_status,
+        data.kitchen_closed,
         data.shop_printer_ip,
         data.smart_print_app,
         id, // ou req.shopid si c’est ça ta variable

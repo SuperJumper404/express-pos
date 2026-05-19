@@ -134,6 +134,7 @@ CREATE TABLE `shop` (
   `shop_social_media` longtext CHARACTER SET latin1,
   `shop_profile_image` varchar(255) CHARACTER SET latin1 NOT NULL,
   `shop_status` varchar(255) CHARACTER SET latin1 DEFAULT NULL,
+  `kitchen_closed` tinyint(1) NOT NULL DEFAULT '0',
   `shop_printer_ip` varchar(255) CHARACTER SET latin1 NOT NULL,
   `smart_print_app` tinyint(1) DEFAULT NULL,
   UNIQUE KEY `shop_name` (`shop_name`),

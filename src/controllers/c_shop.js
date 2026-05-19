@@ -109,6 +109,7 @@ exports.createAndInitializeShop = async (req, res) => {
       shop_social_media: DEFAULT_SHOP_SOCIAL_MEDIA,
       shop_profile_image: body.shop_profile_image || "",
       shop_status: body.shop_status || "inactive",
+      kitchen_closed: 0,
       shop_printer_ip: body.shop_printer_ip || "",
       smart_print_app: 1,
       created,
@@ -162,6 +163,7 @@ exports.getShopInfoClickAndCollect = async (req, res) => {
       hours: response?.[0]?.hours,
       shop_social_media: response?.[0]?.shop_social_media,
       shop_status: response?.[0]?.shop_status,
+      kitchen_closed: response?.[0]?.kitchen_closed,
       shop_profile_image: response?.[0]?.shop_profile_image,
       shop_printer_ip: response?.[0]?.shop_printer_ip,
       smart_print_app: response?.[0]?.smart_print_app,
@@ -246,6 +248,7 @@ exports.updateShopInfo = async (req, res) => {
       ),
       shop_profile_image: req.file?.filename || shopInfo.shop_profile_image,
       shop_status: prefer(req.body.shop_status, shopInfo.shop_status),
+      kitchen_closed: prefer(req.body.kitchen_closed, shopInfo.kitchen_closed || 0),
       shop_printer_ip: prefer(req.body.shop_printer_ip, shopInfo.shop_printer_ip),
       smart_print_app: prefer(req.body.smart_print_app, shopInfo.smart_print_app),
     };

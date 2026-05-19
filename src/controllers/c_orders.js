@@ -61,9 +61,26 @@ exports.detailOrder = (req, res) => {
       failed(res, "Erreur serveur.", error.message);
     });
 };
-exports.addOrder = (req, res) => {
+exports.addOrder = async (req, res) => {
   const body = req.body;
   const subtotal = parseMoney(body.subtotal);
+  const shopRows = await mGetShopInfo(req.shopid).catch((error) => {
+    failed(res, "Erreur serveur.", error.message);
+    return null;
+  });
+  if (!shopRows) return;
+
+  const kitchenClosed = shopRows?.[0]?.kitchen_closed;
+  if ([true, 1, "1", "true"].includes(kitchenClosed)) {
+    return custom(
+      res,
+      422,
+      "La cuisine est fermee, les nouvelles commandes sont bloquees.",
+      null,
+      null,
+    );
+  }
+
   if (
     !body.customer ||
     !body.customerID ||
