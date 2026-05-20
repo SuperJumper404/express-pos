@@ -4,15 +4,16 @@
   "description": "Restfull API pos using expressJS etc.",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test sspecified\" && exit 1",
-    "start": " cross-env NODE_ENV=local nodemon index.js",
-    "startAndWatch": "cross-env NODE_ENV=local nodemon --watch src index.js",
-    "network": " cross-env NODE_ENV=local nodemon index.js ",
+    "test": "node test/stripe-payment.test.js",
+    "start": "nodemon index.js",
+    "startAndWatch": "nodemon --watch src index.js",
+    "network": "nodemon index.js",
     "db:new": "dbmate --migrations-dir=db/migrations new",
     "db:up": "dbmate --migrations-dir=db/migrations up",
-    "db:migrate:local": "cross-env DATABASE_URL=mysql://root:@localhost:3306/pointofsale dbmate --migrations-dir=db/migrations migrate DATABASE_URL=mysql://root:@localhost:3306/pointofsale",
+    "db:migrate:local": "dbmate --env-file .env.local --migrations-dir=db/migrations migrate",
     "db:rollback": "dbmate --migrations-dir=db/migrations rollback",
-    "db:up:local": " cross-env DATABASE_URL=mysql://root:@localhost:3306/pointofsale  dbmate --migrations-dir=db/migrations up ",
+    "db:up:local": "dbmate --env-file .env.local --migrations-dir=db/migrations up",
+    "db:down:local": "dbmate --env-file .env.local --migrations-dir=db/migrations down",
     "db:up:staging": "dbmate --migrations-dir=db/migrations up",
     "env:encrypt:staging": "dotenvx encrypt -f .env.staging",
     "env:encrypt:production": "dotenvx encrypt -f .env.production",
@@ -38,7 +39,8 @@
     "nanoid": "^5.1.5",
     "node-cache": "^5.1.2",
     "node-mailjet": "^3.3.1",
-    "nodemon": "^2.0.7"
+    "nodemon": "^2.0.7",
+    "stripe": "^22.1.1"
   },
   "devDependencies": {
     "@dotenvx/dotenvx": "^1.55.1",

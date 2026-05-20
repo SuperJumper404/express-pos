@@ -1,4 +1,5 @@
 const conn = require("../config/db");
+const { normalizeQrPaymentMode } = require("../helpers/qrPaymentMode");
 module.exports = {
   mGetShopInfo: (id) => {
     return new Promise((resolve, reject) => {
@@ -219,7 +220,12 @@ module.exports = {
     shop_status = ?,
     kitchen_closed = ?,
     shop_printer_ip = ?,
-    smart_print_app = ? 
+    smart_print_app = ?,
+    qr_payment_mode = ?,
+    stripe_account_id = ?,
+    stripe_onboarding_complete = ?,
+    stripe_charges_enabled = ?,
+    stripe_payouts_enabled = ?
   WHERE id = ?
 `;
       const values = [
@@ -237,6 +243,11 @@ module.exports = {
         data.kitchen_closed,
         data.shop_printer_ip,
         data.smart_print_app,
+        normalizeQrPaymentMode(data.qr_payment_mode),
+        data.stripe_account_id,
+        data.stripe_onboarding_complete,
+        data.stripe_charges_enabled,
+        data.stripe_payouts_enabled,
         id, // ou req.shopid si c’est ça ta variable
       ];
 
@@ -248,6 +259,32 @@ module.exports = {
           resolve(result);
         }
       });
+    });
+  },
+  mUpdateStripeAccount: (id, data) => {
+    return new Promise((resolve, reject) => {
+      conn.query(
+        `UPDATE shop
+         SET stripe_account_id = ?,
+             stripe_onboarding_complete = ?,
+             stripe_charges_enabled = ?,
+             stripe_payouts_enabled = ?
+         WHERE id = ?`,
+        [
+          data.stripe_account_id,
+          data.stripe_onboarding_complete ? 1 : 0,
+          data.stripe_charges_enabled ? 1 : 0,
+          data.stripe_payouts_enabled ? 1 : 0,
+          id,
+        ],
+        (err, result) => {
+          if (err) {
+            reject(new Error(err.message));
+          } else {
+            resolve(result);
+          }
+        },
+      );
     });
   },
 };

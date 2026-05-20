@@ -11,6 +11,7 @@ const fs = require("fs");
 const path = require("path");
 const bcrypt = require("bcrypt");
 const { nanoid } = require("nanoid");
+const { normalizeQrPaymentMode } = require("../helpers/qrPaymentMode");
 
 const DEFAULT_SHOP_PAYMENT_METHODS = [
   "Tickets Restaurants",
@@ -167,6 +168,9 @@ exports.getShopInfoClickAndCollect = async (req, res) => {
       shop_profile_image: response?.[0]?.shop_profile_image,
       shop_printer_ip: response?.[0]?.shop_printer_ip,
       smart_print_app: response?.[0]?.smart_print_app,
+      qr_payment_mode: normalizeQrPaymentMode(response?.[0]?.qr_payment_mode),
+      stripe_charges_enabled: response?.[0]?.stripe_charges_enabled,
+      stripe_onboarding_complete: response?.[0]?.stripe_onboarding_complete,
       clickAndCollectTable: {
         email: clickAndCollectTable?.email || "",
         clearpass: clickAndCollectTable?.clearpass || "",
@@ -251,6 +255,13 @@ exports.updateShopInfo = async (req, res) => {
       kitchen_closed: prefer(req.body.kitchen_closed, shopInfo.kitchen_closed || 0),
       shop_printer_ip: prefer(req.body.shop_printer_ip, shopInfo.shop_printer_ip),
       smart_print_app: prefer(req.body.smart_print_app, shopInfo.smart_print_app),
+      qr_payment_mode: normalizeQrPaymentMode(
+        prefer(req.body.qr_payment_mode, shopInfo.qr_payment_mode),
+      ),
+      stripe_account_id: shopInfo.stripe_account_id,
+      stripe_onboarding_complete: shopInfo.stripe_onboarding_complete,
+      stripe_charges_enabled: shopInfo.stripe_charges_enabled,
+      stripe_payouts_enabled: shopInfo.stripe_payouts_enabled,
     };
     console.log("Full Shop Data", data);
     await mUpdateShopInfo(data, req.shopid);

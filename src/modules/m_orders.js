@@ -5,7 +5,7 @@ module.exports = {
   mAllOrder: (shopid) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        `SELECT orders.*, users.username FROM orders JOIN users ON orders.customerID = users.id WHERE orders.shopid = ? ORDER BY orders.created DESC`,
+        `SELECT orders.*, users.username FROM orders JOIN users ON orders.customerID = users.id WHERE orders.shopid = ? AND orders.status <> 0 ORDER BY orders.created DESC`,
         [shopid],
         (err, result) => {
           if (!err) {
