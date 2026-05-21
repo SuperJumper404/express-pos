@@ -5,7 +5,7 @@ const path = require("path");
 const { spawnSync } = require("child_process");
 
 const root = path.resolve(__dirname, "..");
-const managedEnvFiles = [".env.staging", ".env.production"];
+const managedEnvFiles = [".env.local", ".env.staging", ".env.production"];
 const zeroSha = /^0{40}$/;
 const secretPattern =
   "(sk_(live|test)_[A-Za-z0-9]+|rk_(live|test)_[A-Za-z0-9]+|whsec_[A-Za-z0-9]+|DOTENV_PRIVATE_KEY[A-Z0-9_]*=dotenvx://|-----BEGIN [A-Z ]*PRIVATE KEY-----)";
