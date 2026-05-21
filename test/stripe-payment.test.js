@@ -23,6 +23,7 @@ const params = buildDestinationPaymentIntentParams({
   orderId: 42,
   shopId: 7,
   commissionPercent: 5,
+  paymentMethodConfigurationId: "pmc_test_123",
 });
 
 assert.deepStrictEqual(params, {
@@ -30,12 +31,29 @@ assert.deepStrictEqual(params, {
   currency: "eur",
   automatic_payment_methods: { enabled: true },
   application_fee_amount: 200,
+  on_behalf_of: "acct_123",
+  payment_method_configuration: "pmc_test_123",
   transfer_data: { destination: "acct_123" },
   metadata: {
     order_id: "42",
     shop_id: "7",
   },
 });
+
+const paramsWithoutPaymentMethodConfiguration = buildDestinationPaymentIntentParams({
+  amount: 10,
+  connectedAccountId: "acct_123",
+  orderId: 43,
+  shopId: 8,
+});
+
+assert.strictEqual(
+  Object.prototype.hasOwnProperty.call(
+    paramsWithoutPaymentMethodConfiguration,
+    "payment_method_configuration",
+  ),
+  false,
+);
 
 assert.throws(
   () => buildDestinationPaymentIntentParams({ amount: 0, connectedAccountId: "acct_123" }),

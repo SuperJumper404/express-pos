@@ -30,10 +30,10 @@ yarn install
 
 ### `Starting`
 
-Create an **.env.local** file first before running this application.
+Decrypt the committed **.env.local** file before running this application.
 
 ```
-  Copy .env.local.example to .env.local, then fill your private values.
+  npm run hooks:install
 
   APP_ENV=local
   ENV_FILE=.env.local
@@ -52,12 +52,13 @@ Create an **.env.local** file first before running this application.
   STRIPE_CONNECT_RETURN_URL=http://localhost:8083/settings
   STRIPE_CONNECT_REFRESH_URL=http://localhost:8083/settings
   STRIPE_COMMISSION_PERCENT=5
+  STRIPE_PAYMENT_METHOD_CONFIGURATION_ID=
 
   Note:
   * Read the guide https://www.npmjs.com/package/node-mailjet and create an account https://www.mailjet.com/
   * PATHURL is the Nuxt frontend URL.
   * DATABASE_URL is used for the app database connection and local migrations.
-  * .env.local is ignored by Git and must not be committed.
+  * .env.local, .env.staging and .env.production are committed encrypted and decrypted locally by the Git hooks.
 
 ```
 

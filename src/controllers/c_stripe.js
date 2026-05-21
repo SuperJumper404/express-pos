@@ -5,6 +5,7 @@ const {
   envSTRIPEREFRESHURL,
   envSTRIPERETURNURL,
   envSTRIPEWEBHOOKSECRET,
+  envSTRIPEPAYMENTMETHODCONFIGURATIONID,
 } = require("../helpers/env");
 const { isMissing, parseMoney } = require("../helpers/money");
 const { custom, failed, success } = require("../helpers/response");
@@ -229,6 +230,7 @@ exports.createQrTablePaymentIntent = async (req, res) => {
       orderId: orderResult.insertId,
       shopId: req.shopid,
       commissionPercent: envSTRIPECOMMISSIONPERCENT,
+      paymentMethodConfigurationId: envSTRIPEPAYMENTMETHODCONFIGURATIONID,
     });
 
     const paymentIntent = await getStripe().paymentIntents.create(stripeParams);

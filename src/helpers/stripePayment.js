@@ -33,6 +33,7 @@ const buildDestinationPaymentIntentParams = ({
   orderId,
   shopId,
   commissionPercent = DEFAULT_COMMISSION_PERCENT,
+  paymentMethodConfigurationId,
 }) => {
   if (!connectedAccountId) {
     throw new Error("Compte Stripe restaurateur manquant");
@@ -40,7 +41,7 @@ const buildDestinationPaymentIntentParams = ({
 
   const amountInCents = toStripeAmount(amount);
 
-  return {
+  const params = {
     amount: amountInCents,
     currency,
     automatic_payment_methods: { enabled: true },
@@ -48,12 +49,19 @@ const buildDestinationPaymentIntentParams = ({
       amountInCents,
       commissionPercent,
     ),
+    on_behalf_of: connectedAccountId,
     transfer_data: { destination: connectedAccountId },
     metadata: {
       order_id: String(orderId),
       shop_id: String(shopId),
     },
   };
+
+  if (paymentMethodConfigurationId) {
+    params.payment_method_configuration = paymentMethodConfigurationId;
+  }
+
+  return params;
 };
 
 module.exports = {
