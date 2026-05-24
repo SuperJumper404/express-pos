@@ -1,6 +1,7 @@
 ﻿const assert = require("assert");
 const {
   calculateApplicationFee,
+  normalizeCommissionPercent,
   toStripeAmount,
   buildDestinationPaymentIntentParams,
 } = require("../src/helpers/stripePayment");
@@ -15,6 +16,12 @@ assert.strictEqual(toStripeAmount(12.34), 1234);
 assert.strictEqual(toStripeAmount("12.30"), 1230);
 assert.strictEqual(calculateApplicationFee(4000, 5), 200);
 assert.strictEqual(calculateApplicationFee(999, 5), 50);
+assert.strictEqual(normalizeCommissionPercent(null), 5);
+assert.strictEqual(normalizeCommissionPercent(""), 5);
+assert.strictEqual(normalizeCommissionPercent("7.5"), 7.5);
+assert.strictEqual(normalizeCommissionPercent("-1"), 5);
+assert.strictEqual(normalizeCommissionPercent("101"), 5);
+assert.strictEqual(calculateApplicationFee(1200, "7.5"), 90);
 
 const params = buildDestinationPaymentIntentParams({
   amount: 40,

@@ -16,6 +16,7 @@
     "db:down:local": "dbmate --env-file .env.local --migrations-dir=db/migrations down",
     "db:up:staging": "dbmate --migrations-dir=db/migrations up",
     "db:up:production": "dbmate --migrations-dir=db/migrations up",
+    "stripe:webhook:local": "node scripts/stripe-webhook-local.js",
     "hooks:install": "git config core.hooksPath .githooks && node scripts/env-hooks.js decrypt --soft --skip-worktree",
     "env:encrypt": "node scripts/env-hooks.js encrypt",
     "env:decrypt": "node scripts/env-hooks.js decrypt --skip-worktree",

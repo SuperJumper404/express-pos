@@ -1,6 +1,5 @@
 const { getStripe } = require("../config/stripe");
 const {
-  envSTRIPECOMMISSIONPERCENT,
   envSTRIPEPUBLISHABLEKEY,
   envSTRIPEREFRESHURL,
   envSTRIPERETURNURL,
@@ -229,7 +228,7 @@ exports.createQrTablePaymentIntent = async (req, res) => {
       connectedAccountId: shop.stripe_account_id,
       orderId: orderResult.insertId,
       shopId: req.shopid,
-      commissionPercent: envSTRIPECOMMISSIONPERCENT,
+      commissionPercent: shop.stripe_commission_percent,
       paymentMethodConfigurationId: envSTRIPEPAYMENTMETHODCONFIGURATIONID,
     });
 

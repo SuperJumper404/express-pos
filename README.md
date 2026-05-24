@@ -51,7 +51,6 @@ Decrypt the committed **.env.local** file before running this application.
   STRIPE_WEBHOOK_SECRET=
   STRIPE_CONNECT_RETURN_URL=http://localhost:8083/settings
   STRIPE_CONNECT_REFRESH_URL=http://localhost:8083/settings
-  STRIPE_COMMISSION_PERCENT=5
   STRIPE_PAYMENT_METHOD_CONFIGURATION_ID=
 
   Note:

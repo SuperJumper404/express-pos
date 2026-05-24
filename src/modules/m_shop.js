@@ -1,5 +1,6 @@
 const conn = require("../config/db");
 const { normalizeQrPaymentMode } = require("../helpers/qrPaymentMode");
+const { normalizeCommissionPercent } = require("../helpers/stripePayment");
 module.exports = {
   mGetShopInfo: (id) => {
     return new Promise((resolve, reject) => {
@@ -42,6 +43,9 @@ module.exports = {
           kitchen_closed: data.kitchen_closed || 0,
           shop_printer_ip: data.shop_printer_ip,
           smart_print_app: data.smart_print_app,
+          stripe_commission_percent: normalizeCommissionPercent(
+            data.stripe_commission_percent,
+          ),
         };
 
         conn.query(
@@ -222,6 +226,7 @@ module.exports = {
     shop_printer_ip = ?,
     smart_print_app = ?,
     qr_payment_mode = ?,
+    stripe_commission_percent = ?,
     stripe_account_id = ?,
     stripe_onboarding_complete = ?,
     stripe_charges_enabled = ?,
@@ -244,6 +249,7 @@ module.exports = {
         data.shop_printer_ip,
         data.smart_print_app,
         normalizeQrPaymentMode(data.qr_payment_mode),
+        normalizeCommissionPercent(data.stripe_commission_percent),
         data.stripe_account_id,
         data.stripe_onboarding_complete,
         data.stripe_charges_enabled,
