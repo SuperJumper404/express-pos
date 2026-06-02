@@ -44,7 +44,12 @@ jobs:
 
             export DOTENV_PRIVATE_KEY='${{ secrets.DOTENV_PRIVATE_KEY }}'
             test -n "$DOTENV_PRIVATE_KEY"
-            npx --yes @dotenvx/dotenvx decrypt -f .env.staging
+            docker run --rm \
+              -v "$PWD:/app" \
+              -w /app \
+              -e DOTENV_PRIVATE_KEY \
+              node:20-alpine \
+              npx --yes @dotenvx/dotenvx decrypt -f .env.staging
             ! grep -q "encrypted:" .env.staging
 
             docker compose --env-file .env.staging -f "$COMPOSE_FILE" down --remove-orphans || true
@@ -82,7 +87,7 @@ jobs:
 
             export DOTENV_PRIVATE_KEY='${{ secrets.DOTENV_PRIVATE_KEY }}'
             test -n "$DOTENV_PRIVATE_KEY"
-            npx dotenvx decrypt -f .env.staging
+            ./node_modules/.bin/dotenvx decrypt -f .env.staging
             ! grep -q "encrypted:" .env.staging
 
             set -a
