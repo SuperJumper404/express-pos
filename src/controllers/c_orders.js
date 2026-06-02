@@ -18,6 +18,9 @@ const {
 const { custom, success, failed } = require("../helpers/response");
 const { envJWTKEY } = require("../helpers/env");
 const { isMissing, parseMoney } = require("../helpers/money");
+const { ORDER_STATUSES } = require("../helpers/orderStatus");
+const { getStripe } = require("../config/stripe");
+const { markPaymentCanceled } = require("../modules/m_payments");
 
 const jwt = require("jsonwebtoken");
 const response = require("../helpers/response");
@@ -26,6 +29,29 @@ const { mGetShopInfo } = require("../modules/m_shop");
 const moneyOrZero = (value) => {
   const parsed = parseMoney(value);
   return parsed === null ? 0 : parsed;
+};
+
+const hasPendingStripePayment = (order = {}) =>
+  order.payment_provider === "stripe" &&
+  order.payment_status === "requires_payment" &&
+  order.stripe_payment_intent_id;
+
+const cancelPendingStripePayment = async (order) => {
+  if (!hasPendingStripePayment(order)) return;
+
+  const stripe = getStripe();
+  const paymentIntentId = order.stripe_payment_intent_id;
+  const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+
+  if (paymentIntent.status === "succeeded") {
+    throw new Error("Le paiement est deja confirme par Stripe.");
+  }
+
+  if (paymentIntent.status !== "canceled") {
+    await stripe.paymentIntents.cancel(paymentIntentId);
+  }
+
+  await markPaymentCanceled(paymentIntentId);
 };
 
 exports.allOrder = async (req, res) => {
@@ -206,12 +232,31 @@ exports.updateOrder = async (req, res) => {
     if (!currentStatus.length) {
       return custom(res, 404, "Commande introuvable.", null, null);
     }
-    if (
-      (currentStatus[0].status == 1 && body.status == 2) ||
-      (currentStatus[0].status == 2 && body.status == 3) ||
-      (currentStatus[0].status == 1 && body.status == 4) ||
-      (currentStatus[0].status == 2 && body.status == 4)
-    ) {
+    const currentOrder = currentStatus[0];
+    const nextStatus = Number(body.status);
+    const canUpdateStatus =
+      (currentOrder.status == ORDER_STATUSES.PENDING &&
+        nextStatus === ORDER_STATUSES.PREPARING) ||
+      (currentOrder.status == ORDER_STATUSES.PREPARING &&
+        nextStatus === ORDER_STATUSES.FINISHED) ||
+      (currentOrder.status == ORDER_STATUSES.PENDING &&
+        nextStatus === ORDER_STATUSES.CANCELED) ||
+      (currentOrder.status == ORDER_STATUSES.PREPARING &&
+        nextStatus === ORDER_STATUSES.CANCELED);
+
+    if (canUpdateStatus) {
+      if (nextStatus === ORDER_STATUSES.CANCELED) {
+        try {
+          await cancelPendingStripePayment(currentOrder);
+        } catch (error) {
+          return failed(
+            res,
+            "Erreur lors de l'annulation du paiement Stripe.",
+            error.message,
+          );
+        }
+      }
+
       mUpdateOrders(body, id)
         .then((response) => {
           if (response.affectedRows) {

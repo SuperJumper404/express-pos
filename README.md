@@ -30,25 +30,34 @@ yarn install
 
 ### `Starting`
 
-Create an **.env** file first before running this application.
+Decrypt the committed **.env.local** file before running this application.
 
 ```
-  Please copy and paste it into your .env file.
+  npm run hooks:install
 
+  APP_ENV=local
+  ENV_FILE=.env.local
+  NODE_ENV=local
   PORT=5005
-  DBHOST=localhost
-  DBUSER=root
-  DBPASS=
-  DBNAME=coffeeshop
-  JWTKEY=#coffeeshop1234
-  EMAIL=examples@gmail.com *using your email
-  MAILAPIKEY=xxxxxxxxx *using your MAIL API KEY
-  MAILSECRETKEY=xxxxxxxxx *using your MAIL SECRET KEY
-  PATHURL=http://localhost:3000 **
+  DATABASE_URL=mysql://root:@localhost:3306/pointofsale
+  JWTKEY=
+  EMAIL=
+  MAILAPIKEY=
+  MAILSECRETKEY=
+  PATHURL=http://localhost:3000
+  PUBLICIMAGEPATH="/home/smarteat/public"
+  STRIPE_SECRET_KEY=
+  STRIPE_PUBLISHABLE_KEY=
+  STRIPE_WEBHOOK_SECRET=
+  STRIPE_CONNECT_RETURN_URL=http://localhost:8083/settings
+  STRIPE_CONNECT_REFRESH_URL=http://localhost:8083/settings
+  STRIPE_PAYMENT_METHOD_CONFIGURATION_ID=
 
   Note:
   * Read the guide https://www.npmjs.com/package/node-mailjet and create an account https://www.mailjet.com/
-  ** URL Running on NUXTJS
+  * PATHURL is the Nuxt frontend URL.
+  * DATABASE_URL is used for the app database connection and local migrations.
+  * .env.local, .env.staging and .env.production are committed encrypted and decrypted locally by the Git hooks.
 
 ```
 
@@ -66,7 +75,7 @@ yarn start
 
 ---
 
-Pour changer de variable d'environnement, il faut soit modifier NODE_ENV avant l'execuction de index.js ou alors ecosystem.config.js
+Pour changer de variable d'environnement, il faut soit modifier NODE_ENV avant l'execuction de index.js, renseigner ENV_FILE, ou alors ecosystem.config.js.
 -installer docker
 
 - passer le user de VM en admin

@@ -1,7 +1,6 @@
 const { custom, failed } = require("../response");
 const jwt = require("jsonwebtoken");
 const { envJWTKEY } = require("../env");
-console.log("Secret Key JWt", envJWTKEY);
 module.exports = {
   authentication: (req, res, next) => {
     const authorization = req.headers.authorization;

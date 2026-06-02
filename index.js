@@ -8,6 +8,7 @@ const routerStock = require("./src/routers/stocks");
 const routerOrders = require("./src/routers/r_orders");
 const routerShop = require("./src/routers/r_shop");
 const routerPrinting = require("./src/routers/r_printing");
+const routerStripe = require("./src/routers/r_stripe");
 const { envPORT, envPUBLICIMAGEPATH } = require("./src/helpers/env");
 const prefix = require("./src/config/prefix");
 
@@ -36,6 +37,11 @@ app.use((req, res, next) => {
   );
   next();
 });
+app.use(
+  `${prefix}/stripe/webhook`,
+  bodyParser.raw({ type: "application/json" }),
+  routerStripe.webhookRouter,
+);
 app.use(bodyParser.json({ limit: "1mb" }));
 app.use(bodyParser.urlencoded({ extended: true, limit: "1mb" }));
 app.get(`${prefix}`, function (req, res) {
@@ -48,6 +54,7 @@ app.use(`${prefix}`, routerStock);
 app.use(`${prefix}`, routerOrders);
 app.use(`${prefix}`, routerShop);
 app.use(`${prefix}`, routerPrinting);
+app.use(`${prefix}`, routerStripe.routers);
 app.get(`${prefix}/testapi`, (req, res) => {
   res.json({ success: true, message: "API redirigée correctement 👌" });
 });

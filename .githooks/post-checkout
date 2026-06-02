@@ -1,0 +1,2 @@
+#!/bin/sh
+node scripts/env-hooks.js decrypt --soft --skip-worktree

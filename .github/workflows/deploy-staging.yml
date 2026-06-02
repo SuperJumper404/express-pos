@@ -42,8 +42,10 @@ jobs:
 
             cd "$APP_DIR"
 
-            # export DOTENV_PRIVATE_KEY_STAGING='${{ secrets.DOTENV_PRIVATE_KEY_STAGING }}'
-            # npx dotenvx decrypt -f .env.staging
+            export DOTENV_PRIVATE_KEY='${{ secrets.DOTENV_PRIVATE_KEY }}'
+            test -n "$DOTENV_PRIVATE_KEY"
+            npx --yes @dotenvx/dotenvx decrypt -f .env.staging
+            ! grep -q "encrypted:" .env.staging
 
             docker compose --env-file .env.staging -f "$COMPOSE_FILE" down --remove-orphans || true
             docker compose --env-file .env.staging -f "$COMPOSE_FILE" up -d --force-recreate
@@ -78,8 +80,10 @@ jobs:
 
             npm install
 
-            export DOTENV_PRIVATE_KEY_STAGING='${{ secrets.DOTENV_PRIVATE_KEY_STAGING }}'
+            export DOTENV_PRIVATE_KEY='${{ secrets.DOTENV_PRIVATE_KEY }}'
+            test -n "$DOTENV_PRIVATE_KEY"
             npx dotenvx decrypt -f .env.staging
+            ! grep -q "encrypted:" .env.staging
 
             set -a
             . ./.env.staging

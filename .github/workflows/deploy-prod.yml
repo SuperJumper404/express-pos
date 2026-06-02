@@ -42,8 +42,10 @@ jobs:
 
             cd "$APP_DIR"
 
-            # export DOTENV_PRIVATE_KEY_PRODUCTION='${{ secrets.DOTENV_PRIVATE_KEY_PRODUCTION }}'
-            # npx dotenvx decrypt -f .env.production
+            export DOTENV_PRIVATE_KEY='${{ secrets.DOTENV_PRIVATE_KEY }}'
+            test -n "$DOTENV_PRIVATE_KEY"
+            npx --yes @dotenvx/dotenvx decrypt -f .env.production
+            ! grep -q "encrypted:" .env.production
 
             docker compose --env-file .env.production -f "$COMPOSE_FILE" down --remove-orphans || true
             docker compose --env-file .env.production -f "$COMPOSE_FILE" up -d --force-recreate
@@ -78,8 +80,10 @@ jobs:
 
             npm install
 
-            # export DOTENV_PRIVATE_KEY_PRODUCTION='${{ secrets.DOTENV_PRIVATE_KEY_PRODUCTION }}'
-            # npx dotenvx decrypt -f .env.production
+            export DOTENV_PRIVATE_KEY='${{ secrets.DOTENV_PRIVATE_KEY }}'
+            test -n "$DOTENV_PRIVATE_KEY"
+            npx dotenvx decrypt -f .env.production
+            ! grep -q "encrypted:" .env.production
 
             set -a
             . ./.env.production

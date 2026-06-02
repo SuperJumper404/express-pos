@@ -1,9 +1,10 @@
 const mysql = require('mysql2')
 
-const { envHOST, envUSER, envPASS, envNAME} = require('../helpers/env')
+const { envHOST, envDBPORT, envUSER, envPASS, envNAME} = require('../helpers/env')
 
 const conn = mysql.createConnection ({
   host: envHOST  ,
+  port: envDBPORT,
   user: envUSER  ,
   password: envPASS  ,
   database: envNAME 
