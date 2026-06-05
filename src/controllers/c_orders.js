@@ -9,6 +9,7 @@ const {
   mDeleteOrder,
   mOrdersbyUserId,
   mArchiveOrder,
+  mFindOrderById,
   mAllArchivedOrders,
   mDetailArchivedOrder,
   mDetailArchivedOrderByToken,
@@ -19,8 +20,15 @@ const { custom, success, failed } = require("../helpers/response");
 const { envJWTKEY } = require("../helpers/env");
 const { isMissing, parseMoney } = require("../helpers/money");
 const { ORDER_STATUSES } = require("../helpers/orderStatus");
+const { buildOrderDetailStockEntry } = require("../helpers/orderDetailStock");
+const {
+  shouldCancelPendingStripePayment,
+} = require("../helpers/cashRegisterPayment");
 const { getStripe } = require("../config/stripe");
-const { markPaymentCanceled } = require("../modules/m_payments");
+const {
+  markPaymentCanceled,
+  markPaymentSucceeded,
+} = require("../modules/m_payments");
 
 const jwt = require("jsonwebtoken");
 const response = require("../helpers/response");
@@ -52,6 +60,34 @@ const cancelPendingStripePayment = async (order) => {
   }
 
   await markPaymentCanceled(paymentIntentId);
+};
+
+const syncPendingStripeBeforeCashRegisterArchive = async (order) => {
+  if (!shouldCancelPendingStripePayment(order)) return order;
+
+  const stripe = getStripe();
+  const paymentIntentId = order.stripe_payment_intent_id;
+  const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+
+  if (paymentIntent.status === "succeeded") {
+    const charge = paymentIntent.latest_charge
+      ? await stripe.charges.retrieve(paymentIntent.latest_charge)
+      : null;
+    await markPaymentSucceeded(paymentIntent, charge);
+
+    const refreshedOrders = await mFindOrderById(order.id, order.shopid);
+    return refreshedOrders[0] || order;
+  }
+
+  if (paymentIntent.status !== "canceled") {
+    await stripe.paymentIntents.cancel(paymentIntentId);
+  }
+
+  await markPaymentCanceled(paymentIntentId);
+  return {
+    ...order,
+    payment_status: "canceled",
+  };
 };
 
 exports.allOrder = async (req, res) => {
@@ -196,12 +232,11 @@ exports.addDetailOrder = (req, res) => {
       .then(() => {
         mReduceStock(qty, productid)
           .then(() => {
-            const addStock = {
+            const addStock = buildOrderDetailStockEntry({
               productid,
-              category: "1",
               qty,
               operator,
-            };
+            });
             mAddNewStocks(addStock)
               .then(() => {
                 success(res, "Détail de commande ajouté avec succès.", null, null);
@@ -274,22 +309,32 @@ exports.updateOrder = async (req, res) => {
   }
 };
 
-exports.archiveOrder = (req, res) => {
+exports.archiveOrder = async (req, res) => {
   const id = req.params.id;
   const payment_method = req.body.payment_method;
   console.log("ON archive :", id);
 
-  mArchiveOrder(id, payment_method)
-    .then((response) => {
-      if (response.affectedRows) {
-        success(res, "Commande archivée avec succès.", null, null);
-      } else {
-        custom(res, 404, "Commande introuvable.", null, null);
-      }
-    })
-    .catch((error) => {
-      failed(res, "Erreur serveur.", error.message);
-    });
+  try {
+    const orders = await mFindOrderById(id, req.shopid);
+    if (!orders.length) {
+      return custom(res, 404, "Commande introuvable.", null, null);
+    }
+
+    await syncPendingStripeBeforeCashRegisterArchive(orders[0]);
+
+    const response = await mArchiveOrder(id, payment_method, req.shopid);
+    if (response.affectedRows) {
+      return success(res, "Commande archivée avec succès.", null, null);
+    }
+
+    return custom(res, 404, "Commande introuvable.", null, null);
+  } catch (error) {
+    if (String(error.message || "").includes("Moyen de paiement requis")) {
+      return custom(res, 422, error.message, null, null);
+    }
+
+    return failed(res, "Erreur serveur.", error.message);
+  }
 };
 
 exports.allArchivedOrders = async (req, res) => {

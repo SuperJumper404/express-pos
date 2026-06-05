@@ -4,7 +4,7 @@
   "description": "Restfull API pos using expressJS etc.",
   "main": "index.js",
   "scripts": {
-    "test": "node test/stripe-payment.test.js",
+    "test": "node test/stripe-payment.test.js && node test/order-detail-stock.test.js && node test/cash-register-payment.test.js",
     "start": "nodemon index.js",
     "startAndWatch": "nodemon --watch src index.js",
     "network": "nodemon index.js",

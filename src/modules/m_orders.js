@@ -1,5 +1,8 @@
 const { nanoid } = require("nanoid");
 const conn = require("../config/db");
+const {
+  buildCashRegisterArchiveFields,
+} = require("../helpers/cashRegisterPayment");
 
 module.exports = {
   mAllOrder: (shopid) => {
@@ -15,6 +18,22 @@ module.exports = {
           }
         },
       );
+    });
+  },
+  mFindOrderById: (id, shopid) => {
+    return new Promise((resolve, reject) => {
+      const query = shopid
+        ? "SELECT * FROM orders WHERE id = ? AND shopid = ? LIMIT 1"
+        : "SELECT * FROM orders WHERE id = ? LIMIT 1";
+      const params = shopid ? [id, shopid] : [id];
+
+      conn.query(query, params, (err, result) => {
+        if (!err) {
+          resolve(result);
+        } else {
+          reject(new Error(err));
+        }
+      });
     });
   },
   mOrdersbyUserId: (userId) => {
@@ -364,9 +383,14 @@ module.exports = {
   //     });
   //   });
   // },
-  mArchiveOrder: (id, payment_method) => {
+  mArchiveOrder: (id, payment_method, shopid) => {
     return new Promise((resolve, reject) => {
-      conn.query(`SELECT * FROM orders WHERE id = ?`, [id], (err, orders) => {
+      const orderQuery = shopid
+        ? "SELECT * FROM orders WHERE id = ? AND shopid = ? LIMIT 1"
+        : "SELECT * FROM orders WHERE id = ? LIMIT 1";
+      const orderParams = shopid ? [id, shopid] : [id];
+
+      conn.query(orderQuery, orderParams, (err, orders) => {
         if (err) {
           reject(err);
           return;
@@ -377,11 +401,14 @@ module.exports = {
           return;
         }
 
-        const orderData = { ...orders[0] };
+        const archivePaymentFields = buildCashRegisterArchiveFields({
+          order: orders[0],
+          paymentMethod: payment_method,
+        });
+        const orderData = { ...orders[0], ...archivePaymentFields };
         delete orderData.id;
 
         orderData.token = nanoid();
-        orderData.used_payment_method = payment_method;
 
         conn.query(`INSERT INTO archives SET ?`, orderData, (err, result) => {
           if (err) {
