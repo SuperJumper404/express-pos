@@ -1,22 +1,4 @@
-const mysql = require('mysql2')
+const mysql = require("mysql2");
+const databaseOptions = require("./databaseOptions");
 
-const { envHOST, envDBPORT, envUSER, envPASS, envNAME} = require('../helpers/env')
-
-const conn = mysql.createConnection ({
-  host: envHOST  ,
-  port: envDBPORT,
-  user: envUSER  ,
-  password: envPASS  ,
-  database: envNAME 
-})
-
-// conn.connect()
-
-// conn.query('SELECT 1 + 1 AS solution', function (err, rows, fields) {
-//   if (err) throw err
-//   console.log('The solution is: ', rows[0].solution)
-// })
-
-// conn.end()
-
-module.exports = conn
+module.exports = mysql.createConnection(databaseOptions);
