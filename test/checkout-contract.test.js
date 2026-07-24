@@ -62,6 +62,7 @@ const {
   updateCustomizationStep,
 } = require("../src/modules/m_customizations");
 const { buildCustomizationController } = require("../src/controllers/c_customizations");
+const DomainError = require("../src/helpers/domainError");
 const {
   buildCustomizationChoiceImageUpload,
 } = require("../src/helpers/middleware/customizationChoiceImages");
@@ -747,12 +748,13 @@ const runCustomizationApiContracts = async () => {
     updateCustomizationChoice: unexpected,
     updateCustomizationStep: unexpected,
   };
-  const makeController = (catalog, removed = []) => buildCustomizationController({
+  const makeController = (catalog, removed = [], logs = []) => buildCustomizationController({
     catalog: { ...catalogDefaults, ...catalog },
     fileSystem: {
       existsSync: () => true,
       unlinkSync: (filePath) => removed.push(filePath),
     },
+    logger: { error: (...args) => logs.push(args) },
     publicImagePath: "C:\\public-images",
   });
 
@@ -836,13 +838,12 @@ const runCustomizationApiContracts = async () => {
   const sqlFailureRemovals = [];
   handlers = makeController({
     createCustomizationChoice: async () => {
-      const error = new Error("duplicate");
-      error.status = 422;
-      error.code = "CUSTOMIZATION_CHOICE_DUPLICATE";
-      error.product_id = 8;
-      error.product_step_id = 80;
-      error.choice_id = 40;
-      throw error;
+      throw new DomainError(
+        422,
+        "CUSTOMIZATION_CHOICE_DUPLICATE",
+        "duplicate",
+        { product_id: 8, product_step_id: 80, choice_id: 40 },
+      );
     },
   }, sqlFailureRemovals);
   res = makeResponse();
@@ -911,6 +912,27 @@ const runCustomizationApiContracts = async () => {
     "C:\\public-images\\customization-choices\\old.jpg",
   ]);
 
+  const linkedConversionRemovals = [];
+  handlers = makeController({
+    listCustomizationSteps: async () => ([{
+      choices: [{
+        id: 40,
+        choice_type: "linked_product",
+        image: "inherited-product-image.jpg",
+      }],
+    }]),
+    updateCustomizationChoice: async () => ({ affectedRows: 1 }),
+  }, linkedConversionRemovals);
+  res = makeResponse();
+  await handlers.updateCustomizationChoice({
+    shopid: 7,
+    params: { id: "40" },
+    body: { choice_type: "simple", name: "Option autonome" },
+    file: { filename: "owned-simple-image.webp" },
+  }, res);
+  assert.strictEqual(res.statusCode, 200);
+  assert.deepStrictEqual(linkedConversionRemovals, []);
+
   let partialChoiceUpdateCalls = 0;
   handlers = makeController({
     updateCustomizationChoice: async ({ data }) => {
@@ -930,14 +952,17 @@ const runCustomizationApiContracts = async () => {
   assert.strictEqual(partialChoiceUpdateCalls, 1);
 
   const failedReplacementRemovals = [];
+  const unexpectedErrorLogs = [];
   handlers = makeController({
     listCustomizationSteps: async () => ([{
       choices: [{ id: 40, choice_type: "simple", image: "old.jpg" }],
     }]),
     updateCustomizationChoice: async () => {
-      throw new Error("sql failure");
+      const error = new Error("sql failure: table customization_step_choices missing");
+      error.code = "ER_NO_SUCH_TABLE";
+      throw error;
     },
-  }, failedReplacementRemovals);
+  }, failedReplacementRemovals, unexpectedErrorLogs);
   res = makeResponse();
   await handlers.updateCustomizationChoice({
     shopid: 7,
@@ -946,6 +971,16 @@ const runCustomizationApiContracts = async () => {
     file: { filename: "new-on-failure.webp" },
   }, res);
   assert.strictEqual(res.statusCode, 500);
+  assert.strictEqual(res.payload.message, "Erreur serveur.");
+  assert.deepStrictEqual(res.payload.data, {
+    code: "INTERNAL_ERROR",
+    product_id: null,
+    product_step_id: null,
+    choice_id: null,
+  });
+  assert.ok(!JSON.stringify(res.payload).includes("sql failure"));
+  assert.ok(!JSON.stringify(res.payload).includes("ER_NO_SUCH_TABLE"));
+  assert.strictEqual(unexpectedErrorLogs.length, 1);
   assert.deepStrictEqual(failedReplacementRemovals, [
     "C:\\public-images\\customization-choices\\new-on-failure.webp",
   ]);

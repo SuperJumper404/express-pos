@@ -8,6 +8,7 @@ const { custom } = require("../helpers/response");
 const buildCustomizationController = ({
   catalog = catalogModule,
   fileSystem = fs,
+  logger = console,
   publicImagePath = envPUBLICIMAGEPATH,
 } = {}) => {
   const imageDirectory = path.resolve(publicImagePath, "customization-choices");
@@ -24,12 +25,21 @@ const buildCustomizationController = ({
     try {
       if (fileSystem.existsSync(resolved)) fileSystem.unlinkSync(resolved);
     } catch (error) {
-      console.error("Customization choice image cleanup failed:", error.message);
+      logger.error("Customization choice image cleanup failed:", error);
     }
   };
 
   const sendError = (res, error, uploadedFilename = null) => {
     if (uploadedFilename) removeImageBestEffort(uploadedFilename);
+    if (!(error instanceof DomainError)) {
+      logger.error("Unexpected customization controller error:", error);
+      return custom(res, 500, "Erreur serveur.", null, {
+        code: "INTERNAL_ERROR",
+        product_id: null,
+        product_step_id: null,
+        choice_id: null,
+      });
+    }
     return custom(res, error.status || 500, error.message, null, {
       code: error.code || "INTERNAL_ERROR",
       product_id: error.product_id || null,
@@ -214,7 +224,10 @@ const buildCustomizationController = ({
       });
       if (!result || result.affectedRows === 0) throw missingError("choice", req.params.id);
       persisted = true;
-      if (currentChoice && currentChoice.image && currentChoice.image !== uploadedFilename) {
+      if (currentChoice
+        && currentChoice.choice_type === "simple"
+        && currentChoice.image
+        && currentChoice.image !== uploadedFilename) {
         removeImageBestEffort(currentChoice.image);
       }
       return custom(res, 200, "Choix de personnalisation mis à jour.", null, null);
