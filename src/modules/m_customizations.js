@@ -321,11 +321,59 @@ const updateCustomizationStep = async ({ shopId, stepId, data, connection }) => 
   ]);
 };
 
-const deleteCustomizationStep = ({ shopId, stepId, connection }) => queryRows(connection, `
-  UPDATE customization_steps
-  SET active = 0, updated = NOW()
-  WHERE id = ? AND shop_id = ?
-`, [stepId, shopId]);
+const deleteCustomizationStepInConnection = async ({ shopId, stepId, connection }) => {
+  const current = await getCustomizationStep({ shopId, stepId, connection });
+  if (!current) {
+    throw new DomainError(
+      404,
+      "CUSTOMIZATION_STEP_NOT_FOUND",
+      "Customization step does not belong to this shop",
+      { step_id: stepId },
+    );
+  }
+
+  const imageRows = await queryRows(connection, `
+    SELECT choice.image
+    FROM customization_step_choices choice
+    WHERE choice.step_id = ? AND choice.image IS NOT NULL
+  `, [stepId]);
+
+  await queryRows(connection, `
+    DELETE product_choice
+    FROM product_customization_step_choices product_choice
+    JOIN product_customization_steps product_step
+      ON product_step.id = product_choice.product_customization_step_id
+    WHERE product_step.step_id = ?
+  `, [stepId]);
+  await queryRows(connection, `
+    DELETE FROM product_customization_steps
+    WHERE step_id = ?
+  `, [stepId]);
+  await queryRows(connection, `
+    DELETE FROM customization_step_choices
+    WHERE step_id = ?
+  `, [stepId]);
+  const result = await queryRows(connection, `
+    DELETE FROM customization_steps
+    WHERE id = ? AND shop_id = ?
+  `, [stepId, shopId]);
+
+  return {
+    affectedRows: result.affectedRows,
+    images: imageRows.map(({ image }) => image).filter(Boolean),
+  };
+};
+
+const deleteCustomizationStep = ({ shopId, stepId, connection }) => {
+  if (connection) {
+    return deleteCustomizationStepInConnection({ shopId, stepId, connection });
+  }
+  return withTransaction((transactionConnection) => deleteCustomizationStepInConnection({
+    shopId,
+    stepId,
+    connection: transactionConnection,
+  }));
+};
 
 const requireOwnedStep = async ({ shopId, stepId, connection }) => {
   const rows = await queryRows(connection, `

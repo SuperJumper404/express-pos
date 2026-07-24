@@ -1027,7 +1027,26 @@ const runRepositoryReadContracts = async () => {
     data: { name: "Boissons froides", active: "false" },
     connection: crudConnection,
   });
-  await deleteCustomizationStep({ shopId: 7, stepId: 20, connection: crudConnection });
+  const deleteStepCallStart = crudCalls.length;
+  const deletedStep = await deleteCustomizationStep({
+    shopId: 7,
+    stepId: 20,
+    connection: crudConnection,
+  });
+  const deleteStepCalls = crudCalls.slice(deleteStepCallStart);
+  assert.deepStrictEqual(deletedStep, { affectedRows: 1, images: ["old.webp"] });
+  assert.deepStrictEqual(
+    deleteStepCalls
+      .filter(({ sql }) => /^\s*DELETE/i.test(sql))
+      .map(({ sql }) => sql.match(/DELETE(?:\s+\w+)?\s+FROM\s+(\w+)/i)[1]),
+    [
+      "product_customization_step_choices",
+      "product_customization_steps",
+      "customization_step_choices",
+      "customization_steps",
+    ],
+  );
+  assert.ok(deleteStepCalls.every(({ sql }) => !/snapshot/i.test(sql)));
   assert.strictEqual((await createCustomizationChoice({
     shopId: 7,
     stepId: 20,
@@ -1449,6 +1468,22 @@ const runCustomizationApiContracts = async () => {
     assert.strictEqual(res.statusCode, 404, handlerName);
     assert.strictEqual(res.payload.data.code, code, handlerName);
   }
+
+  const stepDeleteRemovals = [];
+  handlers = makeController({
+    deleteCustomizationStep: async ({ shopId, stepId }) => {
+      assert.strictEqual(shopId, 7);
+      assert.strictEqual(stepId, "20");
+      return { affectedRows: 1, images: ["sauce.webp"] };
+    },
+  }, stepDeleteRemovals);
+  res = makeResponse();
+  await handlers.deleteCustomizationStep({ shopid: 7, params: { id: "20" } }, res);
+  assert.strictEqual(res.statusCode, 200);
+  assert.strictEqual(res.payload.message, "Étape de personnalisation supprimée.");
+  assert.deepStrictEqual(stepDeleteRemovals, [
+    "C:\\public-images\\customization-choices\\sauce.webp",
+  ]);
 
   const deleteRemovals = [];
   handlers = makeController({

@@ -169,7 +169,8 @@ const buildCustomizationController = ({
         stepId: req.params.id,
       });
       if (!result || result.affectedRows === 0) throw missingError("step", req.params.id);
-      return custom(res, 200, "Étape de personnalisation désactivée.", null, null);
+      (result.images || []).forEach(removeImageBestEffort);
+      return custom(res, 200, "Étape de personnalisation supprimée.", null, null);
     } catch (error) {
       return sendError(res, error);
     }
