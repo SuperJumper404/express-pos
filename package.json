@@ -4,7 +4,7 @@
   "description": "Restfull API pos using expressJS etc.",
   "main": "index.js",
   "scripts": {
-    "test": "node test/transaction-helper.test.js && node test/stripe-payment.test.js && node test/order-detail-stock.test.js && node test/cash-register-payment.test.js && node test/customization-rules.test.js && node test/stock-requirements.test.js && node test/customization-migration.test.js && node test/reservation-lifecycle.test.js && node test/checkout-contract.test.js",
+    "test": "node test/transaction-helper.test.js && node test/stripe-payment.test.js && node test/order-detail-stock.test.js && node test/cash-register-payment.test.js && node test/customization-rules.test.js && node test/stock-requirements.test.js && node test/customization-migration.test.js && node test/reservation-lifecycle.test.js && node test/order-editing.test.js && node test/checkout-contract.test.js",
     "start": "nodemon index.js",
     "startAndWatch": "nodemon --watch src index.js",
     "network": "nodemon index.js",

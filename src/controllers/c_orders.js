@@ -145,7 +145,7 @@ exports.ordersbyUserId = async (req, res) => {
 };
 exports.detailOrder = (req, res) => {
   const id = req.params.id;
-  mDetailOrder(id)
+  mDetailOrder(id, req.shopid)
     .then((response) => {
       if (response.length > 0) {
         success(res, "Détail de la commande récupéré.", null, response);
@@ -295,7 +295,7 @@ exports.updateOrder = async (req, res) => {
   if (!req.body.operator || !req.body.status) {
     custom(res, 400, "Requête invalide.", null, null);
   } else {
-    let currentStatus = await mDetailOrder(id).then((response) => {
+    let currentStatus = await mDetailOrder(id, req.shopid).then((response) => {
       return response;
     });
     if (!currentStatus.length) {
