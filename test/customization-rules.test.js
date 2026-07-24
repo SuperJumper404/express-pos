@@ -58,6 +58,25 @@ assert.throws(
 assert.throws(
   () => validateConfiguredItem({
     product,
+    steps: [{ ...steps[0], active: 0 }],
+    selectedChoiceIds: [30],
+  }),
+  (error) => error.code === "CUSTOMIZATION_STEP_UNAVAILABLE" && error.product_step_id === 20,
+);
+assert.throws(
+  () => validateConfiguredItem({
+    product,
+    steps: [{
+      ...steps[0],
+      choices: [{ ...steps[0].choices[0], available: 0 }],
+    }],
+    selectedChoiceIds: [30],
+  }),
+  (error) => error.code === "CUSTOMIZATION_STEP_UNAVAILABLE" && error.product_step_choice_id === 30,
+);
+assert.throws(
+  () => validateConfiguredItem({
+    product,
     steps: [{ ...steps[0], maximum_choices: 0 }],
     selectedChoiceIds: [30],
   }),

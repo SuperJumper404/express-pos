@@ -1,6 +1,8 @@
 const DomainError = require("./domainError");
 const { parseMoney } = require("./money");
 
+const isDisabled = (value) => value === false || value === 0;
+
 const unavailableStepError = (step, choice) => new DomainError(
   422,
   "CUSTOMIZATION_STEP_UNAVAILABLE",
@@ -36,13 +38,13 @@ const validateConfiguredItem = ({ product, steps, selectedChoiceIds }) => {
   });
 
   for (const step of steps) {
-    if (step.active === false || step.available === false) {
+    if (isDisabled(step.active) || isDisabled(step.available)) {
       throw unavailableStepError(step);
     }
   }
 
   for (const { step, choice } of selected) {
-    if (choice.active === false || choice.available === false) {
+    if (isDisabled(choice.active) || isDisabled(choice.available)) {
       throw unavailableStepError(step, choice);
     }
   }
