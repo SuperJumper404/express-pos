@@ -65,6 +65,7 @@ const buildUpdateOrderItemsController = ({
   let succeededPaymentIntent = null;
   let transactionCommitted = false;
   let stripePaymentReplaced = false;
+  let stripeReplacementAttemptId = null;
   try {
     const preview = await previewItems({
       shopId: input.shopId,
@@ -142,8 +143,10 @@ const buildUpdateOrderItemsController = ({
           "Le remplacement du paiement Stripe a échoué.",
         );
       }
+      stripeReplacementAttemptId = staged.replacement_attempt_id;
       order.payment_status = "unpaid";
       order.stripe_payment_intent_id = null;
+      order.stripe_replacement_attempt_id = stripeReplacementAttemptId;
       stripePaymentReplaced = true;
     };
 
@@ -159,6 +162,7 @@ const buildUpdateOrderItemsController = ({
           id: data.order_id,
           shopid: input.shopId,
           subtotal: data.total,
+          stripe_replacement_attempt_id: stripeReplacementAttemptId,
         },
         contentRevision: data.content_revision,
       });

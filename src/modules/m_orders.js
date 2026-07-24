@@ -220,6 +220,7 @@ const buildOrderArchiveModule = ({
       delete archive.id;
       delete archive.client_order_token;
       delete archive.client_order_payload_hash;
+      delete archive.stripe_replacement_attempt_id;
       const archiveResult = await repository.insertArchive({ archive, connection });
       const archiveOrderId = archiveResult.insertId;
 

@@ -76,6 +76,10 @@ const runReadContracts = async () => {
     },
     getResolvedProductConfigurations: async () => new Map([[10, [{
       product_step_id: 20,
+      active: 1,
+      available: true,
+      minimum_choices: 1,
+      maximum_choices: 1,
       choices: [{
         product_step_choice_id: 30,
         active: 1,
@@ -93,6 +97,15 @@ const runReadContracts = async () => {
   const legacy = await module.getEditableOrder({ orderId: 42, shopId: 7 });
   assert.strictEqual(legacy.items[0].requires_reconfiguration, true);
   snapshots[0].product_customization_step_choice_id = 30;
+
+  const [removedSnapshot] = snapshots.splice(0, 1);
+  const missingRequiredSelection = await module.getEditableOrder({ orderId: 42, shopId: 7 });
+  assert.strictEqual(
+    missingRequiredSelection.items[0].requires_reconfiguration,
+    true,
+    "an old order without snapshots must reopen a newly required customization step",
+  );
+  snapshots.push(removedSnapshot);
 
   const lockedModule = buildOrderEditingModule({
     repository: {
@@ -150,6 +163,8 @@ const makeEditingHarness = ({
       payment_status: stripe ? "requires_payment" : "unpaid",
       payment_provider: stripe ? "stripe" : null,
       stripe_payment_intent_id: stripe ? "pi_old" : null,
+      stripe_replacement_attempt_id: null,
+      client_order_token: legacy ? null : "edit-token",
       client_order_payload_hash: "original-checkout-hash",
     },
     details: [{
@@ -198,6 +213,18 @@ const makeEditingHarness = ({
       return productIds
         .filter((id) => state.products.has(id))
         .map((id) => ({ id, stock: state.products.get(id) }));
+    },
+    setStripeReplacementAttempt: async ({ replacementAttemptId }) => {
+      if (state.order.stripe_replacement_attempt_id) return { affectedRows: 0 };
+      state.order.stripe_replacement_attempt_id = replacementAttemptId;
+      return { affectedRows: 1 };
+    },
+    rotateStripeReplacementAttempt: async ({ currentAttemptId, nextAttemptId }) => {
+      if (state.order.stripe_replacement_attempt_id !== currentAttemptId) {
+        return { affectedRows: 0 };
+      }
+      state.order.stripe_replacement_attempt_id = nextAttemptId;
+      return { affectedRows: 1 };
     },
     adjustStock: async ({ productId, delta }) => {
       events.push("adjust-stock");
@@ -313,6 +340,7 @@ const makeEditingHarness = ({
     withTransaction,
     now: () => new Date("2026-07-24T12:00:00.000Z"),
     reservationTtlMinutes: 15,
+    createReplacementAttemptId: () => "replacement-attempt-1",
   });
   const revision = () => buildContentRevision({
     order: state.order,
@@ -402,11 +430,67 @@ const runTransactionalEditingContracts = async () => {
 
   harness = makeEditingHarness({ legacy: true });
   await harness.update();
+  assert.strictEqual(harness.state.products.get(10), 6, "legacy parent consumes only increment");
+  assert.strictEqual(harness.state.products.get(11), 3, "legacy linked choices consume full addition");
   assert.strictEqual(harness.state.reservations.get(10).quantity, 2);
   assert.strictEqual(harness.state.reservations.get(11).quantity, 2);
+  assert.deepStrictEqual(
+    harness.state.movements.map((movement) => [movement.productid, movement.qty]),
+    [[10, 1], [11, 2]],
+  );
+
+  harness = makeEditingHarness();
+  await harness.update();
+  harness.state.reservations.delete(11);
+  const partialReservationState = harness.snapshot();
+  await assert.rejects(
+    () => harness.update({ contentRevision: harness.revision() }),
+    (error) => error.code === "RESERVATION_INTEGRITY_ERROR",
+  );
+  assert.deepStrictEqual(harness.snapshot(), partialReservationState);
+
+  harness = makeEditingHarness({ stripe: true });
+  harness.state.order.payment_status = "unpaid";
+  harness.state.order.stripe_payment_intent_id = null;
+  harness.state.order.stripe_replacement_attempt_id = "stale-content-attempt";
+  const unpaidStripeEdit = await harness.update();
+  assert.strictEqual(unpaidStripeEdit.payment_refresh, "required");
+  assert.strictEqual(
+    harness.state.order.stripe_replacement_attempt_id,
+    "replacement-attempt-1",
+  );
+
+  for (const quantity of [1, 2]) {
+    harness = makeEditingHarness({ stripe: true });
+    harness.state.reservations.get(10).status = "released";
+    await harness.update({
+      expectedTotal: quantity * 10,
+      items: [{ productId: 10, quantity, selectedChoiceIds: [] }],
+      settlePendingPayment: async ({ order }) => {
+        order.payment_status = "unpaid";
+        order.stripe_payment_intent_id = null;
+      },
+    });
+    assert.strictEqual(
+      harness.state.products.get(10),
+      7 - quantity,
+      `a released reservation reacquires the full edited quantity (${quantity})`,
+    );
+    assert.strictEqual(harness.state.reservations.get(10).quantity, quantity);
+    assert.strictEqual(harness.state.reservations.get(10).status, "reserved");
+  }
 };
 
 const runPaymentRegenerationContracts = async () => {
+  let replayHarness = makeEditingHarness({ stripe: true });
+  const replayed = await replayHarness.module.prepareOrderPaymentRegeneration({
+    orderId: 42,
+    shopId: 7,
+  });
+  assert.strictEqual(replayed.order.stripe_payment_intent_id, "pi_old");
+  assert.strictEqual(replayHarness.state.products.get(10), 7);
+  assert.strictEqual(replayHarness.state.reservations.get(10).status, "reserved");
+
   let harness = makeEditingHarness({ stripe: true });
   harness.state.order.payment_status = "unpaid";
   harness.state.order.stripe_payment_intent_id = null;
@@ -418,6 +502,10 @@ const runPaymentRegenerationContracts = async () => {
   });
   assert.strictEqual(prepared.order.id, 42);
   assert.match(prepared.contentRevision, /^[a-f0-9]{64}$/);
+  assert.strictEqual(
+    prepared.order.stripe_replacement_attempt_id,
+    "replacement-attempt-1",
+  );
   assert.strictEqual(harness.state.products.get(10), 0);
   assert.strictEqual(harness.state.reservations.get(10).status, "reserved");
 
@@ -675,6 +763,33 @@ const runStripeEditControllerContract = async () => {
   assert.strictEqual(response.payload.data.payment_refresh, "required");
   assert.strictEqual(response.payload.data.payment_status, "unpaid");
   assert.strictEqual(Object.prototype.hasOwnProperty.call(response.payload.data, "payment"), false);
+
+  harness = makeEditingHarness({ stripe: true });
+  harness.state.order.payment_status = "unpaid";
+  harness.state.order.stripe_payment_intent_id = null;
+  harness.state.order.stripe_replacement_attempt_id = "failed-generation-attempt";
+  controllerScenario = buildUpdateOrderItemsController({
+    updateOrderItems: harness.module.updateOrderItems,
+    previewOrderEdit: harness.module.previewOrderEdit,
+    stagePaymentReplacement: async () => {
+      throw new Error("an unattached order must not cancel another intent");
+    },
+  });
+  response.statusCode = null;
+  response.payload = null;
+  await controllerScenario({
+    params: { id: "42" },
+    shopid: 7,
+    id: 9,
+    body: {
+      content_revision: harness.revision(),
+      expected_total: 20,
+      items: [{ product_id: 10, quantity: 2, selected_product_step_choice_ids: [30] }],
+    },
+  }, response);
+  assert.strictEqual(response.statusCode, 200);
+  assert.strictEqual(response.payload.data.payment_refresh, "required");
+  assert.strictEqual(response.payload.data.payment_status, "unpaid");
 
   harness = makeEditingHarness({ stripe: true });
   harness.failSnapshots = true;

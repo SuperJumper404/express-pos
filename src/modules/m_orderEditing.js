@@ -131,6 +131,36 @@ const sqlRepository = {
      ORDER BY id FOR UPDATE`,
     [shopId, productIds],
   ),
+  setStripeReplacementAttempt: ({
+    orderId, shopId, replacementAttemptId, connection,
+  }) => queryResult(
+    connection,
+    `UPDATE orders
+     SET stripe_replacement_attempt_id = ?
+     WHERE id = ?
+       AND shopid = ?
+       AND status = 1
+       AND payment_status = 'unpaid'
+       AND payment_provider = 'stripe'
+       AND stripe_payment_intent_id IS NULL
+       AND stripe_replacement_attempt_id IS NULL`,
+    [replacementAttemptId, orderId, shopId],
+  ),
+  rotateStripeReplacementAttempt: ({
+    orderId, shopId, currentAttemptId, nextAttemptId, connection,
+  }) => queryResult(
+    connection,
+    `UPDATE orders
+     SET stripe_replacement_attempt_id = ?
+     WHERE id = ?
+       AND shopid = ?
+       AND status = 1
+       AND payment_status = 'unpaid'
+       AND payment_provider = 'stripe'
+       AND stripe_payment_intent_id IS NULL
+       AND stripe_replacement_attempt_id <=> ?`,
+    [nextAttemptId, orderId, shopId, currentAttemptId],
+  ),
   adjustStock: ({ shopId, productId, delta, connection }) => {
     const shortage = delta < 0 ? " AND stock >= ?" : "";
     const params = [delta, productId, shopId];
@@ -246,15 +276,6 @@ const storedRequirements = (details, snapshots) => {
   return requirements;
 };
 
-const requirementDeltas = (before, after) => new Map(
-  [...new Set([...before.keys(), ...after.keys()])]
-    .sort((left, right) => left - right)
-    .map((productId) => [
-      productId,
-      (after.get(productId) || 0) - (before.get(productId) || 0),
-    ]),
-);
-
 const disabled = (value) => [false, 0, "0"].includes(value);
 const configurationFor = (configurations, productId) => (
   configurations.get(Number(productId))
@@ -277,6 +298,29 @@ const snapshotRequiresReconfiguration = (snapshot, steps) => {
       || disabled(choice.available);
   }
   return true;
+};
+
+const selectionRequiresReconfiguration = (snapshots, steps) => {
+  if (snapshots.some((snapshot) => snapshotRequiresReconfiguration(snapshot, steps))) {
+    return true;
+  }
+
+  const selectedIds = snapshots.map(
+    (snapshot) => Number(snapshot.product_customization_step_choice_id),
+  );
+  if (new Set(selectedIds).size !== selectedIds.length) return true;
+
+  for (const step of steps) {
+    if (disabled(step.active) || disabled(step.available)) return true;
+    const choiceIds = new Set((step.choices || []).map(
+      (choice) => Number(choice.product_step_choice_id),
+    ));
+    const selectedCount = selectedIds.filter((id) => choiceIds.has(id)).length;
+    if (selectedCount < Number(step.minimum_choices || 0)) return true;
+    if (step.maximum_choices != null
+      && selectedCount > Number(step.maximum_choices)) return true;
+  }
+  return false;
 };
 
 const mapSnapshot = (snapshot) => ({
@@ -309,6 +353,7 @@ const buildOrderEditingModule = ({
   ),
   now = () => new Date(),
   reservationTtlMinutes = envSTRIPESTOCKRESERVATIONMINUTES,
+  createReplacementAttemptId = () => crypto.randomBytes(16).toString("hex"),
 } = {}) => {
   const getEditableOrder = async ({ orderId, shopId, connection }) => {
     const order = await repository.findOrder({ orderId, shopId, connection });
@@ -344,9 +389,7 @@ const buildOrderEditingModule = ({
           .filter((id) => id != null)
           .map(Number),
         customization_snapshots: itemSnapshots.map(mapSnapshot),
-        requires_reconfiguration: itemSnapshots.some(
-          (snapshot) => snapshotRequiresReconfiguration(snapshot, steps),
-        ),
+        requires_reconfiguration: selectionRequiresReconfiguration(itemSnapshots, steps),
       };
     });
 
@@ -378,10 +421,13 @@ const buildOrderEditingModule = ({
       if (!order) {
         throw new DomainError(404, "ORDER_NOT_FOUND", "Commande introuvable.");
       }
+      const awaitingReplacement = order.payment_status === "unpaid"
+        && order.stripe_payment_intent_id == null;
+      const attachedReplacement = order.payment_status === "requires_payment"
+        && order.stripe_payment_intent_id != null;
       if (Number(order.status) !== 1
-        || order.payment_status !== "unpaid"
         || order.payment_provider !== "stripe"
-        || order.stripe_payment_intent_id != null) {
+        || (!awaitingReplacement && !attachedReplacement)) {
         throw new DomainError(
           409,
           "ORDER_NOT_EDITABLE",
@@ -391,6 +437,24 @@ const buildOrderEditingModule = ({
             payment_status: order.payment_status,
           },
         );
+      }
+
+      if (awaitingReplacement && !order.stripe_replacement_attempt_id) {
+        const replacementAttemptId = createReplacementAttemptId();
+        const attempt = await repository.setStripeReplacementAttempt({
+          orderId: order.id,
+          shopId,
+          replacementAttemptId,
+          connection,
+        });
+        if (!attempt.affectedRows) {
+          throw new DomainError(
+            409,
+            "ORDER_EDIT_CONFLICT",
+            "La commande a change. Rechargez-la avant de continuer.",
+          );
+        }
+        order.stripe_replacement_attempt_id = replacementAttemptId;
       }
 
       const details = await repository.lockDetails({ orderId: order.id, connection });
@@ -487,6 +551,9 @@ const buildOrderEditingModule = ({
         throw new DomainError(404, "ORDER_NOT_FOUND", "Commande introuvable.");
       }
       if (!isEditableOrder(order)) throw notEditable(order);
+      const rotatesUnattachedStripeAttempt = order.payment_provider === "stripe"
+        && order.payment_status === "unpaid"
+        && order.stripe_payment_intent_id == null;
 
       const details = await repository.lockDetails({
         orderId: order.id,
@@ -494,7 +561,10 @@ const buildOrderEditingModule = ({
       });
       const detailIds = details.map((detail) => Number(detail.id));
       const snapshots = await repository.lockSnapshots({ detailIds, connection });
-      await repository.lockReservations({ orderId: order.id, connection });
+      const reservations = await repository.lockReservations({
+        orderId: order.id,
+        connection,
+      });
 
       const currentRevision = buildContentRevision({ order, details, snapshots });
       if (currentRevision !== input.contentRevision) {
@@ -521,8 +591,38 @@ const buildOrderEditingModule = ({
       }
 
       const before = storedRequirements(details, snapshots);
-      const deltas = requirementDeltas(before, quote.requirements);
-      const productIds = [...deltas.keys()].sort((left, right) => left - right);
+      const reservationByProduct = new Map(reservations.map(
+        (reservation) => [Number(reservation.product_id), reservation],
+      ));
+      const legacyWithoutReservations = reservations.length === 0
+        && order.client_order_token == null;
+      const missingStoredReservations = [...before.keys()].filter(
+        (productId) => !reservationByProduct.has(productId),
+      );
+      if (missingStoredReservations.length && !legacyWithoutReservations) {
+        throw new DomainError(
+          409,
+          "RESERVATION_INTEGRITY_ERROR",
+          "Checkout stock reservations are missing",
+          {
+            order_id: Number(order.id),
+            product_ids: missingStoredReservations,
+          },
+        );
+      }
+      const productIds = [...new Set([
+        ...before.keys(),
+        ...quote.requirements.keys(),
+      ])].sort((left, right) => left - right);
+      const deltas = new Map(productIds.map((productId) => {
+        const reservation = reservationByProduct.get(productId);
+        const covered = !reservation
+          ? (legacyWithoutReservations ? before.get(productId) || 0 : 0)
+          : ["reserved", "committed"].includes(reservation.status)
+            ? Number(reservation.quantity)
+            : 0;
+        return [productId, (quote.requirements.get(productId) || 0) - covered];
+      }));
       const products = await repository.lockProducts({
         shopId: input.shopId,
         productIds,
@@ -554,6 +654,25 @@ const buildOrderEditingModule = ({
           );
         }
         await input.settlePendingPayment({ order, connection });
+      }
+
+      if (rotatesUnattachedStripeAttempt) {
+        const nextAttemptId = createReplacementAttemptId();
+        const attempt = await repository.rotateStripeReplacementAttempt({
+          orderId: order.id,
+          shopId: input.shopId,
+          currentAttemptId: order.stripe_replacement_attempt_id || null,
+          nextAttemptId,
+          connection,
+        });
+        if (!attempt.affectedRows) {
+          throw new DomainError(
+            409,
+            "ORDER_EDIT_CONFLICT",
+            "La commande a change. Rechargez-la avant de continuer.",
+          );
+        }
+        order.stripe_replacement_attempt_id = nextAttemptId;
       }
 
       for (const [productId, delta] of deltas) {
@@ -676,7 +795,10 @@ const buildOrderEditingModule = ({
         }),
         payment_status: order.payment_status,
         payment_provider: order.payment_provider,
-        payment_refresh: "not_required",
+        payment_refresh: rotatesUnattachedStripeAttempt ? "required" : "not_required",
+        ...(rotatesUnattachedStripeAttempt && {
+          payment_refresh_message: "Le paiement Stripe doit etre regenere.",
+        }),
       };
     });
   };
@@ -700,7 +822,6 @@ module.exports = {
   notEditable,
   prepareOrderPaymentRegeneration: orderEditingModule.prepareOrderPaymentRegeneration,
   previewOrderEdit: orderEditingModule.previewOrderEdit,
-  requirementDeltas,
   storedRequirements,
   updateOrderItems: orderEditingModule.updateOrderItems,
 };

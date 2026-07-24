@@ -21,6 +21,7 @@ const {
   mUpdateStripeAccount,
 } = require("../modules/m_shop");
 const {
+  advancePaymentReplacementAttempt,
   cancelProvisionalStripeOrder,
   getPaidOrderForRefund,
   getPendingStripeOrderForCounter,
@@ -292,7 +293,65 @@ const buildRegenerateOrderPaymentIntent = ({
   ),
   publishableKey = envSTRIPEPUBLISHABLEKEY,
   paymentMethodConfigurationId = envSTRIPEPAYMENTMETHODCONFIGURATIONID,
+  advanceReplacementAttempt = advancePaymentReplacementAttempt,
 } = {}) => async ({ order, contentRevision }) => {
+  const stripeClient = getStripeClient();
+  const paymentResponse = (paymentIntent) => ({
+    orderId: order.id,
+    paymentIntentId: paymentIntent.id,
+    clientSecret: paymentIntent.client_secret,
+    publishableKey,
+  });
+  const unusablePaymentIntent = (paymentIntent) => (
+    !paymentIntent
+    || ["canceled", "succeeded"].includes(paymentIntent.status)
+    || !paymentIntent.client_secret
+  );
+
+  const abandonCreatedIntent = async (paymentIntent) => {
+    if (!paymentIntent || paymentIntent.status === "succeeded") return false;
+    let cancellationConfirmed = paymentIntent.status === "canceled";
+    if (!cancellationConfirmed) {
+      try {
+        const canceled = await stripeClient.paymentIntents.cancel(paymentIntent.id);
+        cancellationConfirmed = canceled && canceled.status === "canceled";
+      } catch (error) {
+        cancellationConfirmed = false;
+      }
+    }
+    if (cancellationConfirmed) {
+      await advanceReplacementAttempt({
+        orderId: order.id,
+        shopId: order.shopid,
+        replacementAttemptId: order.stripe_replacement_attempt_id,
+      });
+    }
+    return cancellationConfirmed;
+  };
+
+  if (order.stripe_payment_intent_id) {
+    let attachedPaymentIntent;
+    try {
+      attachedPaymentIntent = await stripeClient.paymentIntents.retrieve(
+        order.stripe_payment_intent_id,
+      );
+    } catch (error) {
+      throw new DomainError(
+        409,
+        "STRIPE_PAYMENT_INTENT_UNAVAILABLE",
+        "Le paiement Stripe attache ne peut pas etre recupere.",
+      );
+    }
+    if (unusablePaymentIntent(attachedPaymentIntent)) {
+      throw new DomainError(
+        409,
+        "STRIPE_PAYMENT_INTENT_TERMINAL",
+        "Le paiement Stripe attache n'est plus utilisable.",
+      );
+    }
+    return paymentResponse(attachedPaymentIntent);
+  }
+
   const rows = await getShopInfo(order.shopid);
   const shop = rows[0];
   if (!shop
@@ -313,9 +372,30 @@ const buildRegenerateOrderPaymentIntent = ({
     commissionPercent: shop.stripe_commission_percent,
     paymentMethodConfigurationId,
   });
-  const paymentIntent = await getStripeClient().paymentIntents.create(params, {
-    idempotencyKey: `order-edit-${order.shopid}-${order.id}-${contentRevision}`,
+  if (!order.stripe_replacement_attempt_id) {
+    throw new DomainError(
+      409,
+      "STRIPE_REPLACEMENT_ATTEMPT_MISSING",
+      "La tentative de remplacement Stripe est introuvable.",
+    );
+  }
+  const paymentIntent = await stripeClient.paymentIntents.create(params, {
+    idempotencyKey: [
+      "order-edit",
+      order.shopid,
+      order.id,
+      contentRevision,
+      order.stripe_replacement_attempt_id,
+    ].join("-"),
   });
+  if (unusablePaymentIntent(paymentIntent)) {
+    await abandonCreatedIntent(paymentIntent);
+    throw new DomainError(
+      409,
+      "STRIPE_PAYMENT_INTENT_TERMINAL",
+      "Le nouveau paiement Stripe n'est pas utilisable.",
+    );
+  }
   const persistence = await persistReplacement({
     orderId: order.id,
     shopId: order.shopid,
@@ -325,19 +405,13 @@ const buildRegenerateOrderPaymentIntent = ({
     application_fee_amount: params.application_fee_amount,
     currency: params.currency,
     status: paymentIntent.status,
+    replacement_attempt_id: order.stripe_replacement_attempt_id,
   });
   if (!persistence.attached) {
-    if (paymentIntent.status !== "canceled") {
-      await getStripeClient().paymentIntents.cancel(paymentIntent.id);
-    }
+    await abandonCreatedIntent(paymentIntent);
     throw new DomainError(409, "ORDER_NOT_EDITABLE", "La commande a changé.");
   }
-  return {
-    orderId: order.id,
-    paymentIntentId: paymentIntent.id,
-    clientSecret: paymentIntent.client_secret,
-    publishableKey,
-  };
+  return paymentResponse(paymentIntent);
 };
 
 exports.buildRegenerateOrderPaymentIntent = buildRegenerateOrderPaymentIntent;
