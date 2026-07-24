@@ -9,6 +9,10 @@ const routerSource = fs.readFileSync(
   require.resolve("../src/routers/r_customizations"),
   "utf8",
 );
+const productRouterSource = fs.readFileSync(
+  require.resolve("../src/routers/r_products"),
+  "utf8",
+);
 const uploadSource = fs.readFileSync(
   require.resolve("../src/helpers/middleware/customizationChoiceImages"),
   "utf8",
@@ -44,6 +48,10 @@ assert.ok(indexSource.includes('require("./src/routers/r_customizations")'));
 assert.ok(indexSource.includes('path.join(envPUBLICIMAGEPATH, "customization-choices")'));
 assert.ok(indexSource.includes('app.use(`${prefix}`, routerCustomizations)'));
 assert.match(
+  productRouterSource,
+  /\.put\(["']\/products\/:id\/customization-config["'], authentication, authAdmin,/,
+);
+assert.match(
   indexSource,
   /"\/api\/v1\/imgcustomizations"[\s\S]*express\.static\(customizationChoicesPath\)/,
 );
@@ -62,10 +70,440 @@ const {
   updateCustomizationStep,
 } = require("../src/modules/m_customizations");
 const { buildCustomizationController } = require("../src/controllers/c_customizations");
+const { buildProductController } = require("../src/controllers/c_products");
 const DomainError = require("../src/helpers/domainError");
+const {
+  buildProductModule,
+  projectLegacyCustomizations,
+} = require("../src/modules/m_products");
 const {
   buildCustomizationChoiceImageUpload,
 } = require("../src/helpers/middleware/customizationChoiceImages");
+
+assert.deepStrictEqual(projectLegacyCustomizations([{
+  product_step_id: 10,
+  name: "Boissons",
+  description: "Choisissez",
+  minimum_choices: 1,
+  maximum_choices: 1,
+  choices: [{
+    product_step_choice_id: 30,
+    name: "Cola",
+    extra_price: "0.50",
+    active: true,
+    available: true,
+  }],
+}]), [{
+  name: "Boissons",
+  description: "Choisissez",
+  limit_choice: 1,
+  mandatory: true,
+  items: [{ id: 30, name: "Cola", price: 0.5 }],
+}]);
+assert.strictEqual(typeof buildProductModule, "function");
+assert.strictEqual(typeof buildProductController, "function");
+
+const runProductReadContracts = async () => {
+  const productQueries = [];
+  const resolvedCalls = [];
+  const stateCalls = [];
+  const productModule = buildProductModule({
+    connection: {
+      query: async (sql, params) => {
+        productQueries.push({ sql, params });
+        return [[
+          {
+            id: 1,
+            name: "Menu",
+            shopid: 7,
+            description: "Formule",
+            category: "Menus",
+            categoryid: 3,
+            price: "10.00",
+            stock: 5,
+            image: "menu.webp",
+            archived: 0,
+            is_hidden: 0,
+          },
+          {
+            id: 2,
+            name: "Menu indisponible",
+            shopid: 7,
+            description: "Formule",
+            category: "Menus",
+            categoryid: 3,
+            price: "8.00",
+            stock: 5,
+            image: "menu-2.webp",
+            archived: 0,
+            is_hidden: 0,
+          },
+        ]];
+      },
+    },
+    getResolvedProductConfigurations: async ({ shopId, productIds, connection }) => {
+      resolvedCalls.push({ shopId, productIds, connection });
+      return new Map([
+        [1, [{
+          product_step_id: 10,
+          name: "Boissons",
+          description: "Choisissez",
+          minimum_choices: 1,
+          maximum_choices: 2,
+          active: true,
+          choices: [
+            {
+              product_step_choice_id: 30,
+              name: "Cola",
+              extra_price: "1.00",
+              active: true,
+              available: true,
+            },
+            {
+              product_step_choice_id: 31,
+              name: "Rupture",
+              extra_price: "0.10",
+              active: true,
+              available: false,
+            },
+          ],
+        }]],
+        [2, [{ product_step_id: 20, choices: [] }]],
+      ]);
+    },
+    getProductCustomizationState: (steps) => {
+      stateCalls.push(steps);
+      return steps[0].product_step_id === 20
+        ? {
+          customization_available: false,
+          product_step_id: 20,
+          reason: { code: "INSUFFICIENT_AVAILABLE_CHOICES" },
+        }
+        : { customization_available: true, product_step_id: null, reason: null };
+    },
+  });
+
+  const products = await productModule.mAllProduct(7);
+  assert.strictEqual(productQueries.length, 1, "one products query");
+  assert.match(productQueries[0].sql, /FROM products/);
+  assert.deepStrictEqual(productQueries[0].params, [7]);
+  assert.strictEqual(resolvedCalls.length, 1, "one resolved-configuration query");
+  assert.deepStrictEqual(resolvedCalls[0].productIds, [1, 2]);
+  assert.strictEqual(stateCalls.length, 2, "state helper is consumed for each product");
+  assert.strictEqual(products[0].customization_steps.length, 1);
+  assert.deepStrictEqual(products[0].product_customization, [{
+    name: "Boissons",
+    description: "Choisissez",
+    limit_choice: 2,
+    mandatory: true,
+    items: [{ id: 30, name: "Cola", price: 1 }],
+  }]);
+  assert.strictEqual(products[0].customization_available, true);
+  assert.strictEqual(products[0].minimum_commandable_price, 11);
+  assert.deepStrictEqual(products[1].customization_blocking, {
+    product_step_id: 20,
+    reason: { code: "INSUFFICIENT_AVAILABLE_CHOICES" },
+  });
+  assert.strictEqual(products[1].minimum_commandable_price, null);
+
+  const detailQueries = [];
+  const detailResolvedCalls = [];
+  const detailModule = buildProductModule({
+    connection: {
+      query: async (sql, params) => {
+        detailQueries.push({ sql, params });
+        return [[{
+          id: 1,
+          name: "Menu",
+          shopid: 7,
+          price: "10.00",
+        }]];
+      },
+    },
+    getResolvedProductConfigurations: async (options) => {
+      detailResolvedCalls.push(options);
+      return new Map([[1, []]]);
+    },
+    getProductCustomizationState: () => ({
+      customization_available: true,
+      product_step_id: null,
+      reason: null,
+    }),
+  });
+  const detail = await detailModule.mDetailProduct(1);
+  assert.strictEqual(detailQueries.length, 1, "one detail product query");
+  assert.deepStrictEqual(detailQueries[0].params, [1]);
+  assert.strictEqual(detailResolvedCalls.length, 1, "one detail configuration batch");
+  assert.deepStrictEqual(detailResolvedCalls[0].productIds, [1]);
+  assert.deepStrictEqual(detail[0].customization_steps, []);
+  assert.deepStrictEqual(detail[0].product_customization, []);
+  assert.strictEqual(detail[0].minimum_commandable_price, 10);
+};
+
+const runProductWriteContracts = async () => {
+  const transactionEvents = [];
+  const writeCalls = [];
+  const replaceCalls = [];
+  const transactionConnection = {
+    query: async (sql, params) => {
+      writeCalls.push({ sql, params });
+      if (/INSERT INTO products/.test(sql)) return [{ insertId: 100 }];
+      if (/INSERT INTO customization_steps/.test(sql)) return [{ insertId: 200 }];
+      if (/INSERT INTO product_customization_steps/.test(sql)) return [{ insertId: 300 }];
+      if (/INSERT INTO customization_step_choices/.test(sql)) return [{ insertId: 400 }];
+      if (/SELECT shopid FROM products/.test(sql)) return [[{ shopid: 7 }]];
+      return [{ affectedRows: 1 }];
+    },
+  };
+  const productModule = buildProductModule({
+    withTransaction: async (work) => {
+      transactionEvents.push("begin");
+      try {
+        const result = await work(transactionConnection);
+        transactionEvents.push("commit");
+        return result;
+      } catch (error) {
+        transactionEvents.push("rollback");
+        throw error;
+      }
+    },
+    replaceProductConfiguration: async (options) => {
+      replaceCalls.push(options);
+      return true;
+    },
+  });
+
+  await productModule.mAddProduct({
+    name: "Menu legacy",
+    shopid: 7,
+    categoryid: 3,
+    price: 10,
+    stock: 5,
+    image: "menu.webp",
+    product_customization: [{
+      name: "Boissons",
+      description: "Choisissez",
+      mandatory: true,
+      limit_choice: 1,
+      items: [{ name: "Cola", price: 0.5 }],
+    }],
+  });
+  assert.deepStrictEqual(transactionEvents, ["begin", "commit"]);
+  assert.ok(writeCalls.some(({ sql }) => /INSERT INTO customization_steps/.test(sql)));
+  assert.ok(writeCalls.some(({ sql }) => /INSERT INTO product_customization_steps/.test(sql)));
+  assert.ok(writeCalls.some(({ sql }) => /INSERT INTO customization_step_choices/.test(sql)));
+  assert.ok(writeCalls.some(({ sql }) => /INSERT INTO product_customization_step_choices/.test(sql)));
+  assert.ok(!writeCalls.some(({ sql }) => /\bproduct_customization\b/.test(sql)));
+  assert.ok(!writeCalls.some(({ sql }) => /\bproduct_choice\b/.test(sql)));
+
+  transactionEvents.length = 0;
+  writeCalls.length = 0;
+  const canonicalConfig = [{
+    step_id: 20,
+    minimum_choices: 0,
+    maximum_choices: 1,
+    choices: [],
+  }];
+  await productModule.mAddProduct({
+    name: "Menu V2",
+    shopid: 7,
+    categoryid: 3,
+    price: 10,
+    stock: 5,
+    image: "menu-v2.webp",
+    customization_config: canonicalConfig,
+  });
+  assert.deepStrictEqual(transactionEvents, ["begin", "commit"]);
+  assert.strictEqual(replaceCalls.length, 1);
+  assert.strictEqual(replaceCalls[0].connection, transactionConnection);
+  assert.strictEqual(replaceCalls[0].productId, 100);
+  assert.strictEqual(replaceCalls[0].shopId, 7);
+  assert.strictEqual(replaceCalls[0].steps, canonicalConfig);
+
+  transactionEvents.length = 0;
+  writeCalls.length = 0;
+  await productModule.mUpdateProduct({
+    product_customization: [],
+    updated: "now",
+  }, 100);
+  assert.deepStrictEqual(transactionEvents, ["begin", "commit"]);
+  assert.ok(writeCalls.some(({ sql }) => /UPDATE products/.test(sql)));
+  assert.ok(writeCalls.some(({ sql }) => /DELETE FROM product_customization_step_choices/.test(sql)));
+  assert.ok(writeCalls.some(({ sql }) => /DELETE FROM product_customization_steps/.test(sql)));
+  assert.ok(!writeCalls.some(({ sql }) => /DELETE FROM product_customization\s/.test(sql)));
+  assert.ok(!writeCalls.some(({ sql }) => /\bproduct_choice\b/.test(sql)));
+
+  const rollbackEvents = [];
+  const failingModule = buildProductModule({
+    withTransaction: async (work) => {
+      rollbackEvents.push("begin");
+      try {
+        await work(transactionConnection);
+        rollbackEvents.push("commit");
+      } catch (error) {
+        rollbackEvents.push("rollback");
+        throw error;
+      }
+    },
+    replaceProductConfiguration: async () => {
+      throw new Error("configuration insert failed");
+    },
+  });
+  await assert.rejects(
+    () => failingModule.mAddProduct({
+      name: "Rollback",
+      shopid: 7,
+      customization_config: canonicalConfig,
+    }),
+    /configuration insert failed/,
+  );
+  assert.deepStrictEqual(rollbackEvents, ["begin", "rollback"]);
+};
+
+const productResponse = () => ({
+  statusCode: null,
+  payload: null,
+  status(code) {
+    this.statusCode = code;
+    return this;
+  },
+  json(payload) {
+    this.payload = payload;
+    return this;
+  },
+});
+
+const runProductControllerContracts = async () => {
+  const replaceCalls = [];
+  let handlers = buildProductController({
+    products: {
+      mReplaceProductCustomizationConfig: async (options) => {
+        replaceCalls.push(options);
+        return true;
+      },
+    },
+  });
+  let res = productResponse();
+  const steps = [{
+    step_id: 20,
+    minimum_choices: 0,
+    maximum_choices: 1,
+    choices: [],
+  }];
+  await handlers.updateProductCustomizationConfig({
+    shopid: 7,
+    params: { id: "100" },
+    body: { customization_config: JSON.stringify(steps) },
+  }, res);
+  assert.strictEqual(res.statusCode, 200);
+  assert.deepStrictEqual(replaceCalls, [{ shopId: 7, productId: "100", steps }]);
+
+  handlers = buildProductController({
+    products: {
+      mReplaceProductCustomizationConfig: async () => {
+        throw new DomainError(
+          422,
+          "CUSTOMIZATION_STEP_NOT_OWNED",
+          "Customization step does not belong to this shop",
+          { product_id: 100, step_id: 20 },
+        );
+      },
+    },
+  });
+  res = productResponse();
+  await handlers.updateProductCustomizationConfig({
+    shopid: 7,
+    params: { id: "100" },
+    body: { steps },
+  }, res);
+  assert.strictEqual(res.statusCode, 422);
+  assert.deepStrictEqual(res.payload.data, {
+    code: "CUSTOMIZATION_STEP_NOT_OWNED",
+    product_id: 100,
+    product_step_id: 20,
+    choice_id: null,
+  });
+
+  const removedFiles = [];
+  handlers = buildProductController({
+    products: {
+      mAddProduct: async () => {
+        throw new Error("insert failed");
+      },
+    },
+    fileSystem: {
+      existsSync: () => true,
+      unlinkSync: (filename) => removedFiles.push(filename),
+    },
+    publicImagePath: "C:\\public-images",
+    logger: { error: () => {} },
+  });
+  res = productResponse();
+  await handlers.addProduct({
+    shopid: 7,
+    file: { filename: "new.webp" },
+    body: {
+      name: "Menu",
+      categoryid: 3,
+      price: "10.00",
+      stock: 5,
+      customization_config: "[]",
+    },
+  }, res);
+  assert.strictEqual(res.statusCode, 500);
+  assert.deepStrictEqual(removedFiles, [
+    path.join("C:\\public-images", "products", "new.webp"),
+  ]);
+
+  removedFiles.length = 0;
+  handlers = buildProductController({
+    products: {
+      mDetailProduct: async () => [{ image: "old.webp" }],
+      mUpdateProduct: async () => {
+        throw new Error("update failed");
+      },
+    },
+    fileSystem: {
+      existsSync: () => true,
+      unlinkSync: (filename) => removedFiles.push(filename),
+    },
+    publicImagePath: "C:\\public-images",
+    logger: { error: () => {} },
+  });
+  res = productResponse();
+  await handlers.updateProduct({
+    params: { id: "100" },
+    file: { filename: "replacement.webp" },
+    body: {},
+  }, res);
+  assert.strictEqual(res.statusCode, 500);
+  assert.deepStrictEqual(removedFiles, [
+    path.join("C:\\public-images", "products", "replacement.webp"),
+  ]);
+
+  removedFiles.length = 0;
+  handlers = buildProductController({
+    products: {
+      mDetailProduct: async () => [{ image: "old.webp" }],
+      mUpdateProduct: async () => true,
+    },
+    fileSystem: {
+      existsSync: () => true,
+      unlinkSync: (filename) => removedFiles.push(filename),
+    },
+    publicImagePath: "C:\\public-images",
+  });
+  res = productResponse();
+  await handlers.updateProduct({
+    params: { id: "100" },
+    file: { filename: "replacement.webp" },
+    body: {},
+  }, res);
+  assert.strictEqual(res.statusCode, 200);
+  assert.deepStrictEqual(removedFiles, [
+    path.join("C:\\public-images", "products", "old.webp"),
+  ]);
+};
 
 const grouped = groupResolvedConfigurationRows([{
   product_id: 1,
@@ -1033,7 +1471,10 @@ const runCustomizationApiContracts = async () => {
   assert.deepStrictEqual(traversalRemovals, []);
 };
 
-runRepositoryReadContracts()
+runProductReadContracts()
+  .then(runProductWriteContracts)
+  .then(runProductControllerContracts)
+  .then(runRepositoryReadContracts)
   .then(runUploadMiddlewareContracts)
   .then(runCustomizationApiContracts)
   .then(() => console.log("customization catalog contracts passed"))
