@@ -22,6 +22,7 @@ require.cache[callbackDbPath] = {
   exports: { query: () => { throw new Error("unexpected legacy DB query"); } },
 };
 const {
+  buildCancelQrTablePaymentIntentController,
   buildQrTablePaymentIntentController,
 } = require("../src/controllers/c_stripe");
 const {
@@ -374,6 +375,15 @@ const succeededIntent = {
 
 const runStripeReservationContracts = async () => {
   let harness = makeStripeLifecycleHarness();
+  assert.strictEqual(
+    (await harness.payments.getStripeOrderForCancellation(42, 7)).id,
+    42,
+  );
+  assert.strictEqual(
+    await harness.payments.getStripeOrderForCancellation(42, 8),
+    null,
+    "the cancellation read is scoped to the authenticated shop",
+  );
   await harness.payments.markPaymentSucceeded(succeededIntent);
   await harness.payments.markPaymentSucceeded(succeededIntent);
   assert.strictEqual(harness.getState().products.get(10), 8);
@@ -769,7 +779,11 @@ const runStripeCheckoutControllerContracts = async () => {
     id: 9,
     body: {
       customer: { id: 12, name: "Ada", phone: "0102", remark: "Sans sac" },
-      items: [{ product_id: 10, quantity: 2, selected_choice_ids: [101] }],
+      items: [{
+        product_id: 10,
+        quantity: 2,
+        selected_product_step_choice_ids: [101],
+      }],
       expected_total: "23.00",
       client_order_token: "stripe-token-1",
     },
@@ -792,6 +806,56 @@ const runStripeCheckoutControllerContracts = async () => {
   assert.strictEqual(stripeCreateCalls[0][1].idempotencyKey, "qr-7-stripe-token-1");
   assert.strictEqual(persisted[0].amount, 23);
   assert.deepStrictEqual(cleaned, []);
+
+  response = makeResponse();
+  await controller({
+    shopid: 7,
+    id: 9,
+    body: {
+      customer: "Grace",
+      customerID: 13,
+      phone: "0304",
+      remark: "Table 8",
+      payment: "cash",
+      items: [{ product_id: 10, quantity: 1, selected_choice_ids: [101] }],
+      expected_total: "11.50",
+      client_order_token: "stripe-token-legacy",
+    },
+  }, response);
+  assert.strictEqual(response.statusCode, 200);
+  assert.deepStrictEqual(checkoutCalls[1], {
+    shopId: 7,
+    actorId: 9,
+    customer: { id: 13, name: "Grace", phone: "0304", remark: "Table 8" },
+    items: [{ productId: 10, quantity: 1, selectedChoiceIds: [101] }],
+    expectedTotal: "11.50",
+    clientOrderToken: "stripe-token-legacy",
+    paymentMode: "stripe",
+  });
+
+  response = makeResponse();
+  await controller({
+    shopid: 7,
+    id: 9,
+    body: {
+      customer: { id: 12, name: "Ada" },
+      items: [{
+        product_id: 10,
+        quantity: 1,
+        selected_product_step_choice_ids: [101],
+        selected_choice_ids: [102],
+      }],
+      expected_total: "10.50",
+      client_order_token: "stripe-token-conflict",
+    },
+  }, response);
+  assert.strictEqual(response.statusCode, 400);
+  assert.strictEqual(response.payload.data.code, "CHECKOUT_REQUEST_INVALID");
+  assert.strictEqual(
+    response.payload.data.field,
+    "items.0.selected_product_step_choice_ids",
+  );
+  assert.strictEqual(checkoutCalls.length, 2);
 
   const logs = [];
   cleaned = [];
@@ -829,10 +893,12 @@ const runStripeCheckoutControllerContracts = async () => {
     name: "attachment",
     options: { paymentAttached: false, failAttachment: true },
     cancelFails: false,
+    releasesReservation: true,
   }, {
     name: "payment record",
     options: { paymentAttached: false, failPaymentRecord: true },
     cancelFails: true,
+    releasesReservation: false,
   }]) {
     const lifecycle = makeStripeLifecycleHarness(scenario.options);
     const cancellationCalls = [];
@@ -861,6 +927,7 @@ const runStripeCheckoutControllerContracts = async () => {
           cancel: async (id) => {
             cancellationCalls.push(id);
             if (scenario.cancelFails) throw new Error("Stripe cleanup cancel failed");
+            return { id, status: "canceled" };
           },
         },
       }),
@@ -873,9 +940,16 @@ const runStripeCheckoutControllerContracts = async () => {
     assert.strictEqual(response.statusCode, 500, scenario.name);
     assert.deepStrictEqual(cancellationCalls, ["pi_42"]);
     assert.strictEqual(lifecycle.getState().orders[0].stripe_payment_intent_id, null);
-    assert.strictEqual(lifecycle.getState().orders[0].payment_status, "canceled");
-    assert.strictEqual(lifecycle.getState().reservations[0].status, "released");
-    assert.strictEqual(lifecycle.getState().products.get(10), 10);
+    assert.strictEqual(
+      lifecycle.getState().orders[0].payment_status,
+      scenario.releasesReservation ? "canceled" : "requires_payment",
+    );
+    assert.strictEqual(
+      lifecycle.getState().reservations[0].status,
+      scenario.releasesReservation ? "released" : "reserved",
+      "a failed external cancellation must keep the reservation",
+    );
+    assert.strictEqual(lifecycle.getState().products.get(10), scenario.releasesReservation ? 10 : 8);
     assert.strictEqual(lifecycle.getState().payments.length, 0);
     assert.ok(!JSON.stringify(response.payload).includes("SQL"));
     assert.ok(!JSON.stringify(response.payload).includes("Stripe cleanup"));
@@ -933,9 +1007,207 @@ const runStripeCheckoutControllerContracts = async () => {
   assert.strictEqual(terminalLogs.length, 1);
 };
 
+const runStripeCancellationControllerContracts = async () => {
+  const routerSource = require("fs").readFileSync(
+    require.resolve("../src/routers/r_stripe"),
+    "utf8",
+  );
+  assert.match(
+    routerSource,
+    /\.post\([\s\S]*"\/stripe\/payment-intents\/qr-table\/:orderId\/cancel",[\s\S]*authentication,[\s\S]*stripe\.cancelQrTablePaymentIntent/,
+  );
+
+  let order = {
+    id: 42,
+    shopid: 7,
+    payment_status: "requires_payment",
+    payment_provider: "stripe",
+    stripe_payment_intent_id: "pi_42",
+  };
+  const events = [];
+  let releaseCount = 0;
+  const controller = buildCancelQrTablePaymentIntentController({
+    getStripeOrderForCancellation: async (orderId, shopId) => {
+      events.push(["read", Number(orderId), Number(shopId)]);
+      return order && order.id === Number(orderId) && order.shopid === Number(shopId)
+        ? order
+        : null;
+    },
+    getStripe: () => ({
+      paymentIntents: {
+        retrieve: async (id) => {
+          events.push(["retrieve", id]);
+          return { id, status: "requires_payment_method" };
+        },
+        cancel: async (id) => {
+          events.push(["cancel", id]);
+          return { id, status: "canceled" };
+        },
+      },
+    }),
+    cancelProvisionalStripeOrder: async (orderId, shopId) => {
+      events.push(["release", Number(orderId), Number(shopId)]);
+      releaseCount += 1;
+      order = { ...order, payment_status: "canceled" };
+      return { canceled: true };
+    },
+    logger: { error: () => {} },
+  });
+
+  let response = makeResponse();
+  await controller({ params: { orderId: "42" }, shopid: 7 }, response);
+  assert.strictEqual(response.statusCode, 200);
+  assert.deepStrictEqual(response.payload.data, {
+    orderId: 42,
+    canceled: true,
+    idempotent_replay: false,
+  });
+  assert.deepStrictEqual(events.slice(0, 4), [
+    ["read", 42, 7],
+    ["retrieve", "pi_42"],
+    ["cancel", "pi_42"],
+    ["release", 42, 7],
+  ], "Stripe must be canceled before reservations are released");
+  assert.strictEqual(releaseCount, 1);
+
+  response = makeResponse();
+  await controller({ params: { orderId: "42" }, shopid: 7 }, response);
+  assert.strictEqual(response.statusCode, 200);
+  assert.strictEqual(response.payload.data.idempotent_replay, true);
+  assert.strictEqual(releaseCount, 1, "repeat cancellation releases at most once");
+  assert.strictEqual(events.filter(([name]) => name === "cancel").length, 1);
+
+  response = makeResponse();
+  await controller({ params: { orderId: "42" }, shopid: 8 }, response);
+  assert.strictEqual(response.statusCode, 404, "foreign orders are hidden");
+  assert.deepStrictEqual(response.payload.data, { code: "STRIPE_ORDER_NOT_FOUND" });
+
+  order = null;
+  response = makeResponse();
+  await controller({ params: { orderId: "404" }, shopid: 7 }, response);
+  assert.strictEqual(response.statusCode, 404);
+  assert.deepStrictEqual(response.payload.data, { code: "STRIPE_ORDER_NOT_FOUND" });
+
+  response = makeResponse();
+  await controller({ params: { orderId: "0" }, shopid: 7 }, response);
+  assert.strictEqual(response.statusCode, 400);
+  assert.deepStrictEqual(response.payload.data, {
+    code: "STRIPE_ORDER_CANCEL_INVALID",
+    field: "order_id",
+  });
+
+  let stripeCalls = 0;
+  let internalCalls = 0;
+  const buildScenario = ({
+    orderStatus = "requires_payment",
+    paymentIntentStatus = "requires_payment_method",
+    cancelResultStatus = "canceled",
+    cancelError = null,
+  } = {}) => buildCancelQrTablePaymentIntentController({
+    getStripeOrderForCancellation: async () => ({
+      id: 42,
+      shopid: 7,
+      payment_status: orderStatus,
+      payment_provider: "stripe",
+      stripe_payment_intent_id: "pi_42",
+    }),
+    getStripe: () => ({
+      paymentIntents: {
+        retrieve: async () => {
+          stripeCalls += 1;
+          return { id: "pi_42", status: paymentIntentStatus };
+        },
+        cancel: async () => {
+          stripeCalls += 1;
+          if (cancelError) throw cancelError;
+          return { id: "pi_42", status: cancelResultStatus };
+        },
+      },
+    }),
+    cancelProvisionalStripeOrder: async () => {
+      internalCalls += 1;
+      return { canceled: true };
+    },
+    logger: { error: () => {} },
+  });
+
+  stripeCalls = 0;
+  internalCalls = 0;
+  response = makeResponse();
+  await buildScenario({ orderStatus: "paid" })(
+    { params: { orderId: "42" }, shopid: 7 },
+    response,
+  );
+  assert.strictEqual(response.statusCode, 409);
+  assert.strictEqual(response.payload.data.code, "STRIPE_ORDER_NOT_CANCELABLE");
+  assert.strictEqual(stripeCalls, 0);
+  assert.strictEqual(internalCalls, 0);
+
+  stripeCalls = 0;
+  internalCalls = 0;
+  response = makeResponse();
+  await buildScenario({ paymentIntentStatus: "succeeded" })(
+    { params: { orderId: "42" }, shopid: 7 },
+    response,
+  );
+  assert.strictEqual(response.statusCode, 409);
+  assert.strictEqual(response.payload.data.code, "STRIPE_PAYMENT_ALREADY_SUCCEEDED");
+  assert.strictEqual(stripeCalls, 1);
+  assert.strictEqual(internalCalls, 0);
+
+  stripeCalls = 0;
+  internalCalls = 0;
+  response = makeResponse();
+  await buildScenario({ cancelError: new Error("Stripe API secret failure") })(
+    { params: { orderId: "42" }, shopid: 7 },
+    response,
+  );
+  assert.strictEqual(response.statusCode, 409);
+  assert.deepStrictEqual(response.payload.data, { code: "STRIPE_PAYMENT_CANCEL_FAILED" });
+  assert.strictEqual(internalCalls, 0);
+  assert.ok(!JSON.stringify(response.payload).includes("secret"));
+
+  stripeCalls = 0;
+  internalCalls = 0;
+  response = makeResponse();
+  await buildScenario({ cancelResultStatus: "processing" })(
+    { params: { orderId: "42" }, shopid: 7 },
+    response,
+  );
+  assert.strictEqual(response.statusCode, 409);
+  assert.strictEqual(response.payload.data.code, "STRIPE_PAYMENT_CANCEL_FAILED");
+  assert.strictEqual(internalCalls, 0);
+
+  let raceReadCount = 0;
+  response = makeResponse();
+  await buildCancelQrTablePaymentIntentController({
+    getStripeOrderForCancellation: async () => {
+      raceReadCount += 1;
+      return {
+        id: 42,
+        shopid: 7,
+        payment_status: raceReadCount === 1 ? "requires_payment" : "canceled",
+        payment_provider: "stripe",
+        stripe_payment_intent_id: "pi_42",
+      };
+    },
+    getStripe: () => ({
+      paymentIntents: {
+        retrieve: async () => ({ id: "pi_42", status: "canceled" }),
+      },
+    }),
+    cancelProvisionalStripeOrder: async () => ({ ignored: true }),
+    logger: { error: () => {} },
+  })({ params: { orderId: "42" }, shopid: 7 }, response);
+  assert.strictEqual(response.statusCode, 200, "a concurrent cancellation is idempotent");
+  assert.strictEqual(response.payload.data.idempotent_replay, true);
+  assert.strictEqual(raceReadCount, 2);
+};
+
 runStripeReservationContracts()
   .then(runCashRegisterArchiveContract)
   .then(runStripeCheckoutControllerContracts)
+  .then(runStripeCancellationControllerContracts)
   .then(() => console.log("stripePayment tests passed"))
   .catch((error) => {
     console.error(error);

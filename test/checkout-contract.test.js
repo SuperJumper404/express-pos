@@ -1526,6 +1526,7 @@ const makeCheckoutHarness = ({
   expectedSnapshotError = false,
   duplicateOnInsert = false,
   paymentMode,
+  validateConfiguredItem,
 } = {}) => {
   const initial = {
     products: new Map([[10, 10], [30, 5]]),
@@ -1648,6 +1649,7 @@ const makeCheckoutHarness = ({
     repository,
     withTransaction,
     getResolvedProductConfigurations: async () => checkoutConfiguration(),
+    ...(validateConfiguredItem ? { validateConfiguredItem } : {}),
     now: () => new Date("2026-07-24T12:00:00.000Z"),
   });
   return {
@@ -1968,6 +1970,25 @@ const runTransactionalCheckoutContracts = async () => {
     }],
   }));
   assert.strictEqual(numericStringResult.orderId, 500);
+
+  const customizationErrorHarness = makeCheckoutHarness({
+    validateConfiguredItem: () => {
+      throw new DomainError(
+        409,
+        "LINKED_PRODUCT_OUT_OF_STOCK",
+        "Linked product is out of stock",
+        { product_step_id: 20, choice_id: 101 },
+      );
+    },
+  });
+  await assert.rejects(
+    () => customizationErrorHarness.checkout.createCheckout(customizationErrorHarness.input),
+    (error) => error.code === "LINKED_PRODUCT_OUT_OF_STOCK"
+      && error.product_id === 10
+      && error.product_step_id === 20
+      && error.choice_id === 101,
+    "customization errors must identify the current parent product",
+  );
 };
 
 const runReservationContracts = async () => {
@@ -2108,7 +2129,11 @@ const runCheckoutApiSurfaceContracts = async () => {
     id: 9,
     body: {
       customer: { id: "12", name: "Ada", phone: "0102", remark: "Sans sac" },
-      items: [{ product_id: "10", quantity: 2, selected_choice_ids: [102, 101] }],
+      items: [{
+        product_id: "10",
+        quantity: 2,
+        selected_product_step_choice_ids: [102, 101],
+      }],
       expected_total: "23.00",
       client_order_token: "checkout-token-1",
       payment_mode: "cash",
@@ -2124,6 +2149,76 @@ const runCheckoutApiSurfaceContracts = async () => {
     clientOrderToken: "checkout-token-1",
     paymentMode: "cash",
   }]);
+
+  response = makeResponse();
+  await controller({
+    shopid: 7,
+    id: 9,
+    body: {
+      customer: "Grace",
+      customerID: "13",
+      phone: "0304",
+      remark: "Table 8",
+      items: [{ product_id: "10", quantity: 1, selected_choice_ids: [101] }],
+      expected_total: "11.50",
+      client_order_token: "checkout-token-2",
+      payment: "card",
+    },
+  }, response);
+  assert.strictEqual(response.statusCode, 201);
+  assert.deepStrictEqual(checkoutCalls[1], {
+    shopId: 7,
+    actorId: 9,
+    customer: { id: "13", name: "Grace", phone: "0304", remark: "Table 8" },
+    items: [{ productId: "10", quantity: 1, selectedChoiceIds: [101] }],
+    expectedTotal: "11.50",
+    clientOrderToken: "checkout-token-2",
+    paymentMode: "card",
+  });
+
+  response = makeResponse();
+  await controller({
+    shopid: 7,
+    id: 9,
+    body: {
+      customer: { id: 12, name: "Ada" },
+      items: [{
+        product_id: 10,
+        quantity: 1,
+        selected_product_step_choice_ids: [101, 102],
+        selected_choice_ids: [102, 101],
+      }],
+      expected_total: "11.50",
+      client_order_token: "checkout-token-3",
+      payment_mode: "cash",
+    },
+  }, response);
+  assert.strictEqual(response.statusCode, 201, "equivalent aliases are accepted");
+  assert.deepStrictEqual(checkoutCalls[2].items[0].selectedChoiceIds, [101, 102]);
+
+  response = makeResponse();
+  await controller({
+    shopid: 7,
+    id: 9,
+    body: {
+      customer: { id: 12, name: "Ada" },
+      items: [{
+        product_id: 10,
+        quantity: 1,
+        selected_product_step_choice_ids: [101],
+        selected_choice_ids: [102],
+      }],
+      expected_total: "10.50",
+      client_order_token: "checkout-token-4",
+      payment_mode: "cash",
+    },
+  }, response);
+  assert.strictEqual(response.statusCode, 400);
+  assert.deepStrictEqual(response.payload.data, {
+    code: "CHECKOUT_REQUEST_INVALID",
+    field: "items.0.selected_product_step_choice_ids",
+  });
+  assert.strictEqual(checkoutCalls.length, 3, "conflicting aliases never reach checkout");
 
   controller = buildCheckoutController({
     checkout: {

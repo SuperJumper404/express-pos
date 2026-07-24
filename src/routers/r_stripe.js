@@ -22,6 +22,11 @@ routers
     stripe.createQrTablePaymentIntent,
   )
   .post(
+    "/stripe/payment-intents/qr-table/:orderId/cancel",
+    authentication,
+    stripe.cancelQrTablePaymentIntent,
+  )
+  .post(
     "/stripe/payment-intents/qr-table/:orderId/pay-at-counter",
     authentication,
     stripe.markQrTablePaymentAtCounter,

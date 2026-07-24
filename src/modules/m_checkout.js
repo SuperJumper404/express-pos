@@ -73,6 +73,58 @@ const invalidRequest = (field) => new DomainError(
   { field },
 );
 
+const comparableChoiceIds = (values) => {
+  if (!Array.isArray(values)) return values;
+  return values.map((value) => {
+    if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+      return Number(value.trim());
+    }
+    return value;
+  }).sort((left, right) => String(left).localeCompare(String(right)));
+};
+
+const normalizeCheckoutRequestBody = (body = {}, { paymentModeOverride } = {}) => {
+  const customer = body.customer && typeof body.customer === "object"
+    ? {
+      id: body.customer.id,
+      name: body.customer.name,
+      phone: body.customer.phone,
+      remark: body.customer.remark,
+    }
+    : {
+      id: body.customerID,
+      name: body.customer,
+      phone: body.phone,
+      remark: body.remark,
+    };
+  const items = Array.isArray(body.items) ? body.items.map((item, itemIndex) => {
+    const publicChoiceIds = item && item.selected_product_step_choice_ids;
+    const compatibilityChoiceIds = item && item.selected_choice_ids;
+    if (publicChoiceIds !== undefined && compatibilityChoiceIds !== undefined
+      && JSON.stringify(comparableChoiceIds(publicChoiceIds))
+        !== JSON.stringify(comparableChoiceIds(compatibilityChoiceIds))) {
+      throw invalidRequest(`items.${itemIndex}.selected_product_step_choice_ids`);
+    }
+    return {
+      productId: item && item.product_id,
+      quantity: item && item.quantity,
+      selectedChoiceIds: publicChoiceIds !== undefined
+        ? publicChoiceIds
+        : compatibilityChoiceIds,
+    };
+  }) : body.items;
+
+  return {
+    customer,
+    items,
+    expectedTotal: body.expected_total,
+    clientOrderToken: body.client_order_token,
+    paymentMode: paymentModeOverride !== undefined
+      ? paymentModeOverride
+      : body.payment_mode !== undefined ? body.payment_mode : body.payment,
+  };
+};
+
 const validateCheckoutInput = (input = {}) => {
   if (!isPositiveId(input.shopId)) throw invalidRequest("shop_id");
   if (!isPositiveId(input.actorId)) throw invalidRequest("actor_id");
@@ -275,29 +327,13 @@ const isDuplicateKeyError = (error) => error && (
 
 const buildCheckoutController = ({ checkout, logger = console }) => async (req, res) => {
   const body = req.body || {};
-  const customer = body.customer && typeof body.customer === "object"
-    ? {
-      id: body.customer.id,
-      name: body.customer.name,
-      phone: body.customer.phone,
-      remark: body.customer.remark,
-    }
-    : body.customer;
-  const items = Array.isArray(body.items) ? body.items.map((item) => ({
-    productId: item.product_id,
-    quantity: item.quantity,
-    selectedChoiceIds: item.selected_choice_ids,
-  })) : body.items;
 
   try {
+    const normalized = normalizeCheckoutRequestBody(body);
     const result = await checkout.createCheckout({
       shopId: req.shopid,
       actorId: req.id,
-      customer,
-      items,
-      expectedTotal: body.expected_total,
-      clientOrderToken: body.client_order_token,
-      paymentMode: body.payment_mode,
+      ...normalized,
     });
     return custom(
       res,
@@ -588,11 +624,19 @@ const buildCheckoutModule = ({
       const resolvedItems = checkout.items.map((item) => {
         const product = findById(products, item.productId);
         const steps = findConfiguration(configurations, item.productId);
-        const validated = validateItem({
-          product,
-          steps,
-          selectedChoiceIds: item.selectedChoiceIds,
-        });
+        let validated;
+        try {
+          validated = validateItem({
+            product,
+            steps,
+            selectedChoiceIds: item.selectedChoiceIds,
+          });
+        } catch (error) {
+          if (error instanceof DomainError) {
+            error.product_id = item.productId;
+          }
+          throw error;
+        }
         const unitPrice = parseMoney(validated.unitPrice);
         const lineTotal = parseMoney(unitPrice * item.quantity);
         return {
@@ -797,5 +841,6 @@ module.exports = {
   canonicalPayloadHash,
   createCheckout: checkoutModule.createCheckout,
   finalizeReservations: checkoutModule.finalizeReservations,
+  normalizeCheckoutRequestBody,
   releaseExpiredReservations: checkoutModule.releaseExpiredReservations,
 };

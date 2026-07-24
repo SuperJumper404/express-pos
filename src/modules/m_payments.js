@@ -298,6 +298,10 @@ const buildPaymentModule = ({
     repository.getPendingStripeOrderForCounter({ orderId, shopId })
   );
 
+  const getStripeOrderForCancellation = (orderId, shopId) => (
+    repository.findOrderById({ orderId, shopId })
+  );
+
   const markPaymentSucceeded = (paymentIntent, charge = null) => runInTransaction(
     async (connection) => {
       const paymentIntentId = paymentIntent.id;
@@ -476,6 +480,7 @@ const buildPaymentModule = ({
     createPaymentRecord,
     getPaidOrderForRefund,
     getPendingStripeOrderForCounter,
+    getStripeOrderForCancellation,
     markPaymentCanceled,
     markPaymentFailed,
     markPaymentRefunded,
