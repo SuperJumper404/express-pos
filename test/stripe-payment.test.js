@@ -857,6 +857,75 @@ const runStripeCheckoutControllerContracts = async () => {
   );
   assert.strictEqual(checkoutCalls.length, 2);
 
+  const availableShop = {
+    id: 7,
+    qr_payment_mode: "stripe_before_order",
+    stripe_account_id: "acct_7",
+    stripe_charges_enabled: 1,
+    stripe_commission_percent: 5,
+    kitchen_closed: 0,
+  };
+  for (const scenario of [{
+    name: "missing shop",
+    rows: [],
+    status: 404,
+    code: "SHOP_NOT_FOUND",
+    message: "Restaurant introuvable.",
+  }, {
+    name: "closed kitchen",
+    rows: [{ ...availableShop, kitchen_closed: 1 }],
+    status: 422,
+    code: "KITCHEN_CLOSED",
+    message: "La cuisine est fermee.",
+  }, {
+    name: "Stripe mode disabled",
+    rows: [availableShop],
+    stripePaymentAllowed: false,
+    status: 422,
+    code: "STRIPE_PAYMENT_DISABLED",
+    message: "Le paiement Stripe n'est pas actif pour ce restaurant.",
+  }, {
+    name: "missing Connect account",
+    rows: [{ ...availableShop, stripe_account_id: null }],
+    status: 422,
+    code: "STRIPE_CONNECT_INCOMPLETE",
+    message: "Le restaurant doit connecter Stripe avant d'accepter les paiements.",
+  }, {
+    name: "Connect charges disabled",
+    rows: [{ ...availableShop, stripe_charges_enabled: 0 }],
+    status: 422,
+    code: "STRIPE_CONNECT_INCOMPLETE",
+    message: "Le restaurant doit connecter Stripe avant d'accepter les paiements.",
+  }]) {
+    let preconditionCheckoutCalls = 0;
+    let preconditionStripeCalls = 0;
+    let preconditionCleanupCalls = 0;
+    const preconditionController = buildQrTablePaymentIntentController({
+      getShopInfo: async () => scenario.rows,
+      createCheckout: async () => {
+        preconditionCheckoutCalls += 1;
+        throw new Error("checkout must not start");
+      },
+      getStripe: () => {
+        preconditionStripeCalls += 1;
+        throw new Error("Stripe must not start");
+      },
+      isStripePaymentAllowed: () => scenario.stripePaymentAllowed !== false,
+      cancelProvisionalStripeOrder: async () => {
+        preconditionCleanupCalls += 1;
+      },
+      logger: { error: () => {} },
+    });
+    response = makeResponse();
+    await preconditionController({ shopid: 7, id: 9, body: {} }, response);
+    assert.strictEqual(response.statusCode, scenario.status, scenario.name);
+    assert.strictEqual(response.payload.message, scenario.message, scenario.name);
+    assert.deepStrictEqual(response.payload.data, { code: scenario.code }, scenario.name);
+    assert.strictEqual(preconditionCheckoutCalls, 0, scenario.name);
+    assert.strictEqual(preconditionStripeCalls, 0, scenario.name);
+    assert.strictEqual(preconditionCleanupCalls, 0, scenario.name);
+  }
+
   const logs = [];
   cleaned = [];
   const failingController = buildQrTablePaymentIntentController({

@@ -139,6 +139,7 @@ const buildQrTablePaymentIntentController = ({
   getStripe: getStripeClient = getStripe,
   persistPaymentIntentForOrder: persistPaymentIntent = persistPaymentIntentForOrder,
   cancelProvisionalStripeOrder: cancelProvisional = cancelProvisionalStripeOrder,
+  isStripePaymentAllowed: stripePaymentAllowed = isStripePaymentAllowed,
   publishableKey = envSTRIPEPUBLISHABLEKEY,
   paymentMethodConfigurationId = envSTRIPEPAYMENTMETHODCONFIGURATIONID,
   logger = console,
@@ -150,20 +151,24 @@ const buildQrTablePaymentIntentController = ({
     const rows = await getShopInfo(req.shopid);
     const shop = rows[0];
     if (!shop) {
-      return custom(res, 404, "Restaurant introuvable.", null, null);
+      return custom(res, 404, "Restaurant introuvable.", null, {
+        code: "SHOP_NOT_FOUND",
+      });
     }
 
     if ([true, 1, "1", "true"].includes(shop.kitchen_closed)) {
-      return custom(res, 422, "La cuisine est fermee.", null, null);
+      return custom(res, 422, "La cuisine est fermee.", null, {
+        code: "KITCHEN_CLOSED",
+      });
     }
 
-    if (!isStripePaymentAllowed(shop.qr_payment_mode)) {
+    if (!stripePaymentAllowed(shop.qr_payment_mode)) {
       return custom(
         res,
         422,
         "Le paiement Stripe n'est pas actif pour ce restaurant.",
         null,
-        null,
+        { code: "STRIPE_PAYMENT_DISABLED" },
       );
     }
 
@@ -176,7 +181,7 @@ const buildQrTablePaymentIntentController = ({
         422,
         "Le restaurant doit connecter Stripe avant d'accepter les paiements.",
         null,
-        null,
+        { code: "STRIPE_CONNECT_INCOMPLETE" },
       );
     }
 
