@@ -52,14 +52,31 @@ test "${STRIPE_STOCK_RESERVATION_MINUTES}" = "15"
 
 ## Préparation et sauvegarde
 
-1. Geler les écritures administratives sur les produits et personnalisations.
-2. Identifier le commit backend et le commit frontend à déployer.
-3. Vérifier que le backend s'exécute sous Node 20.
-4. Faire une sauvegarde MySQL complète, horodatée et chiffrée.
-5. Tester la restauration de cette sauvegarde sur une base isolée.
-6. Sauvegarder le volume `${PUBLICIMAGEPATH}` séparément.
-7. Exécuter la migration et le vérificateur sur une copie réaliste avant la
+1. Planifier une maintenance qui gèle tous les writers : création de commande,
+   checkout legacy/V2, création de PaymentIntent, archivage, ainsi que toute
+   écriture produit ou personnalisation.
+2. Retirer **chaque instance backend** du trafic d'écriture, puis attendre la
+   fin des requêtes en cours. Un trafic lecture seule ne peut rester ouvert que
+   s'il est techniquement isolé des routes d'écriture. Les paiements Stripe en
+   cours doivent être arrivés à un état terminal ou faire l'objet d'une reprise
+   opérateur ; ne pas perdre leurs webhooks pendant le drain.
+3. Confirmer qu'aucune ancienne instance, aucun worker et aucune route directe
+   ne peut encore écrire dans les commandes ou le catalogue.
+4. Identifier le commit backend et le commit frontend à déployer.
+5. Vérifier que le backend s'exécute sous Node 20.
+6. Faire une sauvegarde MySQL complète, horodatée et chiffrée.
+7. Tester la restauration de cette sauvegarde sur une base isolée.
+8. Sauvegarder le volume `${PUBLICIMAGEPATH}` séparément.
+9. Exécuter la migration et le vérificateur sur une copie réaliste avant la
    base staging partagée.
+
+Le gel doit commencer avant la migration et rester actif pendant le premier
+vérificateur, le déploiement backend, son contrôle de santé et le second
+vérificateur. La migration ne rétroalimente que les commandes actives déjà
+présentes. Une commande legacy personnalisée créée dans cette fenêtre n'aurait
+pas de snapshot V2 ; lors de son archivage, le backend V2 copierait uniquement
+les snapshots puis supprimerait les lignes `orders_customization`, ce qui
+ferait perdre ses sélections dans l'archive.
 
 ## Migration et vérification
 
@@ -72,6 +89,14 @@ set +a
 npm ci --include=dev
 npm test
 npm run db:up:staging
+ENV_FILE=.env.staging node scripts/verify-customization-v2.js
+```
+
+Cette première exécution du vérificateur se fait writers gelés. Après le
+déploiement du backend V2 et la réussite de ses contrôles de santé sur toutes
+les instances, exécuter **une seconde fois**, toujours avant réouverture :
+
+```sh
 ENV_FILE=.env.staging node scripts/verify-customization-v2.js
 ```
 
@@ -126,16 +151,25 @@ les lignes V2 avec un script revu, puis exiger un vérificateur entièrement ver
 
 ## Ordre de déploiement staging
 
-1. **Sauvegarde** MySQL et volume d'images, puis preuve de restauration.
-2. **Migration** additive `20260724120000_customization_steps_v2.sql`.
-3. **Vérificateur** V2 ; arrêter immédiatement sur un code non nul.
-4. **Backend V2** avec l'adaptateur legacy et la tâche de libération des
-   réservations expirées.
-5. **Smoke legacy** : catalogue, création/édition produit, commande non-Stripe,
+1. **Maintenance et drain** : geler tous les writers de commande/checkout,
+   archivage, produit et personnalisation sur chaque instance ; terminer les
+   requêtes et paiements en cours.
+2. **Sauvegarde** MySQL et volume d'images, puis preuve de restauration.
+3. **Migration** additive `20260724120000_customization_steps_v2.sql`, writers
+   toujours gelés.
+4. **Premier vérificateur** V2 ; arrêter immédiatement sur un code non nul.
+5. **Backend V2** sur toutes les instances, avec l'adaptateur legacy et la
+   tâche de libération des réservations expirées ; ne pas rouvrir les writers.
+6. **Santé backend** : version, healthcheck, accès image, logs et disponibilité
+   de chaque instance.
+7. **Second vérificateur** V2 après santé backend ; exiger un code de sortie 0.
+8. **Réouverture** du trafic d'écriture uniquement après les deux vérificateurs
+   et la santé backend au vert.
+9. **Smoke legacy** : catalogue, création/édition produit, commande non-Stripe,
    Stripe, détail, archive et ticket avec l'ancien frontend.
-6. **Frontend V2** uniquement après validation des cinq étapes précédentes.
-7. **Smoke V2** complet, puis observation des commandes, stocks, paiements,
-   réservations, instantanés et images.
+10. **Frontend V2** uniquement après validation des neuf étapes précédentes.
+11. **Smoke V2** complet, puis observation des commandes, stocks, paiements,
+    réservations, instantanés et images.
 
 Le nouveau frontend ne doit jamais être déployé avant le backend compatible.
 
