@@ -33,6 +33,7 @@ const queries = {
     SELECT COUNT(*) AS count
     FROM product_customization_steps
     WHERE minimum_choices < 0
+       OR maximum_choices < 1
        OR maximum_choices < minimum_choices
   `,
   missingProductAssociationCount: `

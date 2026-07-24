@@ -45,6 +45,9 @@ for (const token of [
   assert.ok(verifier.includes(token), token);
 }
 assert.ok(verifier.includes("Unresolved archive selections"));
+const invalidMinMaxQuery = verifier.match(/invalidMinMaxCount:\s*`([\s\S]*?)`/);
+assert.ok(invalidMinMaxQuery, "invalid min/max verifier query");
+assert.match(invalidMinMaxQuery[1], /maximum_choices\s*<\s*1/);
 assert.ok(!/\b(?:INSERT|UPDATE|DELETE|ALTER|CREATE|DROP|TRUNCATE|REPLACE)\b/i.test(
   verifier.replace(/console\.(?:log|error)\([^;]+;/g, ""),
 ));
