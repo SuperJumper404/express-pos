@@ -7,6 +7,12 @@ const isDisabled = (value) => value === false
   || (typeof value === "string" && ["0", "false"].includes(value.trim().toLowerCase()));
 const isEnabled = (value) => value === true || value === 1 || value === "1";
 const idKey = (value) => String(value);
+const isValidCatalogId = (value) => {
+  if (typeof value === "number") return Number.isSafeInteger(value) && value > 0;
+  if (typeof value !== "string" || !/^\d+$/.test(value.trim())) return false;
+  const numericValue = Number(value.trim());
+  return Number.isSafeInteger(numericValue) && numericValue > 0;
+};
 
 const queryRows = async (connection, sql, params) => {
   const [rows] = await (connection || pool).query(sql, params);
@@ -480,6 +486,13 @@ const validateConfigurationShape = (steps) => {
   const stepIdKeys = new Set();
   const choiceIdKeys = new Set();
   for (const step of steps) {
+    if (!isValidCatalogId(step.step_id)) {
+      throw configurationError(
+        "CUSTOMIZATION_STEP_ID_INVALID",
+        "Customization step ID is invalid",
+        { step_id: step.step_id },
+      );
+    }
     const stepKey = idKey(step.step_id);
     if (stepIdKeys.has(stepKey)) {
       throw configurationError(
@@ -509,6 +522,13 @@ const validateConfigurationShape = (steps) => {
       );
     }
     for (const choice of step.choices) {
+      if (!isValidCatalogId(choice.step_choice_id)) {
+        throw configurationError(
+          "CUSTOMIZATION_CHOICE_ID_INVALID",
+          "Customization choice ID is invalid",
+          { step_id: step.step_id, choice_id: choice.step_choice_id },
+        );
+      }
       const choiceKey = idKey(choice.step_choice_id);
       if (choiceIdKeys.has(choiceKey)) {
         throw configurationError(

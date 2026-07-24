@@ -280,6 +280,61 @@ const runRepositoryReadContracts = async () => {
     maximum_choices: 1,
     choices: [{ step_choice_id: 40 }],
   };
+  const nullStepIdCalls = [];
+  const nullStepIdConnection = {
+    query: async (sql) => {
+      nullStepIdCalls.push(sql);
+      if (/FROM products p/.test(sql)) return [[{ id: 100 }]];
+      if (/FROM customization_steps step/.test(sql)) return [[{ id: 20 }]];
+      if (/INSERT INTO product_customization_steps/.test(sql)) return [{ insertId: 200 }];
+      return [{ affectedRows: 1 }];
+    },
+  };
+  await assert.rejects(
+    () => replaceProductConfiguration({
+      shopId: 7,
+      productId: 100,
+      steps: [{
+        step_id: null,
+        minimum_choices: 0,
+        maximum_choices: 1,
+        choices: [],
+      }],
+      connection: nullStepIdConnection,
+    }),
+    (error) => error.code === "CUSTOMIZATION_STEP_ID_INVALID"
+      && Object.prototype.hasOwnProperty.call(error, "step_id")
+      && error.step_id === null,
+  );
+  assert.ok(!nullStepIdCalls.some((sql) => /DELETE FROM/.test(sql)));
+  const nullChoiceIdCalls = [];
+  const nullChoiceIdConnection = {
+    query: async (sql) => {
+      nullChoiceIdCalls.push(sql);
+      if (/FROM products p/.test(sql)) return [[{ id: 100 }]];
+      if (/FROM customization_steps step/.test(sql)) return [[{ id: 20 }]];
+      if (/FROM customization_step_choices choice/.test(sql)) return [[]];
+      return [{ affectedRows: 1 }];
+    },
+  };
+  await assert.rejects(
+    () => replaceProductConfiguration({
+      shopId: 7,
+      productId: 100,
+      steps: [{
+        step_id: 20,
+        minimum_choices: 0,
+        maximum_choices: 1,
+        choices: [{ step_choice_id: null }],
+      }],
+      connection: nullChoiceIdConnection,
+    }),
+    (error) => error.code === "CUSTOMIZATION_CHOICE_ID_INVALID"
+      && Object.prototype.hasOwnProperty.call(error, "choice_id")
+      && error.choice_id === null
+      && error.step_id === 20,
+  );
+  assert.ok(!nullChoiceIdCalls.some((sql) => /DELETE FROM/.test(sql)));
   await assert.rejects(
     () => replaceProductConfiguration({
       shopId: 7,
