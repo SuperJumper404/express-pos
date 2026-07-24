@@ -769,6 +769,9 @@ const runRepositoryReadContracts = async () => {
   });
   const firstDelete = replacementCalls.findIndex(({ sql }) => /DELETE FROM/.test(sql));
   assert.ok(firstDelete >= 3, "all ownership reads happen before replacement");
+  assert.ok(replacementCalls.some(({ sql }) => (
+    /FROM customization_steps step/.test(sql) && /FOR UPDATE/.test(sql)
+  )), "product configuration locks referenced steps against concurrent deletion");
   assert.match(replacementCalls[firstDelete].sql, /product_customization_step_choices/);
   assert.ok(replacementCalls.some(({ sql, params }) => (
     /INSERT INTO product_customization_step_choices/.test(sql)
@@ -1035,6 +1038,9 @@ const runRepositoryReadContracts = async () => {
   });
   const deleteStepCalls = crudCalls.slice(deleteStepCallStart);
   assert.deepStrictEqual(deletedStep, { affectedRows: 1, images: ["old.webp"] });
+  assert.ok(deleteStepCalls.some(({ sql }) => (
+    /FROM customization_steps step/.test(sql) && /FOR UPDATE/.test(sql)
+  )), "step deletion locks the owned step before removing mappings");
   assert.deepStrictEqual(
     deleteStepCalls
       .filter(({ sql }) => /^\s*DELETE/i.test(sql))

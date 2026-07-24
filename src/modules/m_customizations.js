@@ -322,15 +322,7 @@ const updateCustomizationStep = async ({ shopId, stepId, data, connection }) => 
 };
 
 const deleteCustomizationStepInConnection = async ({ shopId, stepId, connection }) => {
-  const current = await getCustomizationStep({ shopId, stepId, connection });
-  if (!current) {
-    throw new DomainError(
-      404,
-      "CUSTOMIZATION_STEP_NOT_FOUND",
-      "Customization step does not belong to this shop",
-      { step_id: stepId },
-    );
-  }
+  await requireOwnedStep({ shopId, stepId, connection });
 
   const imageRows = await queryRows(connection, `
     SELECT choice.image
@@ -379,6 +371,7 @@ const requireOwnedStep = async ({ shopId, stepId, connection }) => {
   const rows = await queryRows(connection, `
     SELECT step.id FROM customization_steps step
     WHERE step.id = ? AND step.shop_id = ?
+    FOR UPDATE
   `, [stepId, shopId]);
   if (rows.length !== 1) {
     throw new DomainError(
@@ -620,6 +613,8 @@ const validateConfigurationOwnership = async ({
       SELECT step.id
       FROM customization_steps step
       WHERE step.shop_id = ? AND step.id IN (?)
+      ORDER BY step.id
+      FOR UPDATE
     `, [shopId, stepIds]);
   }
   const ownedStepIds = new Set(ownedSteps.map((step) => idKey(step.id)));
