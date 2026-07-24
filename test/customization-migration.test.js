@@ -26,16 +26,6 @@ for (const token of [
   assert.ok(sql.includes(token), token);
 }
 
-const stripeReplacementSql = fs.readFileSync(
-  path.join(
-    __dirname,
-    "../db/migrations/20260724220000_add_stripe_replacement_attempt.sql",
-  ),
-  "utf8",
-);
-assert.ok(stripeReplacementSql.includes("stripe_replacement_attempt_id"));
-assert.match(stripeReplacementSql, /ALTER TABLE `orders`/);
-
 console.log("customization migration contract passed");
 
 const verifier = fs.readFileSync(

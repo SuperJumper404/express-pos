@@ -24,7 +24,6 @@ require.cache[callbackDbPath] = {
 const {
   buildCancelQrTablePaymentIntentController,
   buildQrTablePaymentIntentController,
-  buildRegenerateOrderPaymentIntent,
 } = require("../src/controllers/c_stripe");
 const {
   buildArchiveOrderController,
@@ -184,7 +183,6 @@ const makeStripeLifecycleHarness = ({
       payment_status: orderPaymentStatus,
       payment_provider: "stripe",
       stripe_payment_intent_id: paymentAttached ? "pi_42" : null,
-      stripe_replacement_attempt_id: null,
       client_order_token: "stripe-token-1",
       status: ORDER_STATUSES.PENDING,
     }],
@@ -276,64 +274,6 @@ const makeStripeLifecycleHarness = ({
       order.stripe_payment_intent_id = paymentIntentId;
       return { affectedRows: 1 };
     },
-    stagePaymentCanceled: async ({ orderId, paymentIntentId }) => {
-      const payment = state.payments.find(
-        (row) => row.order_id === Number(orderId)
-          && row.stripe_payment_intent_id === paymentIntentId
-          && row.status !== "succeeded",
-      );
-      if (payment) payment.status = "canceled";
-      return { affectedRows: payment ? 1 : 0 };
-    },
-    stageOrderPaymentReplacement: async ({
-      orderId, shopId, paymentIntentId, replacementAttemptId,
-    }) => {
-      const order = state.orders.find(
-        (row) => row.id === Number(orderId)
-          && row.shopid === Number(shopId)
-          && row.status === ORDER_STATUSES.PENDING
-          && row.payment_status === "requires_payment"
-          && row.payment_provider === "stripe"
-          && row.stripe_payment_intent_id === paymentIntentId,
-      );
-      if (!order) return { affectedRows: 0 };
-      order.payment_status = "unpaid";
-      order.stripe_payment_intent_id = null;
-      order.stripe_replacement_attempt_id = replacementAttemptId;
-      return { affectedRows: 1 };
-    },
-    attachReplacementPaymentIntent: async ({
-      orderId, shopId, paymentIntentId, replacementAttemptId,
-    }) => {
-      const order = state.orders.find(
-        (row) => row.id === Number(orderId)
-          && row.shopid === Number(shopId)
-          && row.status === ORDER_STATUSES.PENDING
-          && row.payment_status === "unpaid"
-          && row.payment_provider === "stripe"
-          && row.stripe_payment_intent_id == null
-          && row.stripe_replacement_attempt_id === replacementAttemptId,
-      );
-      if (!order) return { affectedRows: 0 };
-      order.payment_status = "requires_payment";
-      order.stripe_payment_intent_id = paymentIntentId;
-      order.stripe_replacement_attempt_id = null;
-      return { affectedRows: 1 };
-    },
-    advanceReplacementAttempt: async ({
-      orderId, shopId, currentAttemptId, nextAttemptId,
-    }) => {
-      const order = state.orders.find(
-        (row) => row.id === Number(orderId)
-          && row.shopid === Number(shopId)
-          && row.payment_status === "unpaid"
-          && row.stripe_payment_intent_id == null
-          && row.stripe_replacement_attempt_id === currentAttemptId,
-      );
-      if (!order) return { affectedRows: 0 };
-      order.stripe_replacement_attempt_id = nextAttemptId;
-      return { affectedRows: 1 };
-    },
     upsertPaymentRecord: async ({ data }) => {
       if (failPaymentRecord) throw new Error("SQL payment record failure");
       const existing = state.payments.find(
@@ -357,13 +297,8 @@ const makeStripeLifecycleHarness = ({
       payment.payment_method = paymentMethod;
       return { affectedRows: 1 };
     },
-    updateOrderSucceeded: async ({ orderId, paymentIntentId, paymentMethod }) => {
-      const order = state.orders.find(
-        (row) => row.id === Number(orderId)
-          && row.payment_status === "requires_payment"
-          && row.stripe_payment_intent_id === paymentIntentId,
-      );
-      if (!order) return { affectedRows: 0 };
+    updateOrderSucceeded: async ({ orderId, paymentMethod }) => {
+      const order = state.orders.find((row) => row.id === Number(orderId));
       order.payment_status = "paid";
       order.payment = paymentMethod;
       return { affectedRows: 1 };
@@ -375,12 +310,8 @@ const makeStripeLifecycleHarness = ({
       if (payment) payment.status = status;
       return { affectedRows: payment ? 1 : 0 };
     },
-    updateOrderTerminal: async ({ orderId, paymentIntentId, status }) => {
-      const order = state.orders.find(
-        (row) => row.id === Number(orderId)
-          && row.payment_status === "requires_payment"
-          && row.stripe_payment_intent_id === paymentIntentId,
-      );
+    updateOrderTerminal: async ({ orderId, status }) => {
+      const order = state.orders.find((row) => row.id === Number(orderId));
       if (order) order.payment_status = status;
       return { affectedRows: order ? 1 : 0 };
     },
@@ -427,10 +358,6 @@ const makeStripeLifecycleHarness = ({
     withTransaction,
     finalizeReservations: checkout.finalizeReservations,
     now: () => new Date("2026-07-24T12:00:00.000Z"),
-    createReplacementAttemptId: (() => {
-      let attempt = 0;
-      return () => `replacement-attempt-${++attempt}`;
-    })(),
   });
   return {
     checkout,
@@ -448,108 +375,6 @@ const succeededIntent = {
 
 const runStripeReservationContracts = async () => {
   let harness = makeStripeLifecycleHarness();
-  const prepared = await harness.payments.stagePaymentReplacement({
-    orderId: 42,
-    shopId: 7,
-    paymentIntentId: "pi_42",
-    connection: { transaction: true },
-  });
-  assert.strictEqual(prepared.ready, true);
-  assert.strictEqual(prepared.replacement_attempt_id, "replacement-attempt-1");
-  assert.strictEqual(harness.getState().orders[0].payment_status, "unpaid");
-  assert.strictEqual(harness.getState().orders[0].stripe_payment_intent_id, null);
-  assert.strictEqual(
-    harness.getState().orders[0].stripe_replacement_attempt_id,
-    "replacement-attempt-1",
-  );
-  assert.strictEqual(harness.getState().payments[0].status, "canceled");
-
-  const attached = await harness.payments.persistReplacementPaymentIntent({
-    orderId: 42,
-    shopId: 7,
-    stripe_payment_intent_id: "pi_new",
-    amount: 25,
-    amount_cents: 2500,
-    application_fee_amount: 125,
-    currency: "eur",
-    status: "requires_payment_method",
-    replacement_attempt_id: prepared.replacement_attempt_id,
-  });
-  assert.strictEqual(attached.attached, true);
-  assert.strictEqual(harness.getState().orders[0].payment_status, "requires_payment");
-  assert.strictEqual(harness.getState().orders[0].stripe_payment_intent_id, "pi_new");
-  assert.strictEqual(harness.getState().orders[0].stripe_replacement_attempt_id, null);
-
-  const replayedAttachment = await harness.payments.persistReplacementPaymentIntent({
-    orderId: 42,
-    shopId: 7,
-    stripe_payment_intent_id: "pi_new",
-    amount: 25,
-    amount_cents: 2500,
-    application_fee_amount: 125,
-    currency: "eur",
-    status: "requires_payment_method",
-    replacement_attempt_id: prepared.replacement_attempt_id,
-  });
-  assert.strictEqual(replayedAttachment.attached, true);
-  assert.strictEqual(replayedAttachment.idempotent_replay, true);
-  assert.strictEqual(harness.getState().orders[0].stripe_payment_intent_id, "pi_new");
-
-  harness = makeStripeLifecycleHarness({
-    paymentAttached: false,
-    orderPaymentStatus: "unpaid",
-  });
-  const terminalAttachment = await harness.payments.persistReplacementPaymentIntent({
-    orderId: 42,
-    shopId: 7,
-    stripe_payment_intent_id: "pi_canceled",
-    amount: 25,
-    amount_cents: 2500,
-    application_fee_amount: 125,
-    currency: "eur",
-    status: "canceled",
-  });
-  assert.strictEqual(terminalAttachment.attached, false);
-  assert.strictEqual(terminalAttachment.terminal_intent, true);
-  assert.strictEqual(harness.getState().orders[0].stripe_payment_intent_id, null);
-
-  harness = makeStripeLifecycleHarness({
-    paymentAttached: false,
-    orderPaymentStatus: "unpaid",
-  });
-  harness.getState().orders[0].stripe_replacement_attempt_id = "new-content-attempt";
-  const staleAttachment = await harness.payments.persistReplacementPaymentIntent({
-    orderId: 42,
-    shopId: 7,
-    stripe_payment_intent_id: "pi_stale_amount",
-    amount: 20,
-    amount_cents: 2000,
-    application_fee_amount: 100,
-    currency: "eur",
-    status: "requires_payment_method",
-    replacement_attempt_id: "old-content-attempt",
-  });
-  assert.strictEqual(staleAttachment.attached, false);
-  assert.strictEqual(harness.getState().orders[0].stripe_payment_intent_id, null);
-
-  harness = makeStripeLifecycleHarness();
-  const recovered = await harness.payments.recoverCanceledEditPayment({
-    orderId: 42,
-    shopId: 7,
-    paymentIntentId: "pi_42",
-  });
-  assert.strictEqual(recovered.recovered, true);
-  assert.strictEqual(harness.getState().orders[0].payment_status, "unpaid");
-  assert.strictEqual(harness.getState().orders[0].stripe_payment_intent_id, null);
-  assert.strictEqual(harness.getState().payments[0].status, "canceled");
-  const replayedRecovery = await harness.payments.recoverCanceledEditPayment({
-    orderId: 42,
-    shopId: 7,
-    paymentIntentId: "pi_42",
-  });
-  assert.strictEqual(replayedRecovery.idempotent_replay, true);
-
-  harness = makeStripeLifecycleHarness();
   assert.strictEqual(
     (await harness.payments.getStripeOrderForCancellation(42, 7)).id,
     42,
@@ -590,33 +415,6 @@ const runStripeReservationContracts = async () => {
   await harness.payments.markPaymentCanceled("pi_42");
   assert.strictEqual(harness.getState().products.get(10), 8);
   assert.strictEqual(harness.getState().reservations[0].status, "committed");
-
-  for (const transition of ["failed", "canceled", "succeeded"]) {
-    harness = makeStripeLifecycleHarness();
-    const state = harness.getState();
-    state.payments.push({
-      order_id: 42,
-      stripe_payment_intent_id: "pi_new",
-      status: "requires_payment",
-    });
-    state.orders[0].stripe_payment_intent_id = "pi_new";
-
-    let result;
-    if (transition === "succeeded") {
-      result = await harness.payments.markPaymentSucceeded(succeededIntent);
-    } else {
-      const action = transition === "failed" ? "markPaymentFailed" : "markPaymentCanceled";
-      result = await harness.payments[action]("pi_42");
-    }
-
-    assert.strictEqual(result.stale_payment_intent, true);
-    assert.strictEqual(state.products.get(10), 8, `${transition} webhook keeps stock reserved`);
-    assert.strictEqual(state.reservations[0].status, "reserved");
-    assert.strictEqual(state.orders[0].payment_status, "requires_payment");
-    assert.strictEqual(state.orders[0].stripe_payment_intent_id, "pi_new");
-    assert.strictEqual(state.payments[0].status, transition);
-    assert.strictEqual(state.payments[1].status, "requires_payment");
-  }
 
   harness = makeStripeLifecycleHarness();
   assert.strictEqual(await harness.checkout.releaseExpiredReservations(), 1);
@@ -727,287 +525,6 @@ const runStripeReservationContracts = async () => {
   assert.strictEqual(harness.getState().payments[0].status, "succeeded");
 };
 
-const runReplacementIntentGeneratorContract = async () => {
-  const calls = [];
-  const generate = buildRegenerateOrderPaymentIntent({
-    getShopInfo: async () => [{
-      id: 7,
-      stripe_account_id: "acct_7",
-      stripe_charges_enabled: 1,
-      stripe_commission_percent: 5,
-    }],
-    getStripe: () => ({
-      paymentIntents: {
-        create: async (params, options) => {
-          calls.push(["create", params, options]);
-          return {
-            id: "pi_new",
-            status: "requires_payment_method",
-            client_secret: "secret_new",
-          };
-        },
-        cancel: async (id) => calls.push(["cancel", id]),
-      },
-    }),
-    persistReplacementPaymentIntent: async (data) => {
-      calls.push(["persist", data]);
-      return { attached: true };
-    },
-    publishableKey: "pk_test",
-    paymentMethodConfigurationId: "pmc_7",
-  });
-  const result = await generate({
-    order: {
-      id: 42,
-      shopid: 7,
-      subtotal: 25,
-      stripe_replacement_attempt_id: "attempt-1",
-    },
-    contentRevision: "revision-1",
-  });
-  assert.strictEqual(
-    calls[0][2].idempotencyKey,
-    "order-edit-7-42-revision-1-attempt-1",
-  );
-  assert.strictEqual(calls[1][0], "persist");
-  assert.strictEqual(calls[1][1].amount_cents, 2500);
-  assert.strictEqual(calls[1][1].replacement_attempt_id, "attempt-1");
-  assert.deepStrictEqual(result, {
-    orderId: 42,
-    paymentIntentId: "pi_new",
-    clientSecret: "secret_new",
-    publishableKey: "pk_test",
-  });
-
-  const replayStripeCalls = [];
-  let replayCreateCalls = 0;
-  let replayRetrieveCalls = 0;
-  let replayPersistenceCalls = 0;
-  const retryAfterResponseLoss = buildRegenerateOrderPaymentIntent({
-    getShopInfo: async () => [{
-      id: 7,
-      stripe_account_id: "acct_7",
-      stripe_charges_enabled: 1,
-    }],
-    getStripe: () => ({
-      paymentIntents: {
-        create: async () => {
-          replayCreateCalls += 1;
-          return {
-            id: "pi_replayed",
-            status: "requires_payment_method",
-            client_secret: "secret_replayed",
-          };
-        },
-        retrieve: async (id) => {
-          replayRetrieveCalls += 1;
-          return {
-            id,
-            status: "requires_payment_method",
-            client_secret: "secret_replayed",
-          };
-        },
-        cancel: async (id) => replayStripeCalls.push(["cancel", id]),
-      },
-    }),
-    persistReplacementPaymentIntent: async () => {
-      replayPersistenceCalls += 1;
-      return {
-        attached: true,
-        idempotent_replay: replayPersistenceCalls > 1,
-      };
-    },
-  });
-  const retryInput = {
-    order: {
-      id: 42,
-      shopid: 7,
-      subtotal: 25,
-      stripe_replacement_attempt_id: "response-loss-attempt",
-    },
-    contentRevision: "response-loss-revision",
-  };
-  const firstResponse = await retryAfterResponseLoss(retryInput);
-  const replayedResponse = await retryAfterResponseLoss({
-    ...retryInput,
-    order: {
-      ...retryInput.order,
-      payment_status: "requires_payment",
-      payment_provider: "stripe",
-      stripe_payment_intent_id: "pi_replayed",
-    },
-  });
-  assert.strictEqual(firstResponse.paymentIntentId, "pi_replayed");
-  assert.deepStrictEqual(replayedResponse, firstResponse);
-  assert.strictEqual(replayCreateCalls, 1);
-  assert.strictEqual(replayRetrieveCalls, 1);
-  assert.strictEqual(replayPersistenceCalls, 1);
-  assert.deepStrictEqual(replayStripeCalls, [], "a response-loss retry keeps the live intent");
-
-  const crashKeys = [];
-  let crashPersistenceCalls = 0;
-  const retryAfterCreateCrash = buildRegenerateOrderPaymentIntent({
-    getShopInfo: async () => [{
-      id: 7,
-      stripe_account_id: "acct_7",
-      stripe_charges_enabled: 1,
-    }],
-    getStripe: () => ({
-      paymentIntents: {
-        create: async (params, options) => {
-          crashKeys.push(options.idempotencyKey);
-          return {
-            id: "pi_after_crash",
-            status: "requires_payment_method",
-            client_secret: "secret_after_crash",
-          };
-        },
-        cancel: async () => null,
-      },
-    }),
-    persistReplacementPaymentIntent: async () => {
-      crashPersistenceCalls += 1;
-      if (crashPersistenceCalls === 1) throw new Error("simulated process crash");
-      return { attached: true };
-    },
-  });
-  const crashRetryInput = {
-    order: {
-      id: 42,
-      shopid: 7,
-      subtotal: 25,
-      stripe_replacement_attempt_id: "durable-crash-attempt",
-    },
-    contentRevision: "crash-revision",
-  };
-  await assert.rejects(() => retryAfterCreateCrash(crashRetryInput), /process crash/);
-  const recoveredCrash = await retryAfterCreateCrash(crashRetryInput);
-  assert.strictEqual(recoveredCrash.paymentIntentId, "pi_after_crash");
-  assert.strictEqual(crashKeys[0], crashKeys[1]);
-
-  const sameContentKeys = [];
-  let sameContentCreateCalls = 0;
-  const regenerateSameContent = buildRegenerateOrderPaymentIntent({
-    getShopInfo: async () => [{
-      id: 7,
-      stripe_account_id: "acct_7",
-      stripe_charges_enabled: 1,
-    }],
-    getStripe: () => ({
-      paymentIntents: {
-        create: async (params, options) => {
-          sameContentKeys.push(options.idempotencyKey);
-          sameContentCreateCalls += 1;
-          return {
-            id: `pi_same_content_${sameContentCreateCalls}`,
-            status: "requires_payment_method",
-            client_secret: `secret_${sameContentCreateCalls}`,
-          };
-        },
-        cancel: async () => null,
-      },
-    }),
-    persistReplacementPaymentIntent: async () => ({ attached: true }),
-  });
-  const sameContentInput = {
-    order: {
-      id: 42,
-      shopid: 7,
-      subtotal: 25,
-      stripe_replacement_attempt_id: "same-content-1",
-    },
-    contentRevision: "identical-revision",
-  };
-  const formerIntent = await regenerateSameContent(sameContentInput);
-  const replacementIntent = await regenerateSameContent({
-    ...sameContentInput,
-    order: {
-      ...sameContentInput.order,
-      stripe_replacement_attempt_id: "same-content-2",
-    },
-  });
-  assert.notStrictEqual(formerIntent.paymentIntentId, replacementIntent.paymentIntentId);
-  assert.notStrictEqual(sameContentKeys[0], sameContentKeys[1]);
-
-  let terminalPersisted = false;
-  const advancedTerminalAttempts = [];
-  const terminalIntent = buildRegenerateOrderPaymentIntent({
-    getShopInfo: async () => [{
-      id: 7,
-      stripe_account_id: "acct_7",
-      stripe_charges_enabled: 1,
-    }],
-    getStripe: () => ({
-      paymentIntents: {
-        create: async () => ({
-          id: "pi_terminal",
-          status: "canceled",
-          client_secret: "must-not-leak",
-        }),
-        cancel: async () => null,
-      },
-    }),
-    persistReplacementPaymentIntent: async () => {
-      terminalPersisted = true;
-      return { attached: true };
-    },
-    advanceReplacementAttempt: async (data) => advancedTerminalAttempts.push(data),
-  });
-  await assert.rejects(
-    () => terminalIntent({
-      order: {
-        id: 42,
-        shopid: 7,
-        subtotal: 25,
-        stripe_replacement_attempt_id: "terminal-attempt",
-      },
-      contentRevision: "terminal-revision",
-    }),
-    (error) => error.code === "STRIPE_PAYMENT_INTENT_TERMINAL",
-  );
-  assert.strictEqual(terminalPersisted, false);
-  assert.strictEqual(advancedTerminalAttempts.length, 1);
-
-  const canceled = [];
-  const advancedOrphanAttempts = [];
-  const unattached = buildRegenerateOrderPaymentIntent({
-    getShopInfo: async () => [{
-      id: 7,
-      stripe_account_id: "acct_7",
-      stripe_charges_enabled: 1,
-    }],
-    getStripe: () => ({
-      paymentIntents: {
-        create: async () => ({
-          id: "pi_orphan",
-          status: "requires_payment_method",
-          client_secret: "must-not-leak",
-        }),
-        cancel: async (id) => {
-          canceled.push(id);
-          return { id, status: "canceled" };
-        },
-      },
-    }),
-    persistReplacementPaymentIntent: async () => ({ attached: false }),
-    advanceReplacementAttempt: async (data) => advancedOrphanAttempts.push(data),
-  });
-  await assert.rejects(
-    () => unattached({
-      order: {
-        id: 42,
-        shopid: 7,
-        subtotal: 25,
-        stripe_replacement_attempt_id: "orphan-attempt",
-      },
-      contentRevision: "revision-2",
-    }),
-    (error) => error.code === "ORDER_NOT_EDITABLE",
-  );
-  assert.deepStrictEqual(canceled, ["pi_orphan"]);
-  assert.strictEqual(advancedOrphanAttempts.length, 1);
-};
-
 const runCashRegisterArchiveContract = async () => {
   let harness = makeStripeLifecycleHarness();
   const stripeCalls = [];
@@ -1062,13 +579,6 @@ const runCashRegisterArchiveContract = async () => {
   await archiveModule.mArchiveOrder(42, "Carte", 7);
   assert.strictEqual(archivedOrders[0].payment_status, "paid");
   assert.strictEqual(archivedOrders[0].payment, "Carte");
-  assert.strictEqual(
-    Object.prototype.hasOwnProperty.call(
-      archivedOrders[0],
-      "stripe_replacement_attempt_id",
-    ),
-    false,
-  );
   assert.strictEqual(harness.getState().reservations[0].status, "committed");
   assert.strictEqual(harness.getState().products.get(10), 8);
   assert.strictEqual(harness.getState().movements.length, 1);
@@ -1830,7 +1340,6 @@ const runStripeCancellationControllerContracts = async () => {
 };
 
 runStripeReservationContracts()
-  .then(runReplacementIntentGeneratorContract)
   .then(runCashRegisterArchiveContract)
   .then(runStripeCheckoutControllerContracts)
   .then(runStripeCancellationControllerContracts)

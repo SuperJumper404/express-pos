@@ -21,7 +21,6 @@ const {
   mUpdateStripeAccount,
 } = require("../modules/m_shop");
 const {
-  advancePaymentReplacementAttempt,
   cancelProvisionalStripeOrder,
   getPaidOrderForRefund,
   getPendingStripeOrderForCounter,
@@ -32,7 +31,6 @@ const {
   markPaymentSucceeded,
   markStripeOrderPayAtCounter,
   persistPaymentIntentForOrder,
-  persistReplacementPaymentIntent,
 } = require("../modules/m_payments");
 const {
   createCheckout,
@@ -284,138 +282,6 @@ const buildQrTablePaymentIntentController = ({
 
 exports.buildQrTablePaymentIntentController = buildQrTablePaymentIntentController;
 exports.createQrTablePaymentIntent = buildQrTablePaymentIntentController();
-
-const buildRegenerateOrderPaymentIntent = ({
-  getShopInfo = mGetShopInfo,
-  getStripe: getStripeClient = getStripe,
-  persistReplacementPaymentIntent: persistReplacement = (
-    persistReplacementPaymentIntent
-  ),
-  publishableKey = envSTRIPEPUBLISHABLEKEY,
-  paymentMethodConfigurationId = envSTRIPEPAYMENTMETHODCONFIGURATIONID,
-  advanceReplacementAttempt = advancePaymentReplacementAttempt,
-} = {}) => async ({ order, contentRevision }) => {
-  const stripeClient = getStripeClient();
-  const paymentResponse = (paymentIntent) => ({
-    orderId: order.id,
-    paymentIntentId: paymentIntent.id,
-    clientSecret: paymentIntent.client_secret,
-    publishableKey,
-  });
-  const unusablePaymentIntent = (paymentIntent) => (
-    !paymentIntent
-    || ["canceled", "succeeded"].includes(paymentIntent.status)
-    || !paymentIntent.client_secret
-  );
-
-  const abandonCreatedIntent = async (paymentIntent) => {
-    if (!paymentIntent || paymentIntent.status === "succeeded") return false;
-    let cancellationConfirmed = paymentIntent.status === "canceled";
-    if (!cancellationConfirmed) {
-      try {
-        const canceled = await stripeClient.paymentIntents.cancel(paymentIntent.id);
-        cancellationConfirmed = canceled && canceled.status === "canceled";
-      } catch (error) {
-        cancellationConfirmed = false;
-      }
-    }
-    if (cancellationConfirmed) {
-      await advanceReplacementAttempt({
-        orderId: order.id,
-        shopId: order.shopid,
-        replacementAttemptId: order.stripe_replacement_attempt_id,
-      });
-    }
-    return cancellationConfirmed;
-  };
-
-  if (order.stripe_payment_intent_id) {
-    let attachedPaymentIntent;
-    try {
-      attachedPaymentIntent = await stripeClient.paymentIntents.retrieve(
-        order.stripe_payment_intent_id,
-      );
-    } catch (error) {
-      throw new DomainError(
-        409,
-        "STRIPE_PAYMENT_INTENT_UNAVAILABLE",
-        "Le paiement Stripe attache ne peut pas etre recupere.",
-      );
-    }
-    if (unusablePaymentIntent(attachedPaymentIntent)) {
-      throw new DomainError(
-        409,
-        "STRIPE_PAYMENT_INTENT_TERMINAL",
-        "Le paiement Stripe attache n'est plus utilisable.",
-      );
-    }
-    return paymentResponse(attachedPaymentIntent);
-  }
-
-  const rows = await getShopInfo(order.shopid);
-  const shop = rows[0];
-  if (!shop
-    || !shop.stripe_account_id
-    || ![true, 1, "1", "true"].includes(shop.stripe_charges_enabled)) {
-    throw new DomainError(
-      422,
-      "STRIPE_CONNECT_INCOMPLETE",
-      "Le restaurant doit connecter Stripe avant d'accepter les paiements.",
-    );
-  }
-  const params = buildDestinationPaymentIntentParams({
-    amount: order.subtotal,
-    currency: "eur",
-    connectedAccountId: shop.stripe_account_id,
-    orderId: order.id,
-    shopId: order.shopid,
-    commissionPercent: shop.stripe_commission_percent,
-    paymentMethodConfigurationId,
-  });
-  if (!order.stripe_replacement_attempt_id) {
-    throw new DomainError(
-      409,
-      "STRIPE_REPLACEMENT_ATTEMPT_MISSING",
-      "La tentative de remplacement Stripe est introuvable.",
-    );
-  }
-  const paymentIntent = await stripeClient.paymentIntents.create(params, {
-    idempotencyKey: [
-      "order-edit",
-      order.shopid,
-      order.id,
-      contentRevision,
-      order.stripe_replacement_attempt_id,
-    ].join("-"),
-  });
-  if (unusablePaymentIntent(paymentIntent)) {
-    await abandonCreatedIntent(paymentIntent);
-    throw new DomainError(
-      409,
-      "STRIPE_PAYMENT_INTENT_TERMINAL",
-      "Le nouveau paiement Stripe n'est pas utilisable.",
-    );
-  }
-  const persistence = await persistReplacement({
-    orderId: order.id,
-    shopId: order.shopid,
-    stripe_payment_intent_id: paymentIntent.id,
-    amount: order.subtotal,
-    amount_cents: toStripeAmount(order.subtotal),
-    application_fee_amount: params.application_fee_amount,
-    currency: params.currency,
-    status: paymentIntent.status,
-    replacement_attempt_id: order.stripe_replacement_attempt_id,
-  });
-  if (!persistence.attached) {
-    await abandonCreatedIntent(paymentIntent);
-    throw new DomainError(409, "ORDER_NOT_EDITABLE", "La commande a changé.");
-  }
-  return paymentResponse(paymentIntent);
-};
-
-exports.buildRegenerateOrderPaymentIntent = buildRegenerateOrderPaymentIntent;
-exports.regenerateOrderPaymentIntent = buildRegenerateOrderPaymentIntent();
 
 const isPositiveOrderId = (value) => {
   if (typeof value === "number") return Number.isSafeInteger(value) && value > 0;

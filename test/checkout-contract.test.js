@@ -9,7 +9,6 @@ const {
   buildCheckoutController,
   canonicalPayloadHash,
 } = require("../src/modules/m_checkout");
-const { buildOrderQuoteModule } = require("../src/modules/m_orderQuote");
 
 const routerSource = fs.readFileSync(
   require.resolve("../src/routers/r_customizations"),
@@ -1493,51 +1492,6 @@ const checkoutInput = (overrides = {}) => ({
   ...overrides,
 });
 
-const runOrderQuoteContracts = async () => {
-  const module = buildOrderQuoteModule({
-    repository: {
-      getProducts: async () => [{
-        id: 10,
-        shopid: 7,
-        name: "Menu",
-        price: "8.00",
-        archived: 0,
-        is_hidden: 0,
-      }],
-    },
-    getResolvedProductConfigurations: async () => new Map([[10, [{
-      product_step_id: 20,
-      name: "Boisson",
-      minimum_choices: 1,
-      maximum_choices: 1,
-      choices: [{
-        product_step_choice_id: 30,
-        choice_type: "linked_product",
-        choice_name: "Cola",
-        extra_price: "1.50",
-        linked_product_id: 11,
-        active: 1,
-        available: true,
-      }],
-    }]]]),
-  });
-
-  const quote = await module.quoteOrderItems({
-    shopId: 7,
-    items: [{ productId: 10, quantity: 2, selectedChoiceIds: [30] }],
-  });
-
-  assert.strictEqual(quote.total, 19);
-  assert.deepStrictEqual(quote.serverQuote.items, [{
-    product_id: 10,
-    quantity: 2,
-    selected_product_step_choice_ids: [30],
-    unit_price: 9.5,
-    total: 19,
-  }]);
-  assert.deepStrictEqual(Array.from(quote.requirements.entries()), [[10, 2], [11, 2]]);
-};
-
 const checkoutConfiguration = () => new Map([[10, [{
   product_step_id: 20,
   name: "Boisson",
@@ -2606,7 +2560,6 @@ runProductReadContracts()
   .then(runRepositoryReadContracts)
   .then(runUploadMiddlewareContracts)
   .then(runCustomizationApiContracts)
-  .then(runOrderQuoteContracts)
   .then(runTransactionalCheckoutContracts)
   .then(runReservationContracts)
   .then(runCheckoutApiSurfaceContracts)

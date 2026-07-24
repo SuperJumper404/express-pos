@@ -75,15 +75,15 @@ const archiveSqlRepository = {
     "DELETE FROM orders WHERE id = ?",
     [orderId],
   ),
-  findActiveOrderDetails: ({ orderId, shopId, connection }) => queryResult(
+  findActiveOrderDetails: ({ orderId, connection }) => queryResult(
     connection,
     `SELECT *, orders.id AS id, orderdetail.id AS orderDetailsId
      FROM orders
      LEFT JOIN orderdetail ON orders.id = orderdetail.orderid
      LEFT JOIN products ON orderdetail.productid = products.id
-     WHERE orders.id = ? AND orders.shopid = ?
+     WHERE orders.id = ?
      ORDER BY orders.created DESC`,
-    [orderId, shopId],
+    [orderId],
   ),
   findLegacyCustomizations: ({ orderId, detailIds, connection }) => (
     detailIds.length === 0 ? Promise.resolve([]) : queryResult(
@@ -220,7 +220,6 @@ const buildOrderArchiveModule = ({
       delete archive.id;
       delete archive.client_order_token;
       delete archive.client_order_payload_hash;
-      delete archive.stripe_replacement_attempt_id;
       const archiveResult = await repository.insertArchive({ archive, connection });
       const archiveOrderId = archiveResult.insertId;
 
@@ -274,8 +273,8 @@ const buildOrderArchiveModule = ({
     },
   );
 
-  const mDetailOrder = async (id, shopId) => {
-    const rows = await repository.findActiveOrderDetails({ orderId: id, shopId });
+  const mDetailOrder = async (id) => {
+    const rows = await repository.findActiveOrderDetails({ orderId: id });
     return hydrateActiveDetails(rows, Number(id));
   };
 

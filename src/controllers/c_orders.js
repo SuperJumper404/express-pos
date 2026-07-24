@@ -5,6 +5,7 @@ const {
   mAddDetailOrder,
   mReduceStock,
   mAddNewStocks,
+  mUpdateOrders,
   mDeleteOrder,
   mOrdersbyUserId,
   mArchiveOrder,
@@ -34,9 +35,6 @@ const {
   buildCheckoutController,
   createCheckout,
 } = require("../modules/m_checkout");
-const {
-  transitionOrderStatus,
-} = require("../modules/m_orderTransitions");
 
 const jwt = require("jsonwebtoken");
 const response = require("../helpers/response");
@@ -147,7 +145,7 @@ exports.ordersbyUserId = async (req, res) => {
 };
 exports.detailOrder = (req, res) => {
   const id = req.params.id;
-  mDetailOrder(id, req.shopid)
+  mDetailOrder(id)
     .then((response) => {
       if (response.length > 0) {
         success(res, "Détail de la commande récupéré.", null, response);
@@ -290,56 +288,60 @@ exports.addDetailOrder = (req, res) => {
       });
   }
 };
-const buildUpdateOrderController = ({
-  transitionOrderStatus: transitionStatus = transitionOrderStatus,
-  findOrderById = mFindOrderById,
-  cancelPendingStripePayment: syncCanceledPayment = cancelPendingStripePayment,
-} = {}) => async (req, res) => {
-  const orderId = Number(req.params.id);
-  const shopId = Number(req.shopid);
-  const actorId = Number(req.id);
-  const nextStatus = Number(req.body.status);
-  if (!actorId || !nextStatus) {
-    return custom(res, 400, "Requête invalide.", null, null);
-  }
-
-  try {
-    if (nextStatus === ORDER_STATUSES.CANCELED) {
-      const orders = await findOrderById(orderId, shopId);
-      if (!orders.length) {
-        return custom(res, 404, "Commande introuvable.", null, null);
-      }
-      try {
-        await syncCanceledPayment(orders[0]);
-      } catch (error) {
-        return failed(
-          res,
-          "Erreur lors de l'annulation du paiement Stripe.",
-          error.message,
-        );
-      }
-    }
-
-    const { result } = await transitionStatus({
-      orderId,
-      shopId,
-      actorId,
-      nextStatus,
+exports.updateOrder = async (req, res) => {
+  const id = req.params.id;
+  let body = req.body;
+  body.finished = new Date().toISOString().slice(0, 19).replace("T", " ");
+  if (!req.body.operator || !req.body.status) {
+    custom(res, 400, "Requête invalide.", null, null);
+  } else {
+    let currentStatus = await mDetailOrder(id).then((response) => {
+      return response;
     });
-    if (!result.affectedRows) {
+    if (!currentStatus.length) {
       return custom(res, 404, "Commande introuvable.", null, null);
     }
-    return success(res, "Commande mise à jour avec succès.", null, null);
-  } catch (error) {
-    if (error instanceof DomainError) {
-      return custom(res, error.status, error.message, null, { code: error.code });
+    const currentOrder = currentStatus[0];
+    const nextStatus = Number(body.status);
+    const canUpdateStatus =
+      (currentOrder.status == ORDER_STATUSES.PENDING &&
+        nextStatus === ORDER_STATUSES.PREPARING) ||
+      (currentOrder.status == ORDER_STATUSES.PREPARING &&
+        nextStatus === ORDER_STATUSES.FINISHED) ||
+      (currentOrder.status == ORDER_STATUSES.PENDING &&
+        nextStatus === ORDER_STATUSES.CANCELED) ||
+      (currentOrder.status == ORDER_STATUSES.PREPARING &&
+        nextStatus === ORDER_STATUSES.CANCELED);
+
+    if (canUpdateStatus) {
+      if (nextStatus === ORDER_STATUSES.CANCELED) {
+        try {
+          await cancelPendingStripePayment(currentOrder);
+        } catch (error) {
+          return failed(
+            res,
+            "Erreur lors de l'annulation du paiement Stripe.",
+            error.message,
+          );
+        }
+      }
+
+      mUpdateOrders(body, id)
+        .then((response) => {
+          if (response.affectedRows) {
+            success(res, "Commande mise à jour avec succès.", null, null);
+          } else {
+            custom(res, 404, "Commande introuvable.", null, null);
+          }
+        })
+        .catch((error) => {
+          failed(res, "Erreur serveur.", error.message);
+        });
+    } else {
+      custom(res, 422, "Changement de statut non autorisé pour cette commande.", null, null);
     }
-    return failed(res, "Erreur serveur.", error.message);
   }
 };
-
-exports.buildUpdateOrderController = buildUpdateOrderController;
-exports.updateOrder = buildUpdateOrderController();
 
 const buildArchiveOrderController = ({
   findOrderById = mFindOrderById,
