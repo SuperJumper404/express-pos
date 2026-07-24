@@ -12,6 +12,7 @@ routers
   .post("/orders", authentication, orders.addOrder)
   .post("/detailorder", authentication, orders.addDetailOrder)
   .get("/orders/:id/edit", authentication, orderEditing.getEditableOrder)
+  .patch("/orders/:id/items", authentication, orderEditing.updateOrderItems)
   .patch("/orders/:id", authentication, orders.updateOrder)
   .post("/orders/delete/:id", authentication, orders.deleteOrder)
   .get("/ordersbyUserId", authentication, orders.ordersbyUserId)

@@ -1,6 +1,9 @@
 const DomainError = require("../helpers/domainError");
 const { custom, success } = require("../helpers/response");
-const { getEditableOrder } = require("../modules/m_orderEditing");
+const {
+  getEditableOrder,
+  updateOrderItems,
+} = require("../modules/m_orderEditing");
 
 const domainResponse = (res, error) => custom(
   res,
@@ -28,7 +31,28 @@ const buildGetEditableOrderController = ({
   }
 };
 
+const buildUpdateOrderItemsController = ({
+  updateOrderItems: saveOrderItems = updateOrderItems,
+} = {}) => async (req, res) => {
+  try {
+    const data = await saveOrderItems({
+      orderId: Number(req.params.id),
+      shopId: Number(req.shopid),
+      actorId: Number(req.id),
+      contentRevision: req.body.content_revision,
+      expectedTotal: req.body.expected_total,
+      items: req.body.items,
+    });
+    return success(res, "Commande modifiée avec succès.", null, data);
+  } catch (error) {
+    if (error instanceof DomainError) return domainResponse(res, error);
+    return custom(res, 500, "Erreur serveur.", null, { code: "INTERNAL_ERROR" });
+  }
+};
+
 module.exports = {
   buildGetEditableOrderController,
+  buildUpdateOrderItemsController,
   getEditableOrder: buildGetEditableOrderController(),
+  updateOrderItems: buildUpdateOrderItemsController(),
 };

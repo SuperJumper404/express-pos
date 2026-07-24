@@ -2,9 +2,12 @@ const crypto = require("crypto");
 const pool = require("../config/dbPool");
 const DomainError = require("../helpers/domainError");
 const { parseMoney } = require("../helpers/money");
+const { withTransaction } = require("../helpers/withTransaction");
+const { envSTRIPESTOCKRESERVATIONMINUTES } = require("../helpers/env");
 const {
   getResolvedProductConfigurations,
 } = require("./m_customizations");
+const { quoteOrderItems } = require("./m_orderQuote");
 
 const EDITABLE_PAYMENT_STATUSES = new Set(["unpaid", "requires_payment"]);
 const isEditableOrder = (order = {}) => (
@@ -90,7 +93,167 @@ const sqlRepository = {
         [detailIds],
       )
   ),
+  lockOrder: ({ orderId, shopId, connection }) => queryResult(
+    connection,
+    `SELECT * FROM orders
+     WHERE id = ? AND shopid = ?
+     LIMIT 1 FOR UPDATE`,
+    [orderId, shopId],
+  ).then((rows) => rows[0] || null),
+  lockDetails: ({ orderId, connection }) => queryResult(
+    connection,
+    `SELECT * FROM orderdetail
+     WHERE orderid = ? ORDER BY id FOR UPDATE`,
+    [orderId],
+  ),
+  lockSnapshots: ({ detailIds, connection }) => (
+    detailIds.length === 0
+      ? Promise.resolve([])
+      : queryResult(
+        connection,
+        `SELECT * FROM orderdetail_customization_snapshots
+         WHERE orderdetail_id IN (?)
+         ORDER BY orderdetail_id, step_position, choice_position, id
+         FOR UPDATE`,
+        [detailIds],
+      )
+  ),
+  lockReservations: ({ orderId, connection }) => queryResult(
+    connection,
+    `SELECT * FROM order_stock_reservations
+     WHERE order_id = ? ORDER BY product_id FOR UPDATE`,
+    [orderId],
+  ),
+  lockProducts: ({ shopId, productIds, connection }) => queryResult(
+    connection,
+    `SELECT id, shopid, stock FROM products
+     WHERE shopid = ? AND id IN (?)
+     ORDER BY id FOR UPDATE`,
+    [shopId, productIds],
+  ),
+  adjustStock: ({ shopId, productId, delta, connection }) => {
+    const shortage = delta < 0 ? " AND stock >= ?" : "";
+    const params = [delta, productId, shopId];
+    if (delta < 0) params.push(-delta);
+    return queryResult(
+      connection,
+      `UPDATE products SET stock = stock + ?
+       WHERE id = ? AND shopid = ?${shortage}`,
+      params,
+    );
+  },
+  deleteSnapshots: ({ detailIds, connection }) => (
+    detailIds.length === 0
+      ? Promise.resolve({ affectedRows: 0 })
+      : queryResult(
+        connection,
+        "DELETE FROM orderdetail_customization_snapshots WHERE orderdetail_id IN (?)",
+        [detailIds],
+      )
+  ),
+  deleteDetails: ({ orderId, connection }) => queryResult(
+    connection,
+    "DELETE FROM orderdetail WHERE orderid = ?",
+    [orderId],
+  ),
+  insertDetail: ({ detail, connection }) => queryResult(
+    connection,
+    "INSERT INTO orderdetail SET ?",
+    [detail],
+  ),
+  insertSnapshot: ({ snapshot, connection }) => queryResult(
+    connection,
+    "INSERT INTO orderdetail_customization_snapshots SET ?",
+    [snapshot],
+  ),
+  updateOrderTotal: ({ orderId, shopId, total, finished, connection }) => queryResult(
+    connection,
+    `UPDATE orders SET subtotal = ?, finished = ?
+     WHERE id = ? AND shopid = ?`,
+    [total, finished, orderId, shopId],
+  ),
+  upsertReservation: ({ reservation, connection }) => queryResult(
+    connection,
+    `INSERT INTO order_stock_reservations SET ?
+     ON DUPLICATE KEY UPDATE
+       quantity = VALUES(quantity),
+       status = VALUES(status),
+       expires_at = VALUES(expires_at),
+       updated = VALUES(updated)`,
+    [reservation],
+  ),
+  insertMovement: ({ movement, connection }) => queryResult(
+    connection,
+    "INSERT INTO stocks SET ?",
+    [movement],
+  ),
 };
+
+const normalizeEditItems = (items) => {
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new DomainError(400, "ORDER_ITEMS_REQUIRED", "La commande doit contenir un produit.");
+  }
+  return items.map((item, index) => {
+    const productId = Number(item && (item.productId || item.product_id));
+    const quantity = Number(item && item.quantity);
+    const selectedChoiceIds = item && item.selectedChoiceIds !== undefined
+      ? item.selectedChoiceIds
+      : item && item.selected_product_step_choice_ids !== undefined
+        ? item.selected_product_step_choice_ids
+        : [];
+    if (!Number.isSafeInteger(productId) || productId <= 0) {
+      throw new DomainError(400, "CHECKOUT_REQUEST_INVALID", "Produit invalide.", {
+        field: `items.${index}.product_id`,
+      });
+    }
+    if (!Number.isSafeInteger(quantity) || quantity <= 0) {
+      throw new DomainError(400, "CHECKOUT_REQUEST_INVALID", "Quantité invalide.", {
+        field: `items.${index}.quantity`,
+      });
+    }
+    if (!Array.isArray(selectedChoiceIds)) {
+      throw new DomainError(400, "CHECKOUT_REQUEST_INVALID", "Suppléments invalides.", {
+        field: `items.${index}.selected_product_step_choice_ids`,
+      });
+    }
+    const normalizedChoices = selectedChoiceIds.map(Number);
+    if (normalizedChoices.some((id) => !Number.isSafeInteger(id) || id <= 0)
+      || new Set(normalizedChoices).size !== normalizedChoices.length) {
+      throw new DomainError(400, "CHECKOUT_REQUEST_INVALID", "Suppléments invalides.", {
+        field: `items.${index}.selected_product_step_choice_ids`,
+      });
+    }
+    return { productId, quantity, selectedChoiceIds: normalizedChoices };
+  });
+};
+
+const storedRequirements = (details, snapshots) => {
+  const requirements = new Map();
+  const add = (productId, quantity) => requirements.set(
+    Number(productId),
+    (requirements.get(Number(productId)) || 0) + Number(quantity),
+  );
+  for (const detail of details) {
+    add(detail.productid, detail.qty);
+    for (const snapshot of snapshots.filter(
+      (row) => Number(row.orderdetail_id) === Number(detail.id),
+    )) {
+      if (snapshot.choice_type === "linked_product" && snapshot.linked_product_id) {
+        add(snapshot.linked_product_id, detail.qty);
+      }
+    }
+  }
+  return requirements;
+};
+
+const requirementDeltas = (before, after) => new Map(
+  [...new Set([...before.keys(), ...after.keys()])]
+    .sort((left, right) => left - right)
+    .map((productId) => [
+      productId,
+      (after.get(productId) || 0) - (before.get(productId) || 0),
+    ]),
+);
 
 const disabled = (value) => [false, 0, "0"].includes(value);
 const configurationFor = (configurations, productId) => (
@@ -135,11 +298,17 @@ const mapSnapshot = (snapshot) => ({
     : Number(snapshot.linked_product_id),
 });
 
+const formatDate = (value) => value.toISOString().slice(0, 19).replace("T", " ");
+
 const buildOrderEditingModule = ({
   repository = sqlRepository,
+  withTransaction: runInTransaction = withTransaction,
+  quoteOrderItems: quoteItems = quoteOrderItems,
   getResolvedProductConfigurations: loadConfigurations = (
     getResolvedProductConfigurations
   ),
+  now = () => new Date(),
+  reservationTtlMinutes = envSTRIPESTOCKRESERVATIONMINUTES,
 } = {}) => {
   const getEditableOrder = async ({ orderId, shopId, connection }) => {
     const order = await repository.findOrder({ orderId, shopId, connection });
@@ -193,7 +362,223 @@ const buildOrderEditingModule = ({
     };
   };
 
-  return { getEditableOrder };
+  const previewOrderEdit = async ({ shopId, items, connection }) => {
+    const normalizedItems = normalizeEditItems(items);
+    const quote = await quoteItems({
+      shopId,
+      items: normalizedItems,
+      connection,
+    });
+    return quote.serverQuote;
+  };
+
+  const updateOrderItems = (input) => {
+    const items = normalizeEditItems(input.items);
+    return runInTransaction(async (connection) => {
+      const order = await repository.lockOrder({
+        orderId: input.orderId,
+        shopId: input.shopId,
+        connection,
+      });
+      if (!order) {
+        throw new DomainError(404, "ORDER_NOT_FOUND", "Commande introuvable.");
+      }
+      if (!isEditableOrder(order)) throw notEditable(order);
+
+      const details = await repository.lockDetails({
+        orderId: order.id,
+        connection,
+      });
+      const detailIds = details.map((detail) => Number(detail.id));
+      const snapshots = await repository.lockSnapshots({ detailIds, connection });
+      await repository.lockReservations({ orderId: order.id, connection });
+
+      const currentRevision = buildContentRevision({ order, details, snapshots });
+      if (currentRevision !== input.contentRevision) {
+        throw new DomainError(
+          409,
+          "ORDER_EDIT_CONFLICT",
+          "La commande a été modifiée depuis son chargement.",
+          { content_revision: currentRevision },
+        );
+      }
+
+      const quote = await quoteItems({
+        shopId: input.shopId,
+        items,
+        connection,
+      });
+      if (parseMoney(input.expectedTotal) !== quote.total) {
+        throw new DomainError(
+          409,
+          "ORDER_REPRICE_REQUIRED",
+          "Le prix de la commande a changé.",
+          { server_quote: quote.serverQuote },
+        );
+      }
+
+      const before = storedRequirements(details, snapshots);
+      const deltas = requirementDeltas(before, quote.requirements);
+      const productIds = [...deltas.keys()].sort((left, right) => left - right);
+      const products = await repository.lockProducts({
+        shopId: input.shopId,
+        productIds,
+        connection,
+      });
+      const shortages = [];
+      for (const [productId, delta] of deltas) {
+        const product = products.find((row) => Number(row.id) === productId);
+        if (delta > 0 && (!product || Number(product.stock) < delta)) {
+          shortages.push({
+            product_id: productId,
+            requested: delta,
+            available: product ? Number(product.stock) : 0,
+          });
+        }
+      }
+      if (shortages.length) {
+        throw new DomainError(409, "INSUFFICIENT_STOCK", "Stock insuffisant.", {
+          shortages,
+        });
+      }
+
+      if (order.payment_status === "requires_payment") {
+        if (typeof input.settlePendingPayment !== "function") {
+          throw new DomainError(
+            409,
+            "STRIPE_PAYMENT_REFRESH_REQUIRED",
+            "Le paiement Stripe doit être synchronisé avant la modification.",
+          );
+        }
+        await input.settlePendingPayment({ order, connection });
+      }
+
+      for (const [productId, delta] of deltas) {
+        if (delta === 0) continue;
+        const adjustment = await repository.adjustStock({
+          shopId: input.shopId,
+          productId,
+          delta: -delta,
+          connection,
+        });
+        if (!adjustment.affectedRows) {
+          throw new DomainError(409, "INSUFFICIENT_STOCK", "Stock insuffisant.", {
+            shortages: [{
+              product_id: productId,
+              requested: delta,
+              available: 0,
+            }],
+          });
+        }
+      }
+
+      const currentDate = now();
+      const timestamp = formatDate(currentDate);
+      const expiresAt = formatDate(new Date(
+        currentDate.valueOf() + reservationTtlMinutes * 60 * 1000,
+      ));
+
+      await repository.deleteSnapshots({ detailIds, connection });
+      await repository.deleteDetails({ orderId: order.id, connection });
+      const insertedDetails = [];
+      const insertedSnapshots = [];
+      for (const item of quote.resolvedItems) {
+        const detail = {
+          orderid: order.id,
+          productid: item.productId,
+          price: item.unitPrice,
+          qty: item.quantity,
+          total: item.lineTotal,
+        };
+        const detailResult = await repository.insertDetail({ detail, connection });
+        insertedDetails.push({ id: detailResult.insertId, ...detail });
+        for (const selectedChoice of item.selectedChoices) {
+          const step = item.steps.find(
+            (candidate) => Number(candidate.product_step_id)
+              === Number(selectedChoice.step_id),
+          );
+          const choice = step && (step.choices || []).find(
+            (candidate) => Number(candidate.product_step_choice_id)
+              === Number(selectedChoice.product_step_choice_id),
+          );
+          const snapshot = {
+            orderdetail_id: detailResult.insertId,
+            product_customization_step_id: selectedChoice.step_id,
+            product_customization_step_choice_id:
+              selectedChoice.product_step_choice_id,
+            step_name: selectedChoice.step_name,
+            step_position: step ? step.position : 0,
+            choice_type: selectedChoice.choice_type,
+            choice_name: selectedChoice.choice_name,
+            choice_position: choice ? choice.position : 0,
+            unit_extra_price: selectedChoice.extra_price,
+            linked_product_id: selectedChoice.linked_product_id,
+            created: timestamp,
+          };
+          const snapshotResult = await repository.insertSnapshot({
+            snapshot,
+            connection,
+          });
+          insertedSnapshots.push({ id: snapshotResult.insertId, ...snapshot });
+        }
+      }
+
+      await repository.updateOrderTotal({
+        orderId: order.id,
+        shopId: input.shopId,
+        total: quote.total,
+        finished: timestamp,
+        connection,
+      });
+      const reservationStatus = order.payment_provider === "stripe"
+        ? "reserved"
+        : "committed";
+      for (const productId of productIds) {
+        await repository.upsertReservation({
+          reservation: {
+            order_id: order.id,
+            product_id: productId,
+            quantity: quote.requirements.get(productId) || 0,
+            status: reservationStatus,
+            expires_at: reservationStatus === "reserved" ? expiresAt : null,
+            created: timestamp,
+            updated: timestamp,
+          },
+          connection,
+        });
+        const delta = deltas.get(productId);
+        if (reservationStatus === "committed" && delta !== 0) {
+          await repository.insertMovement({
+            movement: {
+              productid: productId,
+              category: delta > 0 ? "1" : "2",
+              qty: Math.abs(delta),
+              operator: input.actorId,
+              remark: `Modification commande #${order.ordernumber}`,
+              created: timestamp,
+              updated: timestamp,
+            },
+            connection,
+          });
+        }
+      }
+
+      return {
+        order_id: Number(order.id),
+        total: quote.total,
+        content_revision: buildContentRevision({
+          order: { ...order, subtotal: quote.total },
+          details: insertedDetails,
+          snapshots: insertedSnapshots,
+        }),
+        payment_status: order.payment_status,
+        payment_provider: order.payment_provider,
+        payment_refresh: "not_required",
+      };
+    });
+  };
+
+  return { getEditableOrder, previewOrderEdit, updateOrderItems };
 };
 
 const orderEditingModule = buildOrderEditingModule();
@@ -203,5 +588,10 @@ module.exports = {
   buildOrderEditingModule,
   getEditableOrder: orderEditingModule.getEditableOrder,
   isEditableOrder,
+  normalizeEditItems,
   notEditable,
+  previewOrderEdit: orderEditingModule.previewOrderEdit,
+  requirementDeltas,
+  storedRequirements,
+  updateOrderItems: orderEditingModule.updateOrderItems,
 };
