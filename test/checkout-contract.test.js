@@ -2300,7 +2300,7 @@ const makeArchiveHarness = ({ failAfterActiveDeletion = false } = {}) => {
       orderdetail_id: 70,
       product_customization_step_id: 5,
       product_customization_step_choice_id: 8,
-      step_name: "Boisson",
+      step_name: "Options",
       step_position: 2,
       choice_type: "simple",
       choice_name: "Cola",
@@ -2313,7 +2313,7 @@ const makeArchiveHarness = ({ failAfterActiveDeletion = false } = {}) => {
       orderdetail_id: 70,
       product_customization_step_id: 6,
       product_customization_step_choice_id: 9,
-      step_name: "Dessert",
+      step_name: "Options",
       step_position: 4,
       choice_type: "linked_product",
       choice_name: "Tarte",
@@ -2446,13 +2446,19 @@ const runArchiveSnapshotContracts = async () => {
   let harness = makeArchiveHarness();
   const active = await harness.orderModule.mDetailOrder(42);
   assert.deepStrictEqual(active[0].customizationList, [{
-    step_name: "Boisson",
+    product_customization_step_id: 5,
+    step_name: "Options",
+    step_position: 2,
     name: "Cola",
+    choice_position: 3,
     price: 0.5,
     product_choice_id: null,
   }, {
-    step_name: "Dessert",
+    product_customization_step_id: 6,
+    step_name: "Options",
+    step_position: 4,
     name: "Tarte",
+    choice_position: 1,
     price: 2,
     product_choice_id: null,
   }]);
@@ -2471,6 +2477,7 @@ const runArchiveSnapshotContracts = async () => {
   assert.deepStrictEqual(
     harness.getState().archiveSnapshots.map((row) => ({
       archivesdetail_id: row.archivesdetail_id,
+      product_customization_step_id: row.product_customization_step_id,
       step_name: row.step_name,
       step_position: row.step_position,
       choice_name: row.choice_name,
@@ -2480,7 +2487,8 @@ const runArchiveSnapshotContracts = async () => {
     })),
     [{
       archivesdetail_id: 200,
-      step_name: "Boisson",
+      product_customization_step_id: 5,
+      step_name: "Options",
       step_position: 2,
       choice_name: "Cola",
       choice_position: 3,
@@ -2488,7 +2496,8 @@ const runArchiveSnapshotContracts = async () => {
       linked_product_id: null,
     }, {
       archivesdetail_id: 200,
-      step_name: "Dessert",
+      product_customization_step_id: 6,
+      step_name: "Options",
       step_position: 4,
       choice_name: "Tarte",
       choice_position: 1,
@@ -2504,13 +2513,19 @@ const runArchiveSnapshotContracts = async () => {
 
   const archived = await harness.orderModule.mDetailArchivedOrder(100);
   assert.deepStrictEqual(archived[0].customizationList, [{
-    step_name: "Boisson",
+    product_customization_step_id: 5,
+    step_name: "Options",
+    step_position: 2,
     name: "Cola",
+    choice_position: 3,
     price: 0.5,
     product_choice_id: null,
   }, {
-    step_name: "Dessert",
+    product_customization_step_id: 6,
+    step_name: "Options",
+    step_position: 4,
     name: "Tarte",
+    choice_position: 1,
     price: 2,
     product_choice_id: null,
   }]);

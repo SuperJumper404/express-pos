@@ -141,8 +141,11 @@ const groupBy = (rows, key) => rows.reduce((groups, row) => {
 }, new Map());
 
 const mapSnapshotCustomization = (row) => ({
+  product_customization_step_id: row.product_customization_step_id,
   step_name: row.step_name,
+  step_position: row.step_position,
   name: row.choice_name,
+  choice_position: row.choice_position,
   price: parseMoney(row.unit_extra_price),
   product_choice_id: null,
 });
