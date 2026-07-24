@@ -4,7 +4,7 @@
   "description": "Restfull API pos using expressJS etc.",
   "main": "index.js",
   "scripts": {
-    "test": "node test/transaction-helper.test.js && node test/stripe-payment.test.js && node test/order-detail-stock.test.js && node test/cash-register-payment.test.js && node test/customization-rules.test.js && node test/stock-requirements.test.js",
+    "test": "node test/transaction-helper.test.js && node test/stripe-payment.test.js && node test/order-detail-stock.test.js && node test/cash-register-payment.test.js && node test/customization-rules.test.js && node test/stock-requirements.test.js && node test/customization-migration.test.js",
     "start": "nodemon index.js",
     "startAndWatch": "nodemon --watch src index.js",
     "network": "nodemon index.js",
@@ -14,6 +14,7 @@
     "db:rollback": "dbmate --migrations-dir=db/migrations rollback",
     "db:up:local": "dbmate --env-file .env.local --migrations-dir=db/migrations up",
     "db:down:local": "dbmate --env-file .env.local --migrations-dir=db/migrations down",
+    "db:verify:customization:v2": "cross-env ENV_FILE=.env.local node scripts/verify-customization-v2.js",
     "db:up:staging": "dbmate --migrations-dir=db/migrations up",
     "db:up:production": "dbmate --migrations-dir=db/migrations up",
     "stripe:webhook:local": "node scripts/stripe-webhook-local.js",
