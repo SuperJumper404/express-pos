@@ -1639,6 +1639,110 @@ const makeCheckoutHarness = ({
   };
 };
 
+const makeConcurrentClaimHarness = () => {
+  let stock = 1;
+  let pendingOrder = null;
+  let committedOrder = null;
+  let requestSequence = 0;
+  let precheckCount = 0;
+  let lockCount = 0;
+  let releasePrechecks;
+  let releaseWinnerCommit;
+  const prechecksComplete = new Promise((resolve) => { releasePrechecks = resolve; });
+  const winnerCommitted = new Promise((resolve) => { releaseWinnerCommit = resolve; });
+  const events = [];
+  const reservations = [];
+  const repository = {
+    findOrderByToken: async ({ connection }) => {
+      if (!connection) {
+        await winnerCommitted;
+        return committedOrder;
+      }
+      precheckCount += 1;
+      if (precheckCount === 2) releasePrechecks();
+      await prechecksComplete;
+      events.push([connection.requestId, "precheck-empty"]);
+      return null;
+    },
+    getProducts: async () => [{
+      id: 10,
+      shopid: 7,
+      name: "Last item",
+      price: 10,
+      stock,
+      archived: 0,
+      is_hidden: 0,
+    }],
+    lockExpiredReservations: async () => [],
+    lockProducts: async ({ connection }) => {
+      lockCount += 1;
+      events.push([connection.requestId, "lock-products"]);
+      if (lockCount > 1) await winnerCommitted;
+      return [{ id: 10, stock }];
+    },
+    adjustStock: async ({ delta }) => {
+      stock += delta;
+      return { affectedRows: 1 };
+    },
+    insertOrder: async ({ order, connection }) => {
+      events.push([connection.requestId, "claim-attempt"]);
+      if (pendingOrder) {
+        events.push([connection.requestId, "claim-duplicate"]);
+        const error = new Error("duplicate client order token");
+        error.code = "ER_DUP_ENTRY";
+        throw error;
+      }
+      pendingOrder = { id: 800, ...order, ownerRequestId: connection.requestId };
+      events.push([connection.requestId, "claim-winner"]);
+      return { insertId: 800 };
+    },
+    insertOrderDetail: async () => ({ insertId: 801 }),
+    insertSnapshot: async () => ({ insertId: 802 }),
+    insertReservation: async ({ reservation }) => {
+      reservations.push({ id: 803, ...reservation });
+      return { insertId: 803 };
+    },
+    lockReservationsByOrder: async () => reservations,
+    updateReservationStatus: async ({ reservationId, fromStatus, toStatus }) => {
+      const row = reservations.find((reservation) => reservation.id === reservationId);
+      if (!row || row.status !== fromStatus) return { affectedRows: 0 };
+      row.status = toStatus;
+      return { affectedRows: 1 };
+    },
+    insertMovement: async () => ({ insertId: 804 }),
+  };
+  const runInTransaction = async (work) => {
+    const connection = { requestId: ++requestSequence };
+    try {
+      const result = await work(connection);
+      if (pendingOrder && pendingOrder.ownerRequestId === connection.requestId) {
+        committedOrder = pendingOrder;
+        releaseWinnerCommit();
+      }
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  };
+  const checkout = buildCheckoutModule({
+    repository,
+    withTransaction: runInTransaction,
+    getResolvedProductConfigurations: async () => new Map([[10, []]]),
+    now: () => new Date("2026-07-24T12:00:00.000Z"),
+  });
+  const input = (customerName = "Ada") => checkoutInput({
+    customer: { id: 12, name: customerName },
+    items: [{ productId: 10, quantity: 1, selectedChoiceIds: [] }],
+    expectedTotal: 10,
+  });
+  return {
+    checkout,
+    events,
+    input,
+    getStock: () => stock,
+  };
+};
+
 const runTransactionalCheckoutContracts = async () => {
   assert.strictEqual(
     canonicalPayloadHash(checkoutInput({
@@ -1767,10 +1871,81 @@ const runTransactionalCheckoutContracts = async () => {
   assert.strictEqual(transactionalReads, 1);
   assert.ok(harness.events.includes("rollback"));
 
+  let concurrent = makeConcurrentClaimHarness();
+  const samePayloadResults = await Promise.all([
+    concurrent.checkout.createCheckout(concurrent.input()),
+    concurrent.checkout.createCheckout(concurrent.input()),
+  ]);
+  assert.deepStrictEqual(
+    samePayloadResults.map((checkoutResult) => checkoutResult.idempotent_replay).sort(),
+    [false, true],
+    "same-token loser must replay the winner after the unique claim",
+  );
+  const duplicateRequestId = concurrent.events.find((event) => event[1] === "claim-duplicate")[0];
+  assert.ok(
+    !concurrent.events.some(
+      (event) => event[0] === duplicateRequestId && event[1] === "lock-products",
+    ),
+    "the losing request must not reach stock locking after its duplicate claim",
+  );
+  assert.strictEqual(concurrent.getStock(), 0, "the last unit is consumed exactly once");
+
+  concurrent = makeConcurrentClaimHarness();
+  const differentPayloadResults = await Promise.allSettled([
+    concurrent.checkout.createCheckout(concurrent.input("Ada")),
+    concurrent.checkout.createCheckout(concurrent.input("Grace")),
+  ]);
+  assert.strictEqual(
+    differentPayloadResults.filter((entry) => entry.status === "fulfilled").length,
+    1,
+  );
+  const rejectedRace = differentPayloadResults.find((entry) => entry.status === "rejected");
+  assert.strictEqual(rejectedRace.reason.code, "IDEMPOTENCY_KEY_REUSED");
+  const reusedRequestId = concurrent.events.find((event) => event[1] === "claim-duplicate")[0];
+  assert.ok(!concurrent.events.some(
+    (event) => event[0] === reusedRequestId && event[1] === "lock-products",
+  ));
+
   await assert.rejects(
     () => harness.checkout.createCheckout(checkoutInput({ shopId: 0 })),
     (error) => error.code === "CHECKOUT_REQUEST_INVALID",
   );
+
+  for (const [field, invalidInput] of [
+    ["shop_id", checkoutInput({ shopId: true })],
+    ["actor_id", checkoutInput({ actorId: true })],
+    ["customer.id", checkoutInput({ customer: { id: true, name: "Ada" } })],
+    ["items.0.product_id", checkoutInput({
+      items: [{ productId: true, quantity: 2, selectedChoiceIds: [101, 102] }],
+    })],
+    ["items.0.quantity", checkoutInput({
+      items: [{ productId: 10, quantity: true, selectedChoiceIds: [101, 102] }],
+    })],
+    ["items.0.selected_choice_ids", checkoutInput({
+      items: [{ productId: 10, quantity: 2, selectedChoiceIds: [true, 102] }],
+    })],
+  ]) {
+    const invalidHarness = makeCheckoutHarness();
+    await assert.rejects(
+      () => invalidHarness.checkout.createCheckout(invalidInput),
+      (error) => error.code === "CHECKOUT_REQUEST_INVALID" && error.field === field,
+      `boolean ${field} must be rejected before checkout work`,
+    );
+    assert.deepStrictEqual(invalidHarness.events, []);
+  }
+
+  const numericStringHarness = makeCheckoutHarness();
+  const numericStringResult = await numericStringHarness.checkout.createCheckout(checkoutInput({
+    shopId: "7",
+    actorId: "9",
+    customer: { id: "12", name: "Ada" },
+    items: [{
+      productId: "10",
+      quantity: "2",
+      selectedChoiceIds: ["102", "101"],
+    }],
+  }));
+  assert.strictEqual(numericStringResult.orderId, 500);
 };
 
 const runReservationContracts = async () => {

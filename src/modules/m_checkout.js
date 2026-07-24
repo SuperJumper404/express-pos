@@ -16,7 +16,9 @@ const RESERVATION_TTL_MS = 15 * 60 * 1000;
 const formatDate = (value) => value.toISOString().slice(0, 19).replace("T", " ");
 const cents = (value) => Math.round(Number(value) * 100);
 const isPositiveId = (value) => {
-  const number = Number(value);
+  if (typeof value === "number") return Number.isSafeInteger(value) && value > 0;
+  if (typeof value !== "string" || !/^\d+$/.test(value.trim())) return false;
+  const number = Number(value.trim());
   return Number.isSafeInteger(number) && number > 0;
 };
 const uniqueSortedIds = (values) => [...new Set(values.map(Number))].sort((a, b) => a - b);
@@ -494,6 +496,33 @@ const buildCheckoutModule = ({
         );
       }
 
+      const timestampDate = now();
+      const timestamp = formatDate(timestampDate);
+      const stripe = checkout.paymentMode === "stripe";
+      const paymentStatus = stripe ? "requires_payment" : "unpaid";
+      const orderResult = await repository.insertOrder({
+        order: {
+          shopid: checkout.shopId,
+          ordernumber: String(timestampDate.valueOf()).slice(-4).padStart(4, "0"),
+          customer: checkout.customer.name,
+          phone: checkout.customer.phone,
+          customerID: checkout.customer.id,
+          operator: checkout.actorId,
+          subtotal: total,
+          payment: checkout.paymentMode,
+          payment_status: paymentStatus,
+          payment_provider: stripe ? "stripe" : null,
+          status: 1,
+          created: timestamp,
+          finished: timestamp,
+          remark: checkout.customer.remark,
+          client_order_token: checkout.clientOrderToken,
+          client_order_payload_hash: payloadHash,
+        },
+        connection,
+      });
+      const orderId = orderResult.insertId;
+
       await releaseExpiredReservations({ connection });
 
       const requirements = stockRequirements(resolvedItems);
@@ -530,33 +559,6 @@ const buildCheckoutModule = ({
           });
         }
       }
-
-      const timestampDate = now();
-      const timestamp = formatDate(timestampDate);
-      const stripe = checkout.paymentMode === "stripe";
-      const paymentStatus = stripe ? "requires_payment" : "unpaid";
-      const orderResult = await repository.insertOrder({
-        order: {
-          shopid: checkout.shopId,
-          ordernumber: String(timestampDate.valueOf()).slice(-4).padStart(4, "0"),
-          customer: checkout.customer.name,
-          phone: checkout.customer.phone,
-          customerID: checkout.customer.id,
-          operator: checkout.actorId,
-          subtotal: total,
-          payment: checkout.paymentMode,
-          payment_status: paymentStatus,
-          payment_provider: stripe ? "stripe" : null,
-          status: 1,
-          created: timestamp,
-          finished: timestamp,
-          remark: checkout.customer.remark,
-          client_order_token: checkout.clientOrderToken,
-          client_order_payload_hash: payloadHash,
-        },
-        connection,
-      });
-      const orderId = orderResult.insertId;
 
       for (const item of resolvedItems) {
         const detailResult = await repository.insertOrderDetail({
