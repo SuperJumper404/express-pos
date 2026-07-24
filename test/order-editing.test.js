@@ -13,6 +13,10 @@ const { buildOrderArchiveModule } = require("../src/modules/m_orders");
 const {
   buildUpdateOrderItemsController,
 } = require("../src/controllers/c_orderEditing");
+const {
+  buildOrderTransitionModule,
+} = require("../src/modules/m_orderTransitions");
+const { buildUpdateOrderController } = require("../src/controllers/c_orders");
 
 const order = {
   id: 42,
@@ -418,6 +422,141 @@ const runUpdateControllerContract = async () => {
   assert.strictEqual(response.payload.data.order_id, 42);
 };
 
+const runTransitionContracts = async () => {
+  const events = [];
+  const transitions = buildOrderTransitionModule({
+    withTransaction: async (work) => {
+      events.push("begin");
+      const result = await work({ transaction: true });
+      events.push("commit");
+      return result;
+    },
+    repository: {
+      lockOrder: async ({ orderId, shopId }) => {
+        events.push(["lock", orderId, shopId]);
+        return { id: 42, shopid: 7, status: 1, payment_status: "unpaid" };
+      },
+      updateStatus: async ({ nextStatus }) => {
+        events.push(["status", nextStatus]);
+        return { affectedRows: 1 };
+      },
+    },
+  });
+  await transitions.transitionOrderStatus({
+    orderId: 42,
+    shopId: 7,
+    actorId: 9,
+    nextStatus: 2,
+  });
+  assert.deepStrictEqual(events, [
+    "begin",
+    ["lock", 42, 7],
+    ["status", 2],
+    "commit",
+  ]);
+
+  const invalid = buildOrderTransitionModule({
+    withTransaction: async (work) => work({ transaction: true }),
+    repository: {
+      lockOrder: async () => ({ id: 42, shopid: 7, status: 1 }),
+      updateStatus: async () => ({ affectedRows: 1 }),
+    },
+  });
+  await assert.rejects(
+    () => invalid.transitionOrderStatus({
+      orderId: 42,
+      shopId: 7,
+      actorId: 9,
+      nextStatus: 3,
+    }),
+    (error) => error.code === "ORDER_STATUS_TRANSITION_INVALID",
+  );
+
+  const paidOrder = {
+    id: 42,
+    shopid: 7,
+    status: 1,
+    payment_status: "paid",
+  };
+  const paidTransition = buildOrderTransitionModule({
+    withTransaction: async (work) => work({ transaction: true }),
+    repository: {
+      lockOrder: async () => paidOrder,
+      updateStatus: async ({ nextStatus }) => {
+        paidOrder.status = nextStatus;
+        return { affectedRows: 1 };
+      },
+    },
+  });
+  await paidTransition.transitionOrderStatus({
+    orderId: 42,
+    shopId: 7,
+    actorId: 9,
+    nextStatus: 2,
+  });
+  assert.strictEqual(paidOrder.status, 2);
+  assert.strictEqual(isEditableOrder(paidOrder), false);
+};
+
+const runStatusControllerContract = async () => {
+  let received;
+  const controller = buildUpdateOrderController({
+    transitionOrderStatus: async (input) => {
+      received = input;
+      return { result: { affectedRows: 1 } };
+    },
+  });
+  const response = {
+    statusCode: null,
+    payload: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.payload = payload;
+      return payload;
+    },
+  };
+  await controller({
+    params: { id: "42" },
+    shopid: 7,
+    id: 9,
+    body: { operator: 999, status: 2, subtotal: 999 },
+  }, response);
+  assert.deepStrictEqual(received, {
+    orderId: 42,
+    shopId: 7,
+    actorId: 9,
+    nextStatus: 2,
+  });
+  assert.strictEqual(response.statusCode, 200);
+
+  const events = [];
+  const cancelController = buildUpdateOrderController({
+    findOrderById: async (orderId, shopId) => {
+      events.push(["find", orderId, shopId]);
+      return [{ id: orderId, shopid: shopId, status: 1 }];
+    },
+    cancelPendingStripePayment: async () => events.push("cancel-payment"),
+    transitionOrderStatus: async ({ nextStatus }) => {
+      events.push(["transition", nextStatus]);
+      return { result: { affectedRows: 1 } };
+    },
+  });
+  await cancelController({
+    params: { id: "42" },
+    shopid: 7,
+    id: 9,
+    body: { status: 4 },
+  }, response);
+  assert.deepStrictEqual(events, [
+    ["find", 42, 7],
+    "cancel-payment",
+    ["transition", 4],
+  ]);
+};
+
 const routerSource = fs.readFileSync(require.resolve("../src/routers/r_orders"), "utf8");
 assert.match(routerSource, /\.get\("\/orders\/:id\/edit", authentication,/);
 assert.match(routerSource, /\.patch\("\/orders\/:id\/items", authentication,/);
@@ -426,6 +565,8 @@ runReadContracts()
   .then(runScopedDetailContract)
   .then(runTransactionalEditingContracts)
   .then(runUpdateControllerContract)
+  .then(runTransitionContracts)
+  .then(runStatusControllerContract)
   .then(() => console.log("orderEditing tests passed"))
   .catch((error) => {
     console.error(error);
