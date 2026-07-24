@@ -29,10 +29,18 @@ const {
   markPaymentCanceled,
   markPaymentSucceeded,
 } = require("../modules/m_payments");
+const {
+  buildCheckoutController,
+  createCheckout,
+} = require("../modules/m_checkout");
 
 const jwt = require("jsonwebtoken");
 const response = require("../helpers/response");
 const { mGetShopInfo } = require("../modules/m_shop");
+
+exports.checkout = buildCheckoutController({
+  checkout: { createCheckout },
+});
 
 const moneyOrZero = (value) => {
   const parsed = parseMoney(value);

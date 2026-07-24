@@ -4,6 +4,11 @@ const http = require("http");
 const os = require("os");
 const path = require("path");
 const express = require("express");
+const {
+  buildCheckoutModule,
+  buildCheckoutController,
+  canonicalPayloadHash,
+} = require("../src/modules/m_checkout");
 
 const routerSource = fs.readFileSync(
   require.resolve("../src/routers/r_customizations"),
@@ -1471,13 +1476,448 @@ const runCustomizationApiContracts = async () => {
   assert.deepStrictEqual(traversalRemovals, []);
 };
 
+const checkoutInput = (overrides = {}) => ({
+  shopId: 7,
+  actorId: 9,
+  customer: { id: 12, name: "Ada", phone: "0102030405" },
+  items: [{ productId: 10, quantity: 2, selectedChoiceIds: [102, 101] }],
+  expectedTotal: 23,
+  clientOrderToken: "checkout-token-1",
+  paymentMode: "cash",
+  ...overrides,
+});
+
+const checkoutConfiguration = () => new Map([[10, [{
+  product_step_id: 20,
+  name: "Boisson",
+  position: 1,
+  minimum_choices: 2,
+  maximum_choices: 2,
+  active: true,
+  available: true,
+  choices: [{
+    product_step_choice_id: 101,
+    choice_type: "simple",
+    choice_name: "Eau",
+    extra_price: 0.5,
+    position: 1,
+    active: true,
+    available: true,
+    linked_product_id: null,
+  }, {
+    product_step_choice_id: 102,
+    choice_type: "linked_product",
+    choice_name: "Dessert",
+    extra_price: 1,
+    position: 2,
+    active: true,
+    available: true,
+    linked_product_id: 30,
+  }],
+}]]]);
+
+const makeCheckoutHarness = ({
+  existingOrder = null,
+  expectedSnapshotError = false,
+  duplicateOnInsert = false,
+  paymentMode,
+} = {}) => {
+  const initial = {
+    products: new Map([[10, 10], [30, 5]]),
+    orders: existingOrder ? [existingOrder] : [],
+    details: [],
+    snapshots: [],
+    reservations: [],
+    movements: [],
+    nextOrderId: 500,
+    nextDetailId: 700,
+    nextReservationId: 900,
+  };
+  let state = initial;
+  const events = [];
+  const cloneState = (source) => ({
+    products: new Map(source.products),
+    orders: source.orders.map((row) => ({ ...row })),
+    details: source.details.map((row) => ({ ...row })),
+    snapshots: source.snapshots.map((row) => ({ ...row })),
+    reservations: source.reservations.map((row) => ({ ...row })),
+    movements: source.movements.map((row) => ({ ...row })),
+    nextOrderId: source.nextOrderId,
+    nextDetailId: source.nextDetailId,
+    nextReservationId: source.nextReservationId,
+  });
+  const repository = {
+    findOrderByToken: async ({ shopId, token }) => state.orders.find(
+      (row) => row.shopid === shopId && row.client_order_token === token,
+    ) || null,
+    getProducts: async ({ productIds }) => productIds
+      .filter((id) => state.products.has(id))
+      .map((id) => ({ id, shopid: 7, name: `Product ${id}`, price: id === 10 ? 10 : 2, stock: state.products.get(id), archived: 0 })),
+    lockExpiredReservations: async () => [],
+    lockReservationsByOrder: async ({ orderId }) => state.reservations
+      .filter((row) => row.order_id === orderId)
+      .sort((left, right) => left.product_id - right.product_id),
+    lockProducts: async ({ productIds }) => {
+      events.push(["lock-products", [...productIds]]);
+      return productIds.filter((id) => state.products.has(id)).map((id) => ({
+        id,
+        stock: state.products.get(id),
+      }));
+    },
+    adjustStock: async ({ productId, delta }) => {
+      events.push(["stock", productId, delta]);
+      state.products.set(productId, state.products.get(productId) + delta);
+      return { affectedRows: 1 };
+    },
+    insertOrder: async ({ order }) => {
+      if (duplicateOnInsert) {
+        const error = new Error("duplicate");
+        error.code = "ER_DUP_ENTRY";
+        throw error;
+      }
+      const id = state.nextOrderId++;
+      state.orders.push({ id, ...order });
+      events.push(["insert-order", id]);
+      return { insertId: id };
+    },
+    insertOrderDetail: async ({ detail }) => {
+      const id = state.nextDetailId++;
+      state.details.push({ id, ...detail });
+      events.push(["insert-detail", id]);
+      return { insertId: id };
+    },
+    insertSnapshot: async ({ snapshot }) => {
+      if (expectedSnapshotError) throw new Error("snapshot insert failed");
+      state.snapshots.push({ ...snapshot });
+      events.push(["insert-snapshot", snapshot.product_customization_step_choice_id]);
+      return { insertId: state.snapshots.length };
+    },
+    insertReservation: async ({ reservation }) => {
+      const id = state.nextReservationId++;
+      state.reservations.push({ id, ...reservation });
+      events.push(["insert-reservation", reservation.product_id]);
+      return { insertId: id };
+    },
+    updateReservationStatus: async ({ reservationId, fromStatus, toStatus }) => {
+      const reservation = state.reservations.find((row) => row.id === reservationId);
+      if (!reservation || reservation.status !== fromStatus) return { affectedRows: 0 };
+      reservation.status = toStatus;
+      events.push(["reservation-status", reservationId, toStatus]);
+      return { affectedRows: 1 };
+    },
+    insertMovement: async ({ movement }) => {
+      state.movements.push({ ...movement });
+      events.push(["movement", movement.productid]);
+      return { insertId: state.movements.length };
+    },
+  };
+  const withTransaction = async (work) => {
+    const before = cloneState(state);
+    events.push("begin");
+    try {
+      const result = await work({ transaction: true });
+      events.push("commit");
+      return result;
+    } catch (error) {
+      state = before;
+      events.push("rollback");
+      throw error;
+    }
+  };
+  const checkout = buildCheckoutModule({
+    repository,
+    withTransaction,
+    getResolvedProductConfigurations: async () => checkoutConfiguration(),
+    now: () => new Date("2026-07-24T12:00:00.000Z"),
+  });
+  return {
+    checkout,
+    events,
+    repository,
+    getState: () => state,
+    input: checkoutInput(paymentMode ? { paymentMode } : {}),
+  };
+};
+
+const runTransactionalCheckoutContracts = async () => {
+  assert.strictEqual(
+    canonicalPayloadHash(checkoutInput({
+      items: [{ productId: 10, quantity: 2, selectedChoiceIds: [101, 102] }],
+    })),
+    canonicalPayloadHash(checkoutInput()),
+    "choice ordering must not affect the idempotency hash",
+  );
+  assert.strictEqual(
+    canonicalPayloadHash(checkoutInput({ shopId: 8, actorId: 99 })),
+    canonicalPayloadHash(checkoutInput()),
+    "authenticated context is not part of the canonical request body",
+  );
+
+  const replayHash = canonicalPayloadHash(checkoutInput());
+  let harness = makeCheckoutHarness({
+    existingOrder: {
+      id: 44,
+      shopid: 7,
+      subtotal: 23,
+      payment_status: "unpaid",
+      client_order_token: "checkout-token-1",
+      client_order_payload_hash: replayHash,
+    },
+  });
+  let result = await harness.checkout.createCheckout(harness.input);
+  assert.deepStrictEqual(result, {
+    orderId: 44,
+    total: 23,
+    idempotent_replay: true,
+    payment_status: "unpaid",
+  });
+  assert.deepStrictEqual(harness.events, ["begin", "commit"]);
+
+  harness = makeCheckoutHarness({
+    existingOrder: {
+      id: 44,
+      shopid: 7,
+      subtotal: 20,
+      payment_status: "unpaid",
+      client_order_token: "checkout-token-1",
+      client_order_payload_hash: canonicalPayloadHash(checkoutInput({ expectedTotal: 20 })),
+    },
+  });
+  await assert.rejects(
+    () => harness.checkout.createCheckout(harness.input),
+    (error) => error.status === 409 && error.code === "IDEMPOTENCY_KEY_REUSED",
+  );
+  assert.ok(!harness.events.some((event) => Array.isArray(event) && event[0].startsWith("insert")));
+
+  harness = makeCheckoutHarness();
+  await assert.rejects(
+    () => harness.checkout.createCheckout(checkoutInput({ expectedTotal: 22 })),
+    (error) => error.status === 409
+      && error.code === "ORDER_REPRICE_REQUIRED"
+      && error.server_quote.total === 23,
+  );
+  assert.deepStrictEqual(harness.events, ["begin", "rollback"]);
+  assert.strictEqual(harness.getState().products.get(10), 10);
+
+  harness = makeCheckoutHarness({ expectedSnapshotError: true });
+  await assert.rejects(
+    () => harness.checkout.createCheckout(harness.input),
+    /snapshot insert failed/,
+  );
+  assert.strictEqual(harness.getState().orders.length, 0);
+  assert.strictEqual(harness.getState().details.length, 0);
+  assert.strictEqual(harness.getState().reservations.length, 0);
+  assert.deepStrictEqual([...harness.getState().products.entries()], [[10, 10], [30, 5]]);
+  assert.ok(harness.events.includes("rollback"));
+
+  harness = makeCheckoutHarness();
+  result = await harness.checkout.createCheckout(harness.input);
+  assert.deepStrictEqual(result, {
+    orderId: 500,
+    total: 23,
+    idempotent_replay: false,
+    payment_status: "unpaid",
+  });
+  assert.deepStrictEqual(
+    harness.events.find((event) => Array.isArray(event) && event[0] === "lock-products"),
+    ["lock-products", [10, 30]],
+  );
+  assert.deepStrictEqual([...harness.getState().products.entries()], [[10, 8], [30, 3]]);
+  assert.strictEqual(harness.getState().reservations.length, 2);
+  assert.ok(harness.getState().reservations.every((row) => row.status === "committed"));
+  assert.strictEqual(harness.getState().movements.length, 2);
+
+  harness = makeCheckoutHarness({ paymentMode: "stripe" });
+  result = await harness.checkout.createCheckout(harness.input);
+  assert.strictEqual(result.payment_status, "requires_payment");
+  assert.ok(harness.getState().reservations.every((row) => row.status === "reserved"));
+  assert.ok(harness.getState().reservations.every((row) => row.expires_at));
+  assert.strictEqual(harness.getState().movements.length, 0);
+
+  harness = makeCheckoutHarness();
+  harness.getState().products.set(30, 1);
+  await assert.rejects(
+    () => harness.checkout.createCheckout(harness.input),
+    (error) => error.status === 409
+      && error.code === "INSUFFICIENT_STOCK"
+      && error.shortages[0].product_id === 30
+      && error.shortages[0].requested === 2,
+  );
+  assert.deepStrictEqual([...harness.getState().products.entries()], [[10, 10], [30, 1]]);
+
+  const winner = {
+    id: 501,
+    shopid: 7,
+    subtotal: 23,
+    payment_status: "unpaid",
+    client_order_token: "checkout-token-1",
+    client_order_payload_hash: replayHash,
+  };
+  harness = makeCheckoutHarness({ existingOrder: winner, duplicateOnInsert: true });
+  let transactionalReads = 0;
+  const originalFind = harness.repository.findOrderByToken;
+  harness.repository.findOrderByToken = async (options) => {
+    transactionalReads += options.connection ? 1 : 0;
+    if (options.connection) return null;
+    return originalFind(options);
+  };
+  result = await harness.checkout.createCheckout(harness.input);
+  assert.strictEqual(result.orderId, 501);
+  assert.strictEqual(result.idempotent_replay, true);
+  assert.strictEqual(transactionalReads, 1);
+  assert.ok(harness.events.includes("rollback"));
+
+  await assert.rejects(
+    () => harness.checkout.createCheckout(checkoutInput({ shopId: 0 })),
+    (error) => error.code === "CHECKOUT_REQUEST_INVALID",
+  );
+};
+
+const runReservationContracts = async () => {
+  const harness = makeCheckoutHarness({ paymentMode: "stripe" });
+  const created = await harness.checkout.createCheckout(harness.input);
+  await harness.checkout.finalizeReservations({
+    orderId: created.orderId,
+    status: "commit",
+    operator: 9,
+  });
+  await harness.checkout.finalizeReservations({
+    orderId: created.orderId,
+    status: "commit",
+    operator: 9,
+  });
+  assert.ok(harness.getState().reservations.every((row) => row.status === "committed"));
+  assert.strictEqual(harness.getState().movements.length, 2, "commit is idempotent");
+
+  const releasing = makeCheckoutHarness({ paymentMode: "stripe" });
+  const releaseOrder = await releasing.checkout.createCheckout(releasing.input);
+  await releasing.checkout.finalizeReservations({
+    orderId: releaseOrder.orderId,
+    status: "release",
+    operator: 9,
+  });
+  await releasing.checkout.finalizeReservations({
+    orderId: releaseOrder.orderId,
+    status: "release",
+    operator: 9,
+  });
+  assert.deepStrictEqual([...releasing.getState().products.entries()], [[10, 10], [30, 5]]);
+  assert.ok(releasing.getState().reservations.every((row) => row.status === "released"));
+
+  const expired = makeCheckoutHarness();
+  expired.getState().products.set(10, 8);
+  expired.getState().reservations.push({
+    id: 1,
+    order_id: 1,
+    product_id: 10,
+    quantity: 2,
+    status: "reserved",
+    expires_at: "2026-07-24 11:00:00",
+  });
+  expired.repository.lockExpiredReservations = async () => expired.getState().reservations
+    .filter((row) => row.status === "reserved");
+  assert.strictEqual(await expired.checkout.releaseExpiredReservations(), 1);
+  assert.strictEqual(await expired.checkout.releaseExpiredReservations(), 0);
+  assert.strictEqual(expired.getState().products.get(10), 10);
+};
+
+const runCheckoutApiSurfaceContracts = async () => {
+  const checkoutCalls = [];
+  let controller = buildCheckoutController({
+    checkout: {
+      createCheckout: async (input) => {
+        checkoutCalls.push(input);
+        return {
+          orderId: 77,
+          total: 23,
+          idempotent_replay: false,
+          payment_status: "unpaid",
+        };
+      },
+    },
+    logger: { error: () => {} },
+  });
+  let response = makeResponse();
+  await controller({
+    shopid: 7,
+    id: 9,
+    body: {
+      customer: { id: "12", name: "Ada", phone: "0102", remark: "Sans sac" },
+      items: [{ product_id: "10", quantity: 2, selected_choice_ids: [102, 101] }],
+      expected_total: "23.00",
+      client_order_token: "checkout-token-1",
+      payment_mode: "cash",
+    },
+  }, response);
+  assert.strictEqual(response.statusCode, 201);
+  assert.deepStrictEqual(checkoutCalls, [{
+    shopId: 7,
+    actorId: 9,
+    customer: { id: "12", name: "Ada", phone: "0102", remark: "Sans sac" },
+    items: [{ productId: "10", quantity: 2, selectedChoiceIds: [102, 101] }],
+    expectedTotal: "23.00",
+    clientOrderToken: "checkout-token-1",
+    paymentMode: "cash",
+  }]);
+
+  controller = buildCheckoutController({
+    checkout: {
+      createCheckout: async () => {
+        throw new DomainError(409, "INSUFFICIENT_STOCK", "Insufficient stock", {
+          shortages: [{ product_id: 30, requested: 2, available: 1 }],
+        });
+      },
+    },
+    logger: { error: () => {} },
+  });
+  response = makeResponse();
+  await controller({ shopid: 7, id: 9, body: { items: [] } }, response);
+  assert.strictEqual(response.statusCode, 409);
+  assert.deepStrictEqual(response.payload.data, {
+    code: "INSUFFICIENT_STOCK",
+    shortages: [{ product_id: 30, requested: 2, available: 1 }],
+  });
+
+  const logs = [];
+  controller = buildCheckoutController({
+    checkout: {
+      createCheckout: async () => {
+        throw new Error("SQL syntax error near client_order_token");
+      },
+    },
+    logger: { error: (...args) => logs.push(args) },
+  });
+  response = makeResponse();
+  await controller({ shopid: 7, id: 9, body: { items: [] } }, response);
+  assert.strictEqual(response.statusCode, 500);
+  assert.strictEqual(response.payload.data.code, "INTERNAL_ERROR");
+  assert.ok(!JSON.stringify(response.payload).includes("SQL"));
+  assert.strictEqual(logs.length, 1);
+
+  const orderRouterSource = fs.readFileSync(require.resolve("../src/routers/r_orders"), "utf8");
+  const orderControllerSource = fs.readFileSync(require.resolve("../src/controllers/c_orders"), "utf8");
+  const checkoutModuleSource = fs.readFileSync(require.resolve("../src/modules/m_checkout"), "utf8");
+  const serverSource = fs.readFileSync(require.resolve("../index"), "utf8");
+  assert.match(orderRouterSource, /\.post\("\/orders\/checkout", authentication, orders\.checkout\)/);
+  assert.match(orderRouterSource, /legacy/i);
+  assert.ok(orderControllerSource.includes("buildCheckoutController"));
+  assert.ok(checkoutModuleSource.includes("client_order_token"));
+  assert.ok(checkoutModuleSource.includes("selected_choice_ids"));
+  assert.match(serverSource, /setInterval\([\s\S]*releaseExpiredReservations[\s\S]*60 \* 1000/);
+  assert.match(serverSource, /\.unref\(\)/);
+  assert.ok(require("../package.json").scripts.test.includes("reservation-lifecycle.test.js"));
+};
+
 runProductReadContracts()
   .then(runProductWriteContracts)
   .then(runProductControllerContracts)
   .then(runRepositoryReadContracts)
   .then(runUploadMiddlewareContracts)
   .then(runCustomizationApiContracts)
-  .then(() => console.log("customization catalog contracts passed"))
+  .then(runTransactionalCheckoutContracts)
+  .then(runReservationContracts)
+  .then(runCheckoutApiSurfaceContracts)
+  .then(() => console.log("customization and checkout contracts passed"))
   .catch((error) => {
     console.error(error);
     process.exitCode = 1;
