@@ -25,6 +25,7 @@ const {
   buildQrTablePaymentIntentController,
 } = require("../src/controllers/c_stripe");
 const {
+  buildArchiveOrderController,
   buildPendingStripeArchiveSync,
 } = require("../src/controllers/c_orders");
 const { buildOrderArchiveModule } = require("../src/modules/m_orders");
@@ -571,6 +572,90 @@ const runCashRegisterArchiveContract = async () => {
   assert.strictEqual(harness.getState().reservations[0].status, "committed");
   assert.strictEqual(harness.getState().products.get(10), 8);
   assert.strictEqual(harness.getState().movements.length, 1);
+
+  harness = makeStripeLifecycleHarness();
+  const succeededStripe = {
+    paymentIntents: {
+      retrieve: async () => ({
+        id: "pi_42",
+        status: "succeeded",
+        latest_charge: "ch_42",
+        payment_method_types: ["card"],
+      }),
+    },
+    charges: { retrieve: async () => null },
+  };
+  sync = buildPendingStripeArchiveSync({
+    getStripe: () => succeededStripe,
+    markPaymentSucceeded: harness.payments.markPaymentSucceeded,
+    markStripeOrderPayAtCounter: harness.payments.markStripeOrderPayAtCounter,
+    findOrderById: async () => [harness.getState().orders[0]],
+  });
+  let succeededOrder = await sync(harness.getState().orders[0]);
+  assert.strictEqual(succeededOrder.payment_status, "paid");
+  assert.strictEqual(harness.getState().reservations[0].status, "committed");
+
+  harness = makeStripeLifecycleHarness();
+  sync = buildPendingStripeArchiveSync({
+    getStripe: () => succeededStripe,
+    markPaymentSucceeded: async (paymentIntent, charge) => {
+      await harness.payments.markPaymentSucceeded(paymentIntent, charge);
+      return harness.payments.markPaymentSucceeded(paymentIntent, charge);
+    },
+    markStripeOrderPayAtCounter: harness.payments.markStripeOrderPayAtCounter,
+    findOrderById: async () => [harness.getState().orders[0]],
+  });
+  succeededOrder = await sync(harness.getState().orders[0]);
+  assert.strictEqual(succeededOrder.payment_status, "paid");
+  assert.strictEqual(harness.getState().movements.length, 1);
+
+  harness = makeStripeLifecycleHarness();
+  await harness.checkout.releaseExpiredReservations();
+  let archiveCalls = 0;
+  sync = buildPendingStripeArchiveSync({
+    getStripe: () => ({
+      paymentIntents: {
+        retrieve: async () => ({
+          id: "pi_42",
+          status: "succeeded",
+          latest_charge: "ch_42",
+          payment_method_types: ["card"],
+        }),
+      },
+      charges: { retrieve: async () => null },
+    }),
+    markPaymentSucceeded: harness.payments.markPaymentSucceeded,
+    markStripeOrderPayAtCounter: harness.payments.markStripeOrderPayAtCounter,
+    findOrderById: async () => [harness.getState().orders[0]],
+  });
+  const latePaymentArchiveController = buildArchiveOrderController({
+    findOrderById: async () => [harness.getState().orders[0]],
+    syncPendingStripeBeforeCashRegisterArchive: sync,
+    archiveOrder: async () => {
+      archiveCalls += 1;
+      return { affectedRows: 1 };
+    },
+  });
+  const latePaymentResponse = makeResponse();
+  await latePaymentArchiveController({
+    params: { id: 42 },
+    body: { payment_method: "Carte" },
+    shopid: 7,
+  }, latePaymentResponse);
+  assert.strictEqual(archiveCalls, 0);
+  assert.strictEqual(latePaymentResponse.statusCode, 409);
+  assert.strictEqual(
+    latePaymentResponse.payload.message,
+    "Le paiement Stripe ne peut pas etre confirme pour cette commande.",
+  );
+  assert.deepStrictEqual(latePaymentResponse.payload.data, {
+    code: "STRIPE_PAYMENT_NOT_SETTLED",
+  });
+  assert.strictEqual(latePaymentResponse.payload.error, undefined);
+  assert.strictEqual(harness.getState().orders[0].payment_status, "requires_payment");
+  assert.strictEqual(harness.getState().reservations[0].status, "released");
+  assert.strictEqual(harness.getState().products.get(10), 10);
+  assert.strictEqual(harness.getState().movements.length, 0);
 
   harness = makeStripeLifecycleHarness();
   sync = buildPendingStripeArchiveSync({

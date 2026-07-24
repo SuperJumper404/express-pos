@@ -17,6 +17,7 @@ const {
 } = require("../modules/m_orders");
 
 const { custom, success, failed } = require("../helpers/response");
+const DomainError = require("../helpers/domainError");
 const { envJWTKEY } = require("../helpers/env");
 const { isMissing, parseMoney } = require("../helpers/money");
 const { ORDER_STATUSES } = require("../helpers/orderStatus");
@@ -52,6 +53,12 @@ const hasPendingStripePayment = (order = {}) =>
   order.payment_provider === "stripe" &&
   order.payment_status === "requires_payment" &&
   order.stripe_payment_intent_id;
+
+const stripePaymentNotSettledError = () => new DomainError(
+  409,
+  "STRIPE_PAYMENT_NOT_SETTLED",
+  "Le paiement Stripe ne peut pas etre confirme pour cette commande.",
+);
 
 const cancelPendingStripePayment = async (order) => {
   if (!hasPendingStripePayment(order)) return;
@@ -92,10 +99,17 @@ const buildPendingStripeArchiveSync = ({
     const charge = paymentIntent.latest_charge
       ? await stripe.charges.retrieve(paymentIntent.latest_charge)
       : null;
-    await commitSucceededPayment(paymentIntent, charge);
+    const transition = await commitSucceededPayment(paymentIntent, charge);
+    if (!transition || (!transition.paid && !transition.alreadyPaid)) {
+      throw stripePaymentNotSettledError();
+    }
 
     const refreshedOrders = await findOrderById(order.id, order.shopid);
-    return refreshedOrders[0] || order;
+    const refreshedOrder = refreshedOrders[0];
+    if (!refreshedOrder || refreshedOrder.payment_status !== "paid") {
+      throw stripePaymentNotSettledError();
+    }
+    return refreshedOrder;
   }
 
   if (paymentIntent.status !== "canceled") {
@@ -329,26 +343,35 @@ exports.updateOrder = async (req, res) => {
   }
 };
 
-exports.archiveOrder = async (req, res) => {
+const buildArchiveOrderController = ({
+  findOrderById = mFindOrderById,
+  syncPendingStripeBeforeCashRegisterArchive: syncPendingStripe = (
+    syncPendingStripeBeforeCashRegisterArchive
+  ),
+  archiveOrder = mArchiveOrder,
+} = {}) => async (req, res) => {
   const id = req.params.id;
   const payment_method = req.body.payment_method;
   console.log("ON archive :", id);
 
   try {
-    const orders = await mFindOrderById(id, req.shopid);
+    const orders = await findOrderById(id, req.shopid);
     if (!orders.length) {
       return custom(res, 404, "Commande introuvable.", null, null);
     }
 
-    await syncPendingStripeBeforeCashRegisterArchive(orders[0]);
+    await syncPendingStripe(orders[0]);
 
-    const response = await mArchiveOrder(id, payment_method, req.shopid);
+    const response = await archiveOrder(id, payment_method, req.shopid);
     if (response.affectedRows) {
       return success(res, "Commande archivée avec succès.", null, null);
     }
 
     return custom(res, 404, "Commande introuvable.", null, null);
   } catch (error) {
+    if (error instanceof DomainError && error.code === "STRIPE_PAYMENT_NOT_SETTLED") {
+      return custom(res, error.status, error.message, null, { code: error.code });
+    }
     if (String(error.message || "").includes("Moyen de paiement requis")) {
       return custom(res, 422, error.message, null, null);
     }
@@ -356,6 +379,9 @@ exports.archiveOrder = async (req, res) => {
     return failed(res, "Erreur serveur.", error.message);
   }
 };
+
+exports.buildArchiveOrderController = buildArchiveOrderController;
+exports.archiveOrder = buildArchiveOrderController();
 
 exports.allArchivedOrders = async (req, res) => {
   console.log("Controler History");
