@@ -24,6 +24,7 @@ require.cache[callbackDbPath] = {
 const {
   buildCancelQrTablePaymentIntentController,
   buildQrTablePaymentIntentController,
+  buildRegenerateOrderPaymentIntent,
 } = require("../src/controllers/c_stripe");
 const {
   buildArchiveOrderController,
@@ -274,6 +275,45 @@ const makeStripeLifecycleHarness = ({
       order.stripe_payment_intent_id = paymentIntentId;
       return { affectedRows: 1 };
     },
+    stagePaymentCanceled: async ({ orderId, paymentIntentId }) => {
+      const payment = state.payments.find(
+        (row) => row.order_id === Number(orderId)
+          && row.stripe_payment_intent_id === paymentIntentId
+          && row.status !== "succeeded",
+      );
+      if (payment) payment.status = "canceled";
+      return { affectedRows: payment ? 1 : 0 };
+    },
+    stageOrderPaymentReplacement: async ({ orderId, shopId, paymentIntentId }) => {
+      const order = state.orders.find(
+        (row) => row.id === Number(orderId)
+          && row.shopid === Number(shopId)
+          && row.status === ORDER_STATUSES.PENDING
+          && row.payment_status === "requires_payment"
+          && row.payment_provider === "stripe"
+          && row.stripe_payment_intent_id === paymentIntentId,
+      );
+      if (!order) return { affectedRows: 0 };
+      order.payment_status = "unpaid";
+      order.stripe_payment_intent_id = null;
+      return { affectedRows: 1 };
+    },
+    attachReplacementPaymentIntent: async ({
+      orderId, shopId, paymentIntentId,
+    }) => {
+      const order = state.orders.find(
+        (row) => row.id === Number(orderId)
+          && row.shopid === Number(shopId)
+          && row.status === ORDER_STATUSES.PENDING
+          && row.payment_status === "unpaid"
+          && row.payment_provider === "stripe"
+          && row.stripe_payment_intent_id == null,
+      );
+      if (!order) return { affectedRows: 0 };
+      order.payment_status = "requires_payment";
+      order.stripe_payment_intent_id = paymentIntentId;
+      return { affectedRows: 1 };
+    },
     upsertPaymentRecord: async ({ data }) => {
       if (failPaymentRecord) throw new Error("SQL payment record failure");
       const existing = state.payments.find(
@@ -375,6 +415,49 @@ const succeededIntent = {
 
 const runStripeReservationContracts = async () => {
   let harness = makeStripeLifecycleHarness();
+  const prepared = await harness.payments.stagePaymentReplacement({
+    orderId: 42,
+    shopId: 7,
+    paymentIntentId: "pi_42",
+    connection: { transaction: true },
+  });
+  assert.strictEqual(prepared.ready, true);
+  assert.strictEqual(harness.getState().orders[0].payment_status, "unpaid");
+  assert.strictEqual(harness.getState().orders[0].stripe_payment_intent_id, null);
+  assert.strictEqual(harness.getState().payments[0].status, "canceled");
+
+  const attached = await harness.payments.persistReplacementPaymentIntent({
+    orderId: 42,
+    shopId: 7,
+    stripe_payment_intent_id: "pi_new",
+    amount: 25,
+    amount_cents: 2500,
+    application_fee_amount: 125,
+    currency: "eur",
+    status: "requires_payment_method",
+  });
+  assert.strictEqual(attached.attached, true);
+  assert.strictEqual(harness.getState().orders[0].payment_status, "requires_payment");
+  assert.strictEqual(harness.getState().orders[0].stripe_payment_intent_id, "pi_new");
+
+  harness = makeStripeLifecycleHarness();
+  const recovered = await harness.payments.recoverCanceledEditPayment({
+    orderId: 42,
+    shopId: 7,
+    paymentIntentId: "pi_42",
+  });
+  assert.strictEqual(recovered.recovered, true);
+  assert.strictEqual(harness.getState().orders[0].payment_status, "unpaid");
+  assert.strictEqual(harness.getState().orders[0].stripe_payment_intent_id, null);
+  assert.strictEqual(harness.getState().payments[0].status, "canceled");
+  const replayedRecovery = await harness.payments.recoverCanceledEditPayment({
+    orderId: 42,
+    shopId: 7,
+    paymentIntentId: "pi_42",
+  });
+  assert.strictEqual(replayedRecovery.idempotent_replay, true);
+
+  harness = makeStripeLifecycleHarness();
   assert.strictEqual(
     (await harness.payments.getStripeOrderForCancellation(42, 7)).id,
     42,
@@ -523,6 +606,81 @@ const runStripeReservationContracts = async () => {
   assert.strictEqual(persistence.attached, false);
   assert.strictEqual(persistence.payment_status, "succeeded");
   assert.strictEqual(harness.getState().payments[0].status, "succeeded");
+};
+
+const runReplacementIntentGeneratorContract = async () => {
+  const calls = [];
+  const generate = buildRegenerateOrderPaymentIntent({
+    getShopInfo: async () => [{
+      id: 7,
+      stripe_account_id: "acct_7",
+      stripe_charges_enabled: 1,
+      stripe_commission_percent: 5,
+    }],
+    getStripe: () => ({
+      paymentIntents: {
+        create: async (params, options) => {
+          calls.push(["create", params, options]);
+          return {
+            id: "pi_new",
+            status: "requires_payment_method",
+            client_secret: "secret_new",
+          };
+        },
+        cancel: async (id) => calls.push(["cancel", id]),
+      },
+    }),
+    persistReplacementPaymentIntent: async (data) => {
+      calls.push(["persist", data]);
+      return { attached: true };
+    },
+    publishableKey: "pk_test",
+    paymentMethodConfigurationId: "pmc_7",
+  });
+  const result = await generate({
+    order: { id: 42, shopid: 7, subtotal: 25 },
+    contentRevision: "revision-1",
+  });
+  assert.strictEqual(calls[0][2].idempotencyKey, "order-edit-7-42-revision-1");
+  assert.strictEqual(calls[1][0], "persist");
+  assert.strictEqual(calls[1][1].amount_cents, 2500);
+  assert.deepStrictEqual(result, {
+    orderId: 42,
+    paymentIntentId: "pi_new",
+    clientSecret: "secret_new",
+    publishableKey: "pk_test",
+  });
+
+  const canceled = [];
+  const unattached = buildRegenerateOrderPaymentIntent({
+    getShopInfo: async () => [{
+      id: 7,
+      stripe_account_id: "acct_7",
+      stripe_charges_enabled: 1,
+    }],
+    getStripe: () => ({
+      paymentIntents: {
+        create: async () => ({
+          id: "pi_orphan",
+          status: "requires_payment_method",
+          client_secret: "must-not-leak",
+        }),
+        cancel: async (id) => {
+          canceled.push(id);
+          return { id, status: "canceled" };
+        },
+      },
+    }),
+    persistReplacementPaymentIntent: async () => ({ attached: false }),
+  });
+  await assert.rejects(
+    () => unattached({
+      order: { id: 42, shopid: 7, subtotal: 25 },
+      contentRevision: "revision-2",
+    }),
+    (error) => error.code === "ORDER_NOT_EDITABLE",
+  );
+  assert.deepStrictEqual(canceled, ["pi_orphan"]);
 };
 
 const runCashRegisterArchiveContract = async () => {
@@ -1340,6 +1498,7 @@ const runStripeCancellationControllerContracts = async () => {
 };
 
 runStripeReservationContracts()
+  .then(runReplacementIntentGeneratorContract)
   .then(runCashRegisterArchiveContract)
   .then(runStripeCheckoutControllerContracts)
   .then(runStripeCancellationControllerContracts)

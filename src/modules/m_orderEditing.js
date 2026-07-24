@@ -372,6 +372,109 @@ const buildOrderEditingModule = ({
     return quote.serverQuote;
   };
 
+  const prepareOrderPaymentRegeneration = ({ orderId, shopId }) => (
+    runInTransaction(async (connection) => {
+      const order = await repository.lockOrder({ orderId, shopId, connection });
+      if (!order) {
+        throw new DomainError(404, "ORDER_NOT_FOUND", "Commande introuvable.");
+      }
+      if (Number(order.status) !== 1
+        || order.payment_status !== "unpaid"
+        || order.payment_provider !== "stripe"
+        || order.stripe_payment_intent_id != null) {
+        throw new DomainError(
+          409,
+          "ORDER_NOT_EDITABLE",
+          "Le paiement de cette commande ne peut pas être régénéré.",
+          {
+            order_status: order.status,
+            payment_status: order.payment_status,
+          },
+        );
+      }
+
+      const details = await repository.lockDetails({ orderId: order.id, connection });
+      const detailIds = details.map((detail) => Number(detail.id));
+      const snapshots = await repository.lockSnapshots({ detailIds, connection });
+      const reservations = await repository.lockReservations({
+        orderId: order.id,
+        connection,
+      });
+      const requirements = storedRequirements(details, snapshots);
+      const reservationByProduct = new Map(reservations.map(
+        (reservation) => [Number(reservation.product_id), reservation],
+      ));
+      const deltas = new Map([...requirements.entries()].map(([productId, quantity]) => {
+        const reservation = reservationByProduct.get(productId);
+        const covered = reservation
+          && ["reserved", "committed"].includes(reservation.status)
+          ? Number(reservation.quantity)
+          : 0;
+        return [productId, quantity - covered];
+      }));
+      const productIds = [...requirements.keys()].sort((left, right) => left - right);
+      const products = await repository.lockProducts({ shopId, productIds, connection });
+      const shortages = [];
+      for (const [productId, delta] of deltas) {
+        const product = products.find((row) => Number(row.id) === productId);
+        if (delta > 0 && (!product || Number(product.stock) < delta)) {
+          shortages.push({
+            product_id: productId,
+            requested: delta,
+            available: product ? Number(product.stock) : 0,
+          });
+        }
+      }
+      if (shortages.length) {
+        throw new DomainError(409, "INSUFFICIENT_STOCK", "Stock insuffisant.", {
+          shortages,
+        });
+      }
+
+      for (const [productId, delta] of deltas) {
+        if (delta === 0) continue;
+        const adjustment = await repository.adjustStock({
+          shopId,
+          productId,
+          delta: -delta,
+          connection,
+        });
+        if (!adjustment.affectedRows) {
+          throw new DomainError(409, "INSUFFICIENT_STOCK", "Stock insuffisant.", {
+            shortages: [{ product_id: productId, requested: delta, available: 0 }],
+          });
+        }
+      }
+
+      const currentDate = now();
+      const timestamp = formatDate(currentDate);
+      const expiresAt = formatDate(new Date(
+        currentDate.valueOf() + reservationTtlMinutes * 60 * 1000,
+      ));
+      for (const productId of productIds) {
+        const current = reservationByProduct.get(productId);
+        const committed = current && current.status === "committed";
+        await repository.upsertReservation({
+          reservation: {
+            order_id: order.id,
+            product_id: productId,
+            quantity: requirements.get(productId),
+            status: committed ? "committed" : "reserved",
+            expires_at: committed ? null : expiresAt,
+            created: current && current.created ? current.created : timestamp,
+            updated: timestamp,
+          },
+          connection,
+        });
+      }
+
+      return {
+        order,
+        contentRevision: buildContentRevision({ order, details, snapshots }),
+      };
+    })
+  );
+
   const updateOrderItems = (input) => {
     const items = normalizeEditItems(input.items);
     return runInTransaction(async (connection) => {
@@ -578,7 +681,12 @@ const buildOrderEditingModule = ({
     });
   };
 
-  return { getEditableOrder, previewOrderEdit, updateOrderItems };
+  return {
+    getEditableOrder,
+    prepareOrderPaymentRegeneration,
+    previewOrderEdit,
+    updateOrderItems,
+  };
 };
 
 const orderEditingModule = buildOrderEditingModule();
@@ -590,6 +698,7 @@ module.exports = {
   isEditableOrder,
   normalizeEditItems,
   notEditable,
+  prepareOrderPaymentRegeneration: orderEditingModule.prepareOrderPaymentRegeneration,
   previewOrderEdit: orderEditingModule.previewOrderEdit,
   requirementDeltas,
   storedRequirements,

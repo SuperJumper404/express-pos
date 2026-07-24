@@ -1,5 +1,6 @@
 const express = require("express");
 const stripe = require("../controllers/c_stripe");
+const orderEditing = require("../controllers/c_orderEditing");
 const {
   authentication,
   authAdmin,
@@ -30,6 +31,11 @@ routers
     "/stripe/payment-intents/qr-table/:orderId/pay-at-counter",
     authentication,
     stripe.markQrTablePaymentAtCounter,
+  )
+  .post(
+    "/stripe/payment-intents/orders/:id/regenerate",
+    authentication,
+    orderEditing.regenerateOrderPaymentIntent,
   )
   .post(
     "/stripe/refunds/orders/:id",

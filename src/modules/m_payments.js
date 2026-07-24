@@ -42,6 +42,51 @@ const sqlRepository = {
     [paymentIntentId, orderId, paymentIntentId],
   ),
 
+  stagePaymentCanceled: ({ orderId, paymentIntentId, timestamp, connection }) => queryResult(
+    connection,
+    `UPDATE payments
+     SET status = 'canceled', updated = ?
+     WHERE order_id = ?
+       AND stripe_payment_intent_id = ?
+       AND status <> 'succeeded'`,
+    [timestamp, orderId, paymentIntentId],
+  ),
+
+  stageOrderPaymentReplacement: ({
+    orderId, shopId, paymentIntentId, timestamp, connection,
+  }) => queryResult(
+    connection,
+    `UPDATE orders
+     SET payment_status = 'unpaid',
+         stripe_payment_intent_id = NULL,
+         finished = ?
+     WHERE id = ?
+       AND shopid = ?
+       AND status = 1
+       AND payment_status = 'requires_payment'
+       AND payment_provider = 'stripe'
+       AND stripe_payment_intent_id = ?`,
+    [timestamp, orderId, shopId, paymentIntentId],
+  ),
+
+  attachReplacementPaymentIntent: ({
+    orderId, shopId, paymentIntentId, timestamp, connection,
+  }) => queryResult(
+    connection,
+    `UPDATE orders
+     SET payment_status = 'requires_payment',
+         payment_provider = 'stripe',
+         stripe_payment_intent_id = ?,
+         finished = ?
+     WHERE id = ?
+       AND shopid = ?
+       AND status = 1
+       AND payment_status = 'unpaid'
+       AND payment_provider = 'stripe'
+       AND stripe_payment_intent_id IS NULL`,
+    [paymentIntentId, timestamp, orderId, shopId],
+  ),
+
   findPaymentByIntent: ({ paymentIntentId, connection }) => queryResult(
     connection,
     `SELECT * FROM payments
@@ -290,6 +335,100 @@ const buildPaymentModule = ({
     },
   );
 
+  const stagePaymentReplacement = async ({
+    orderId, shopId, paymentIntentId, connection,
+  }) => {
+    if (!connection) {
+      throw new Error("Payment replacement requires an active transaction");
+    }
+    const currentTimestamp = timestamp();
+    const payment = await repository.stagePaymentCanceled({
+      orderId,
+      paymentIntentId,
+      timestamp: currentTimestamp,
+      connection,
+    });
+    const order = await repository.stageOrderPaymentReplacement({
+      orderId,
+      shopId,
+      paymentIntentId,
+      timestamp: currentTimestamp,
+      connection,
+    });
+    return {
+      ready: Boolean(payment.affectedRows && order.affectedRows),
+      payment_updated: Boolean(payment.affectedRows),
+      order_updated: Boolean(order.affectedRows),
+    };
+  };
+
+  const persistReplacementPaymentIntent = (data) => runInTransaction(
+    async (connection) => {
+      const order = await repository.findOrderById({
+        orderId: data.orderId,
+        shopId: data.shopId,
+        connection,
+      });
+      if (!order) return { attached: false, missing: true };
+      if (Number(order.status) !== ORDER_STATUSES.PENDING
+        || order.payment_status !== "unpaid"
+        || order.payment_provider !== "stripe"
+        || order.stripe_payment_intent_id != null) {
+        return {
+          attached: false,
+          terminal: true,
+          payment_status: order.payment_status,
+        };
+      }
+
+      const attachment = await repository.attachReplacementPaymentIntent({
+        orderId: data.orderId,
+        shopId: data.shopId,
+        paymentIntentId: data.stripe_payment_intent_id,
+        timestamp: timestamp(),
+        connection,
+      });
+      if (!attachment.affectedRows) {
+        return {
+          attached: false,
+          terminal: true,
+          payment_status: "order_transitioned",
+        };
+      }
+      await repository.upsertPaymentRecord({
+        data: paymentRecordData(data),
+        connection,
+      });
+      return { attached: true };
+    },
+  );
+
+  const recoverCanceledEditPayment = ({
+    orderId, shopId, paymentIntentId,
+  }) => runInTransaction(async (connection) => {
+    const order = await repository.findOrderById({ orderId, shopId, connection });
+    if (!order) return { recovered: false, missing: true };
+    if (Number(order.status) === ORDER_STATUSES.PENDING
+      && order.payment_status === "unpaid"
+      && order.payment_provider === "stripe"
+      && order.stripe_payment_intent_id == null) {
+      return { recovered: true, idempotent_replay: true };
+    }
+    if (Number(order.status) !== ORDER_STATUSES.PENDING
+      || order.payment_status !== "requires_payment"
+      || order.payment_provider !== "stripe"
+      || order.stripe_payment_intent_id !== paymentIntentId) {
+      return { recovered: false, terminal: true };
+    }
+    const staged = await stagePaymentReplacement({
+      orderId,
+      shopId,
+      paymentIntentId,
+      connection,
+    });
+    return { recovered: staged.ready, ...staged };
+  });
+
   const getPaidOrderForRefund = (orderId, shopId) => (
     repository.getPaidOrderForRefund({ orderId, shopId })
   );
@@ -487,6 +626,9 @@ const buildPaymentModule = ({
     markPaymentSucceeded,
     markStripeOrderPayAtCounter,
     persistPaymentIntentForOrder,
+    persistReplacementPaymentIntent,
+    recoverCanceledEditPayment,
+    stagePaymentReplacement,
   };
 };
 

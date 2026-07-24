@@ -31,6 +31,7 @@ const {
   markPaymentSucceeded,
   markStripeOrderPayAtCounter,
   persistPaymentIntentForOrder,
+  persistReplacementPaymentIntent,
 } = require("../modules/m_payments");
 const {
   createCheckout,
@@ -282,6 +283,65 @@ const buildQrTablePaymentIntentController = ({
 
 exports.buildQrTablePaymentIntentController = buildQrTablePaymentIntentController;
 exports.createQrTablePaymentIntent = buildQrTablePaymentIntentController();
+
+const buildRegenerateOrderPaymentIntent = ({
+  getShopInfo = mGetShopInfo,
+  getStripe: getStripeClient = getStripe,
+  persistReplacementPaymentIntent: persistReplacement = (
+    persistReplacementPaymentIntent
+  ),
+  publishableKey = envSTRIPEPUBLISHABLEKEY,
+  paymentMethodConfigurationId = envSTRIPEPAYMENTMETHODCONFIGURATIONID,
+} = {}) => async ({ order, contentRevision }) => {
+  const rows = await getShopInfo(order.shopid);
+  const shop = rows[0];
+  if (!shop
+    || !shop.stripe_account_id
+    || ![true, 1, "1", "true"].includes(shop.stripe_charges_enabled)) {
+    throw new DomainError(
+      422,
+      "STRIPE_CONNECT_INCOMPLETE",
+      "Le restaurant doit connecter Stripe avant d'accepter les paiements.",
+    );
+  }
+  const params = buildDestinationPaymentIntentParams({
+    amount: order.subtotal,
+    currency: "eur",
+    connectedAccountId: shop.stripe_account_id,
+    orderId: order.id,
+    shopId: order.shopid,
+    commissionPercent: shop.stripe_commission_percent,
+    paymentMethodConfigurationId,
+  });
+  const paymentIntent = await getStripeClient().paymentIntents.create(params, {
+    idempotencyKey: `order-edit-${order.shopid}-${order.id}-${contentRevision}`,
+  });
+  const persistence = await persistReplacement({
+    orderId: order.id,
+    shopId: order.shopid,
+    stripe_payment_intent_id: paymentIntent.id,
+    amount: order.subtotal,
+    amount_cents: toStripeAmount(order.subtotal),
+    application_fee_amount: params.application_fee_amount,
+    currency: params.currency,
+    status: paymentIntent.status,
+  });
+  if (!persistence.attached) {
+    if (paymentIntent.status !== "canceled") {
+      await getStripeClient().paymentIntents.cancel(paymentIntent.id);
+    }
+    throw new DomainError(409, "ORDER_NOT_EDITABLE", "La commande a changé.");
+  }
+  return {
+    orderId: order.id,
+    paymentIntentId: paymentIntent.id,
+    clientSecret: paymentIntent.client_secret,
+    publishableKey,
+  };
+};
+
+exports.buildRegenerateOrderPaymentIntent = buildRegenerateOrderPaymentIntent;
+exports.regenerateOrderPaymentIntent = buildRegenerateOrderPaymentIntent();
 
 const isPositiveOrderId = (value) => {
   if (typeof value === "number") return Number.isSafeInteger(value) && value > 0;

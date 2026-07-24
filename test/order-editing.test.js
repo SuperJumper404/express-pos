@@ -11,6 +11,7 @@ require.cache[callbackDbPath] = {
 };
 const { buildOrderArchiveModule } = require("../src/modules/m_orders");
 const {
+  buildRegenerateOrderPaymentIntentController,
   buildUpdateOrderItemsController,
 } = require("../src/controllers/c_orderEditing");
 const {
@@ -136,11 +137,19 @@ const cloneEditingState = (state) => ({
   nextSnapshotId: state.nextSnapshotId,
 });
 
-const makeEditingHarness = ({ linkedStock = 5, legacy = false } = {}) => {
+const makeEditingHarness = ({
+  linkedStock = 5,
+  legacy = false,
+  stripe = false,
+} = {}) => {
+  const events = [];
   let state = {
     order: {
       ...order,
       subtotal: 10,
+      payment_status: stripe ? "requires_payment" : "unpaid",
+      payment_provider: stripe ? "stripe" : null,
+      stripe_payment_intent_id: stripe ? "pi_old" : null,
       client_order_payload_hash: "original-checkout-hash",
     },
     details: [{
@@ -157,7 +166,7 @@ const makeEditingHarness = ({ linkedStock = 5, legacy = false } = {}) => {
       order_id: 42,
       product_id: 10,
       quantity: 1,
-      status: "committed",
+      status: stripe ? "reserved" : "committed",
     }]]),
     movements: [],
     nextDetailId: 100,
@@ -167,27 +176,38 @@ const makeEditingHarness = ({ linkedStock = 5, legacy = false } = {}) => {
 
   const repository = {
     lockOrder: async ({ orderId, shopId }) => (
+      events.push("lock-order"),
       Number(orderId) === state.order.id && Number(shopId) === state.order.shopid
         ? state.order
         : null
     ),
-    lockDetails: async ({ orderId }) => state.details.filter(
-      (row) => row.orderid === Number(orderId),
-    ),
-    lockSnapshots: async ({ detailIds }) => state.snapshots.filter(
-      (row) => detailIds.includes(row.orderdetail_id),
-    ),
-    lockReservations: async () => [...state.reservations.values()],
-    lockProducts: async ({ productIds }) => productIds
-      .filter((id) => state.products.has(id))
-      .map((id) => ({ id, stock: state.products.get(id) })),
+    lockDetails: async ({ orderId }) => {
+      events.push("lock-details");
+      return state.details.filter((row) => row.orderid === Number(orderId));
+    },
+    lockSnapshots: async ({ detailIds }) => {
+      events.push("lock-snapshots");
+      return state.snapshots.filter((row) => detailIds.includes(row.orderdetail_id));
+    },
+    lockReservations: async () => {
+      events.push("lock-reservations");
+      return [...state.reservations.values()];
+    },
+    lockProducts: async ({ productIds }) => {
+      events.push("lock-products");
+      return productIds
+        .filter((id) => state.products.has(id))
+        .map((id) => ({ id, stock: state.products.get(id) }));
+    },
     adjustStock: async ({ productId, delta }) => {
+      events.push("adjust-stock");
       const available = state.products.get(productId);
       if (available == null || available + delta < 0) return { affectedRows: 0 };
       state.products.set(productId, available + delta);
       return { affectedRows: 1 };
     },
     deleteSnapshots: async ({ detailIds }) => {
+      events.push("delete-snapshots");
       state.snapshots = state.snapshots.filter(
         (row) => !detailIds.includes(row.orderdetail_id),
       );
@@ -224,14 +244,19 @@ const makeEditingHarness = ({ linkedStock = 5, legacy = false } = {}) => {
   };
   const withTransaction = async (work) => {
     const before = cloneEditingState(state);
+    events.push("begin");
     try {
-      return await work({ transaction: true });
+      const result = await work({ transaction: true });
+      events.push("commit");
+      return result;
     } catch (error) {
       state = before;
+      events.push("rollback");
       throw error;
     }
   };
   const quoteOrderItems = async ({ items }) => {
+    events.push("quote");
     const resolvedItems = items.map((item) => {
       const selected = item.selectedChoiceIds.includes(30);
       const steps = [{
@@ -305,6 +330,7 @@ const makeEditingHarness = ({ linkedStock = 5, legacy = false } = {}) => {
   });
   return {
     module,
+    events,
     revision,
     update,
     get state() { return state; },
@@ -380,9 +406,73 @@ const runTransactionalEditingContracts = async () => {
   assert.strictEqual(harness.state.reservations.get(11).quantity, 2);
 };
 
+const runPaymentRegenerationContracts = async () => {
+  let harness = makeEditingHarness({ stripe: true });
+  harness.state.order.payment_status = "unpaid";
+  harness.state.order.stripe_payment_intent_id = null;
+  harness.state.reservations.get(10).status = "released";
+  harness.state.products.set(10, 1);
+  const prepared = await harness.module.prepareOrderPaymentRegeneration({
+    orderId: 42,
+    shopId: 7,
+  });
+  assert.strictEqual(prepared.order.id, 42);
+  assert.match(prepared.contentRevision, /^[a-f0-9]{64}$/);
+  assert.strictEqual(harness.state.products.get(10), 0);
+  assert.strictEqual(harness.state.reservations.get(10).status, "reserved");
+
+  harness = makeEditingHarness({ stripe: true });
+  harness.state.order.payment_status = "unpaid";
+  harness.state.order.stripe_payment_intent_id = null;
+  harness.state.reservations.get(10).status = "released";
+  harness.state.products.set(10, 0);
+  await assert.rejects(
+    () => harness.module.prepareOrderPaymentRegeneration({
+      orderId: 42,
+      shopId: 7,
+    }),
+    (error) => error.code === "INSUFFICIENT_STOCK",
+  );
+};
+
+const runPaymentRegenerationControllerContract = async () => {
+  const calls = [];
+  const controller = buildRegenerateOrderPaymentIntentController({
+    prepareOrderPaymentRegeneration: async (input) => {
+      calls.push(["prepare", input]);
+      return {
+        order: { id: 42, shopid: 7, subtotal: 20 },
+        contentRevision: "revision",
+      };
+    },
+    regenerateOrderPaymentIntent: async (input) => {
+      calls.push(["generate", input]);
+      return { paymentIntentId: "pi_new", clientSecret: "secret_new" };
+    },
+  });
+  const response = {
+    statusCode: null,
+    payload: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.payload = payload;
+      return payload;
+    },
+  };
+  await controller({ params: { id: "42" }, shopid: 7 }, response);
+  assert.strictEqual(response.statusCode, 200);
+  assert.strictEqual(response.payload.data.paymentIntentId, "pi_new");
+  assert.deepStrictEqual(calls[0], ["prepare", { orderId: 42, shopId: 7 }]);
+  assert.strictEqual(calls[1][0], "generate");
+};
+
 const runUpdateControllerContract = async () => {
   let received;
   const controller = buildUpdateOrderItemsController({
+    previewOrderEdit: async () => ({ total: 20 }),
     updateOrderItems: async (input) => {
       received = input;
       return { order_id: 42, total: 20 };
@@ -410,7 +500,9 @@ const runUpdateControllerContract = async () => {
       items: [{ product_id: 10, quantity: 2 }],
     },
   }, response);
-  assert.deepStrictEqual(received, {
+  const { settlePendingPayment, ...receivedInput } = received;
+  assert.strictEqual(typeof settlePendingPayment, "function");
+  assert.deepStrictEqual(receivedInput, {
     orderId: 42,
     shopId: 7,
     actorId: 9,
@@ -420,6 +512,213 @@ const runUpdateControllerContract = async () => {
   });
   assert.strictEqual(response.statusCode, 200);
   assert.strictEqual(response.payload.data.order_id, 42);
+};
+
+const runStripeEditControllerContract = async () => {
+  let harness = makeEditingHarness({ stripe: true });
+  const controller = buildUpdateOrderItemsController({
+    updateOrderItems: harness.module.updateOrderItems,
+    previewOrderEdit: harness.module.previewOrderEdit,
+    getStripe: () => ({
+      paymentIntents: {
+        retrieve: async () => {
+          harness.events.push("stripe-retrieve");
+          return { id: "pi_old", status: "requires_payment_method" };
+        },
+        cancel: async () => {
+          harness.events.push("stripe-cancel");
+          return { id: "pi_old", status: "canceled" };
+        },
+      },
+    }),
+    stagePaymentReplacement: async ({ order }) => {
+      harness.events.push("stage-payment");
+      order.payment_status = "unpaid";
+      order.stripe_payment_intent_id = null;
+      return { ready: true };
+    },
+    regenerateOrderPaymentIntent: async () => {
+      harness.events.push("generate-payment");
+      return { paymentIntentId: "pi_new", clientSecret: "secret_new" };
+    },
+  });
+  const response = {
+    statusCode: null,
+    payload: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.payload = payload;
+      return payload;
+    },
+  };
+  await controller({
+    params: { id: "42" },
+    shopid: 7,
+    id: 9,
+    body: {
+      content_revision: harness.revision(),
+      expected_total: 20,
+      items: [{
+        product_id: 10,
+        quantity: 2,
+        selected_product_step_choice_ids: [30],
+      }],
+    },
+  }, response);
+  assert.strictEqual(response.statusCode, 200);
+  assert.strictEqual(response.payload.data.payment_refresh, "succeeded");
+  assert.strictEqual(response.payload.data.payment.clientSecret, "secret_new");
+  const position = (event) => harness.events.indexOf(event);
+  assert.ok(position("quote") < position("begin"), "preview happens before the transaction");
+  assert.ok(position("lock-order") < position("stripe-retrieve"));
+  assert.ok(position("lock-products") < position("stripe-retrieve"));
+  assert.ok(position("stripe-retrieve") < position("stripe-cancel"));
+  assert.ok(position("stripe-cancel") < position("stage-payment"));
+  assert.ok(position("stage-payment") < position("adjust-stock"));
+  assert.ok(position("commit") < position("generate-payment"));
+
+  harness = makeEditingHarness({ stripe: true });
+  let succeededSyncs = 0;
+  let controllerScenario = buildUpdateOrderItemsController({
+    updateOrderItems: harness.module.updateOrderItems,
+    previewOrderEdit: harness.module.previewOrderEdit,
+    getStripe: () => ({
+      paymentIntents: {
+        retrieve: async () => ({ id: "pi_old", status: "succeeded" }),
+      },
+    }),
+    markPaymentSucceeded: async () => { succeededSyncs += 1; },
+    stagePaymentReplacement: async () => {
+      throw new Error("stage must not run");
+    },
+  });
+  response.statusCode = null;
+  response.payload = null;
+  await controllerScenario({
+    params: { id: "42" },
+    shopid: 7,
+    id: 9,
+    body: {
+      content_revision: harness.revision(),
+      expected_total: 20,
+      items: [{ product_id: 10, quantity: 2, selected_product_step_choice_ids: [30] }],
+    },
+  }, response);
+  assert.strictEqual(response.statusCode, 409);
+  assert.strictEqual(response.payload.data.code, "ORDER_NOT_EDITABLE");
+  assert.strictEqual(succeededSyncs, 1);
+  assert.strictEqual(harness.state.details[0].qty, 1);
+
+  harness = makeEditingHarness({ stripe: true });
+  controllerScenario = buildUpdateOrderItemsController({
+    updateOrderItems: harness.module.updateOrderItems,
+    previewOrderEdit: harness.module.previewOrderEdit,
+    getStripe: () => ({
+      paymentIntents: {
+        retrieve: async () => ({ id: "pi_old", status: "processing" }),
+        cancel: async () => ({ id: "pi_old", status: "processing" }),
+      },
+    }),
+  });
+  response.statusCode = null;
+  response.payload = null;
+  await controllerScenario({
+    params: { id: "42" },
+    shopid: 7,
+    id: 9,
+    body: {
+      content_revision: harness.revision(),
+      expected_total: 20,
+      items: [{ product_id: 10, quantity: 2, selected_product_step_choice_ids: [30] }],
+    },
+  }, response);
+  assert.strictEqual(response.statusCode, 409);
+  assert.strictEqual(response.payload.data.code, "STRIPE_PAYMENT_NOT_SETTLED");
+  assert.strictEqual(harness.state.details[0].qty, 1);
+
+  harness = makeEditingHarness({ stripe: true });
+  controllerScenario = buildUpdateOrderItemsController({
+    updateOrderItems: harness.module.updateOrderItems,
+    previewOrderEdit: harness.module.previewOrderEdit,
+    getStripe: () => ({
+      paymentIntents: {
+        retrieve: async () => ({ id: "pi_old", status: "requires_payment_method" }),
+        cancel: async () => ({ id: "pi_old", status: "canceled" }),
+      },
+    }),
+    stagePaymentReplacement: async ({ order }) => {
+      order.payment_status = "unpaid";
+      order.stripe_payment_intent_id = null;
+      return { ready: true };
+    },
+    regenerateOrderPaymentIntent: async () => {
+      throw new Error("Stripe create failed");
+    },
+    logger: { error: () => {} },
+  });
+  response.statusCode = null;
+  response.payload = null;
+  await controllerScenario({
+    params: { id: "42" },
+    shopid: 7,
+    id: 9,
+    body: {
+      content_revision: harness.revision(),
+      expected_total: 20,
+      items: [{ product_id: 10, quantity: 2, selected_product_step_choice_ids: [30] }],
+    },
+  }, response);
+  assert.strictEqual(response.statusCode, 200);
+  assert.strictEqual(response.payload.data.payment_refresh, "required");
+  assert.strictEqual(response.payload.data.payment_status, "unpaid");
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(response.payload.data, "payment"), false);
+
+  harness = makeEditingHarness({ stripe: true });
+  harness.failSnapshots = true;
+  let recoveries = 0;
+  controllerScenario = buildUpdateOrderItemsController({
+    updateOrderItems: harness.module.updateOrderItems,
+    previewOrderEdit: harness.module.previewOrderEdit,
+    getStripe: () => ({
+      paymentIntents: {
+        retrieve: async () => ({ id: "pi_old", status: "requires_payment_method" }),
+        cancel: async () => ({ id: "pi_old", status: "canceled" }),
+      },
+    }),
+    stagePaymentReplacement: async ({ order }) => {
+      order.payment_status = "unpaid";
+      order.stripe_payment_intent_id = null;
+      return { ready: true };
+    },
+    recoverCanceledEditPayment: async () => {
+      recoveries += 1;
+      harness.state.order.payment_status = "unpaid";
+      harness.state.order.stripe_payment_intent_id = null;
+      return { recovered: true };
+    },
+    logger: { error: () => {} },
+  });
+  response.statusCode = null;
+  response.payload = null;
+  await controllerScenario({
+    params: { id: "42" },
+    shopid: 7,
+    id: 9,
+    body: {
+      content_revision: harness.revision(),
+      expected_total: 20,
+      items: [{ product_id: 10, quantity: 2, selected_product_step_choice_ids: [30] }],
+    },
+  }, response);
+  assert.strictEqual(response.statusCode, 500);
+  assert.strictEqual(response.payload.data.payment_refresh, "required");
+  assert.strictEqual(recoveries, 1);
+  assert.strictEqual(harness.state.order.payment_status, "unpaid");
+  assert.strictEqual(harness.state.order.stripe_payment_intent_id, null);
+  assert.strictEqual(harness.state.details[0].qty, 1, "failed edit content rolled back");
 };
 
 const runTransitionContracts = async () => {
@@ -560,11 +859,22 @@ const runStatusControllerContract = async () => {
 const routerSource = fs.readFileSync(require.resolve("../src/routers/r_orders"), "utf8");
 assert.match(routerSource, /\.get\("\/orders\/:id\/edit", authentication,/);
 assert.match(routerSource, /\.patch\("\/orders\/:id\/items", authentication,/);
+const stripeRouterSource = fs.readFileSync(
+  require.resolve("../src/routers/r_stripe"),
+  "utf8",
+);
+assert.match(
+  stripeRouterSource,
+  /"\/stripe\/payment-intents\/orders\/:id\/regenerate"[\s\S]*authentication,[\s\S]*orderEditing\.regenerateOrderPaymentIntent/,
+);
 
 runReadContracts()
   .then(runScopedDetailContract)
   .then(runTransactionalEditingContracts)
+  .then(runPaymentRegenerationContracts)
+  .then(runPaymentRegenerationControllerContract)
   .then(runUpdateControllerContract)
+  .then(runStripeEditControllerContract)
   .then(runTransitionContracts)
   .then(runStatusControllerContract)
   .then(() => console.log("orderEditing tests passed"))
