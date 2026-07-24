@@ -9,6 +9,7 @@ const routerOrders = require("./src/routers/r_orders");
 const routerShop = require("./src/routers/r_shop");
 const routerPrinting = require("./src/routers/r_printing");
 const routerStripe = require("./src/routers/r_stripe");
+const routerCustomizations = require("./src/routers/r_customizations");
 const { envPORT, envPUBLICIMAGEPATH } = require("./src/helpers/env");
 const prefix = require("./src/config/prefix");
 
@@ -16,12 +17,16 @@ const fs = require("fs");
 
 const productsPath = path.join(envPUBLICIMAGEPATH, "products");
 const shopPath = path.join(envPUBLICIMAGEPATH, "shop");
+const customizationChoicesPath = path.join(envPUBLICIMAGEPATH, "customization-choices");
 
 if (!fs.existsSync(productsPath)) {
   fs.mkdirSync(productsPath, { recursive: true });
 }
 if (!fs.existsSync(shopPath)) {
   fs.mkdirSync(shopPath, { recursive: true });
+}
+if (!fs.existsSync(customizationChoicesPath)) {
+  fs.mkdirSync(customizationChoicesPath, { recursive: true });
 }
 
 const app = express();
@@ -55,6 +60,7 @@ app.use(`${prefix}`, routerOrders);
 app.use(`${prefix}`, routerShop);
 app.use(`${prefix}`, routerPrinting);
 app.use(`${prefix}`, routerStripe.routers);
+app.use(`${prefix}`, routerCustomizations);
 app.get(`${prefix}/testapi`, (req, res) => {
   res.json({ success: true, message: "API redirigée correctement 👌" });
 });
@@ -67,6 +73,10 @@ app.use(
 app.use(
   "/api/v1/imgprofile",
   express.static(path.join(envPUBLICIMAGEPATH, "shop")),
+);
+app.use(
+  "/api/v1/imgcustomizations",
+  express.static(customizationChoicesPath),
 );
 app.listen(envPORT, "0.0.0.0" || 5005, () => {
   console.log(`Server is running onn  http://localhosst:${envPORT || 5005}`);

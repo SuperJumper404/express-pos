@@ -1,4 +1,52 @@
 const assert = require("assert");
+const fs = require("fs");
+const http = require("http");
+const os = require("os");
+const path = require("path");
+const express = require("express");
+
+const routerSource = fs.readFileSync(
+  require.resolve("../src/routers/r_customizations"),
+  "utf8",
+);
+const uploadSource = fs.readFileSync(
+  require.resolve("../src/helpers/middleware/customizationChoiceImages"),
+  "utf8",
+);
+const indexSource = fs.readFileSync(require.resolve("../index"), "utf8");
+for (const route of [
+  '"/customization-steps"',
+  '"/customization-steps/:id"',
+  '"/customization-steps/:id/choices"',
+  '"/customization-choices/:id"',
+]) assert.ok(routerSource.includes(route), route);
+for (const policy of [
+  "5 * 1024 * 1024",
+  '"image/jpeg"',
+  '"image/png"',
+  '"image/webp"',
+]) assert.ok(uploadSource.includes(policy), policy);
+assert.ok(uploadSource.includes("randomBytes"));
+assert.ok(!uploadSource.includes("originalname"));
+for (const protectedRead of [
+  /\.get\("\/customization-steps", authentication,/,
+  /\.get\("\/customization-steps\/:id", authentication,/,
+]) assert.match(routerSource, protectedRead);
+for (const adminWrite of [
+  /\.post\("\/customization-steps", authentication, authAdmin,/,
+  /\.patch\("\/customization-steps\/:id", authentication, authAdmin,/,
+  /\.delete\("\/customization-steps\/:id", authentication, authAdmin,/,
+  /\.post\([\s\S]*"\/customization-steps\/:id\/choices",[\s\S]*authentication,[\s\S]*authAdmin,/,
+  /\.patch\([\s\S]*"\/customization-choices\/:id",[\s\S]*authentication,[\s\S]*authAdmin,/,
+  /\.delete\("\/customization-choices\/:id", authentication, authAdmin,/,
+]) assert.match(routerSource, adminWrite);
+assert.ok(indexSource.includes('require("./src/routers/r_customizations")'));
+assert.ok(indexSource.includes('path.join(envPUBLICIMAGEPATH, "customization-choices")'));
+assert.ok(indexSource.includes('app.use(`${prefix}`, routerCustomizations)'));
+assert.match(
+  indexSource,
+  /"\/api\/v1\/imgcustomizations"[\s\S]*express\.static\(customizationChoicesPath\)/,
+);
 const {
   createCustomizationChoice,
   createCustomizationStep,
@@ -13,6 +61,10 @@ const {
   updateCustomizationChoice,
   updateCustomizationStep,
 } = require("../src/modules/m_customizations");
+const { buildCustomizationController } = require("../src/controllers/c_customizations");
+const {
+  buildCustomizationChoiceImageUpload,
+} = require("../src/helpers/middleware/customizationChoiceImages");
 
 const grouped = groupResolvedConfigurationRows([{
   product_id: 1,
@@ -564,7 +616,391 @@ const runRepositoryReadContracts = async () => {
   assert.ok(require("../package.json").scripts.test.includes("checkout-contract.test.js"));
 };
 
+const makeResponse = () => ({
+  statusCode: null,
+  payload: null,
+  status(code) {
+    this.statusCode = code;
+    return this;
+  },
+  json(payload) {
+    this.payload = payload;
+    return this;
+  },
+});
+
+const runUploadMiddlewareContracts = async () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "customization-upload-"));
+  const destination = path.join(temporaryRoot, "customization-choices");
+  fs.mkdirSync(destination);
+  const app = express();
+  app.post(
+    "/upload",
+    buildCustomizationChoiceImageUpload({ destination }),
+    (req, res) => res.status(204).end(),
+  );
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  const upload = async ({ bytes, type, name }) => {
+    const form = new FormData();
+    form.append("image", new Blob([bytes], { type }), name);
+    return fetch(`http://127.0.0.1:${port}/upload`, { method: "POST", body: form });
+  };
+  const storedFiles = () => fs.readdirSync(destination);
+  const clearStoredFiles = () => {
+    for (const filename of storedFiles()) fs.unlinkSync(path.join(destination, filename));
+  };
+
+  try {
+    const allowed = [
+      {
+        type: "image/jpeg",
+        name: "client-name.jpeg",
+        bytes: Buffer.from([0xff, 0xd8, 0xff, 0x00]),
+        extension: ".jpg",
+      },
+      {
+        type: "image/png",
+        name: "client-name.png",
+        bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        extension: ".png",
+      },
+      {
+        type: "image/webp",
+        name: "client-name.webp",
+        bytes: Buffer.from("RIFF0000WEBP", "ascii"),
+        extension: ".webp",
+      },
+    ];
+    for (const fixture of allowed) {
+      const response = await upload(fixture);
+      assert.strictEqual(response.status, 204, fixture.type);
+    }
+    const generatedFiles = storedFiles();
+    assert.strictEqual(generatedFiles.length, 3);
+    for (const fixture of allowed) {
+      assert.ok(generatedFiles.some((filename) => filename.endsWith(fixture.extension)));
+      assert.ok(!generatedFiles.includes(fixture.name));
+    }
+    clearStoredFiles();
+
+    const exactLimit = Buffer.alloc(5 * 1024 * 1024);
+    allowed[1].bytes.copy(exactLimit, 0, 0, allowed[1].bytes.length);
+    let response = await upload({
+      bytes: exactLimit,
+      type: "image/png",
+      name: "exact-limit.png",
+    });
+    assert.strictEqual(response.status, 204);
+    assert.strictEqual(storedFiles().length, 1);
+    clearStoredFiles();
+
+    const overLimit = Buffer.alloc((5 * 1024 * 1024) + 1);
+    allowed[1].bytes.copy(overLimit, 0, 0, allowed[1].bytes.length);
+    response = await upload({
+      bytes: overLimit,
+      type: "image/png",
+      name: "over-limit.png",
+    });
+    assert.strictEqual(response.status, 400);
+    assert.strictEqual(
+      (await response.json()).message,
+      "Le fichier dépasse la limite de 5 Mo.",
+    );
+    assert.deepStrictEqual(storedFiles(), []);
+
+    response = await upload({
+      bytes: Buffer.from("plain text"),
+      type: "text/plain",
+      name: "not-an-image.txt",
+    });
+    assert.strictEqual(response.status, 400);
+    assert.strictEqual((await response.json()).message, "Type de fichier non autorisé.");
+    assert.deepStrictEqual(storedFiles(), []);
+
+    response = await upload({
+      bytes: Buffer.from("not really a jpeg"),
+      type: "image/jpeg",
+      name: "spoofed.jpg",
+    });
+    assert.strictEqual(response.status, 400);
+    assert.strictEqual((await response.json()).message, "Type de fichier non autorisé.");
+    assert.deepStrictEqual(storedFiles(), []);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+};
+
+const runCustomizationApiContracts = async () => {
+  const unexpected = async () => {
+    throw new Error("unexpected catalog call");
+  };
+  const catalogDefaults = {
+    createCustomizationChoice: unexpected,
+    createCustomizationStep: unexpected,
+    deleteCustomizationChoice: unexpected,
+    deleteCustomizationStep: unexpected,
+    getCustomizationStep: unexpected,
+    listCustomizationSteps: unexpected,
+    updateCustomizationChoice: unexpected,
+    updateCustomizationStep: unexpected,
+  };
+  const makeController = (catalog, removed = []) => buildCustomizationController({
+    catalog: { ...catalogDefaults, ...catalog },
+    fileSystem: {
+      existsSync: () => true,
+      unlinkSync: (filePath) => removed.push(filePath),
+    },
+    publicImagePath: "C:\\public-images",
+  });
+
+  const listCalls = [];
+  let handlers = makeController({
+    listCustomizationSteps: async (shopId) => {
+      listCalls.push(shopId);
+      return [{ id: 1, name: "Boissons" }];
+    },
+  });
+  let res = makeResponse();
+  await handlers.listCustomizationSteps({ shopid: 7 }, res);
+  assert.deepStrictEqual(listCalls, [7]);
+  assert.strictEqual(res.statusCode, 200);
+  assert.strictEqual(res.payload.data[0].name, "Boissons");
+
+  let stepCreateCalls = 0;
+  handlers = makeController({
+    createCustomizationStep: async () => {
+      stepCreateCalls += 1;
+    },
+  });
+  res = makeResponse();
+  await handlers.createCustomizationStep({ shopid: 7, body: { name: "   " } }, res);
+  assert.strictEqual(stepCreateCalls, 0);
+  assert.strictEqual(res.statusCode, 422);
+  assert.strictEqual(res.payload.data.code, "CUSTOMIZATION_STEP_NAME_REQUIRED");
+
+  let choiceCreateCalls = 0;
+  const rejectedUploadRemovals = [];
+  handlers = makeController({
+    createCustomizationChoice: async () => {
+      choiceCreateCalls += 1;
+    },
+  }, rejectedUploadRemovals);
+  res = makeResponse();
+  await handlers.createCustomizationChoice({
+    shopid: 7,
+    params: { id: "20" },
+    body: { choice_type: "simple", name: "\t" },
+    file: { filename: "new.webp" },
+  }, res);
+  assert.strictEqual(choiceCreateCalls, 0);
+  assert.strictEqual(res.statusCode, 422);
+  assert.strictEqual(res.payload.data.code, "CUSTOMIZATION_CHOICE_NAME_REQUIRED");
+  assert.deepStrictEqual(rejectedUploadRemovals, [
+    "C:\\public-images\\customization-choices\\new.webp",
+  ]);
+
+  res = makeResponse();
+  await handlers.createCustomizationChoice({
+    shopid: 7,
+    params: { id: "20" },
+    body: { choice_type: "linked_product", linked_product_id: "42" },
+    file: { filename: "unused.png" },
+  }, res);
+  assert.strictEqual(choiceCreateCalls, 0);
+  assert.strictEqual(res.statusCode, 422);
+  assert.strictEqual(res.payload.data.code, "CUSTOMIZATION_LINKED_PRODUCT_IMAGE_NOT_ALLOWED");
+  assert.ok(rejectedUploadRemovals.some((filePath) => filePath.endsWith("unused.png")));
+
+  const createCalls = [];
+  handlers = makeController({
+    createCustomizationChoice: async (args) => {
+      createCalls.push(args);
+      return { insertId: 51 };
+    },
+  });
+  res = makeResponse();
+  await handlers.createCustomizationChoice({
+    shopid: 7,
+    params: { id: "20" },
+    body: { choice_type: "simple", name: "Eau" },
+    file: { filename: "generated.webp" },
+  }, res);
+  assert.strictEqual(res.statusCode, 201);
+  assert.strictEqual(createCalls[0].shopId, 7);
+  assert.strictEqual(createCalls[0].stepId, "20");
+  assert.strictEqual(createCalls[0].data.image, "generated.webp");
+
+  const sqlFailureRemovals = [];
+  handlers = makeController({
+    createCustomizationChoice: async () => {
+      const error = new Error("duplicate");
+      error.status = 422;
+      error.code = "CUSTOMIZATION_CHOICE_DUPLICATE";
+      error.product_id = 8;
+      error.product_step_id = 80;
+      error.choice_id = 40;
+      throw error;
+    },
+  }, sqlFailureRemovals);
+  res = makeResponse();
+  await handlers.createCustomizationChoice({
+    shopid: 7,
+    params: { id: "20" },
+    body: { choice_type: "simple", name: "Eau" },
+    file: { filename: "failed.webp" },
+  }, res);
+  assert.strictEqual(res.statusCode, 422);
+  assert.deepStrictEqual(res.payload.data, {
+    code: "CUSTOMIZATION_CHOICE_DUPLICATE",
+    product_id: 8,
+    product_step_id: 80,
+    choice_id: 40,
+  });
+  assert.ok(sqlFailureRemovals.some((filePath) => filePath.endsWith("failed.webp")));
+
+  const responseFailureRemovals = [];
+  handlers = makeController({
+    createCustomizationChoice: async () => ({ insertId: 52 }),
+  }, responseFailureRemovals);
+  const brokenResponse = {
+    status() {
+      return this;
+    },
+    json() {
+      throw new Error("socket closed");
+    },
+  };
+  await assert.rejects(
+    () => handlers.createCustomizationChoice({
+      shopid: 7,
+      params: { id: "20" },
+      body: { choice_type: "simple", name: "Eau" },
+      file: { filename: "committed.webp" },
+    }, brokenResponse),
+    /socket closed/,
+  );
+  assert.deepStrictEqual(responseFailureRemovals, []);
+
+  const replacementCalls = [];
+  const replacementRemovals = [];
+  handlers = makeController({
+    listCustomizationSteps: async (shopId) => {
+      replacementCalls.push(["list", shopId]);
+      return [{ choices: [{ id: 40, choice_type: "simple", image: "old.jpg" }] }];
+    },
+    updateCustomizationChoice: async (args) => {
+      replacementCalls.push(["update", args]);
+      return { affectedRows: 1 };
+    },
+  }, replacementRemovals);
+  res = makeResponse();
+  await handlers.updateCustomizationChoice({
+    shopid: 7,
+    params: { id: "40" },
+    body: { name: "Eau plate" },
+    file: { filename: "replacement.webp" },
+  }, res);
+  assert.strictEqual(res.statusCode, 200);
+  assert.strictEqual(replacementCalls[0][1], 7);
+  assert.strictEqual(replacementCalls[1][1].shopId, 7);
+  assert.strictEqual(replacementCalls[1][1].data.image, "replacement.webp");
+  assert.deepStrictEqual(replacementRemovals, [
+    "C:\\public-images\\customization-choices\\old.jpg",
+  ]);
+
+  let partialChoiceUpdateCalls = 0;
+  handlers = makeController({
+    updateCustomizationChoice: async ({ data }) => {
+      partialChoiceUpdateCalls += 1;
+      assert.strictEqual(data.choice_type, "simple");
+      assert.ok(!Object.prototype.hasOwnProperty.call(data, "name"));
+      return { affectedRows: 1 };
+    },
+  });
+  res = makeResponse();
+  await handlers.updateCustomizationChoice({
+    shopid: 7,
+    params: { id: "40" },
+    body: { choice_type: "simple" },
+  }, res);
+  assert.strictEqual(res.statusCode, 200);
+  assert.strictEqual(partialChoiceUpdateCalls, 1);
+
+  const failedReplacementRemovals = [];
+  handlers = makeController({
+    listCustomizationSteps: async () => ([{
+      choices: [{ id: 40, choice_type: "simple", image: "old.jpg" }],
+    }]),
+    updateCustomizationChoice: async () => {
+      throw new Error("sql failure");
+    },
+  }, failedReplacementRemovals);
+  res = makeResponse();
+  await handlers.updateCustomizationChoice({
+    shopid: 7,
+    params: { id: "40" },
+    body: { name: "Eau" },
+    file: { filename: "new-on-failure.webp" },
+  }, res);
+  assert.strictEqual(res.statusCode, 500);
+  assert.deepStrictEqual(failedReplacementRemovals, [
+    "C:\\public-images\\customization-choices\\new-on-failure.webp",
+  ]);
+
+  for (const [handlerName, catalogName, code] of [
+    ["updateCustomizationStep", "updateCustomizationStep", "CUSTOMIZATION_STEP_NOT_FOUND"],
+    ["deleteCustomizationStep", "deleteCustomizationStep", "CUSTOMIZATION_STEP_NOT_FOUND"],
+    ["updateCustomizationChoice", "updateCustomizationChoice", "CUSTOMIZATION_CHOICE_NOT_FOUND"],
+    ["deleteCustomizationChoice", "deleteCustomizationChoice", "CUSTOMIZATION_CHOICE_NOT_FOUND"],
+  ]) {
+    handlers = makeController({ [catalogName]: async () => ({ affectedRows: 0 }) });
+    res = makeResponse();
+    await handlers[handlerName]({
+      shopid: 7,
+      params: { id: "999" },
+      body: handlerName.includes("Step") ? { name: "Valid" } : { name: "Valid" },
+    }, res);
+    assert.strictEqual(res.statusCode, 404, handlerName);
+    assert.strictEqual(res.payload.data.code, code, handlerName);
+  }
+
+  const deleteRemovals = [];
+  handlers = makeController({
+    deleteCustomizationChoice: async ({ shopId, choiceId }) => {
+      assert.strictEqual(shopId, 7);
+      assert.strictEqual(choiceId, "40");
+      return { affectedRows: 1 };
+    },
+  }, deleteRemovals);
+  res = makeResponse();
+  await handlers.deleteCustomizationChoice({ shopid: 7, params: { id: "40" } }, res);
+  assert.strictEqual(res.statusCode, 200);
+  assert.deepStrictEqual(deleteRemovals, []);
+
+  const traversalRemovals = [];
+  handlers = makeController({
+    listCustomizationSteps: async () => ([{
+      choices: [{ id: 40, choice_type: "simple", image: "../outside.webp" }],
+    }]),
+    updateCustomizationChoice: async () => ({ affectedRows: 1 }),
+  }, traversalRemovals);
+  res = makeResponse();
+  await handlers.updateCustomizationChoice({
+    shopid: 7,
+    params: { id: "40" },
+    body: { name: "Eau" },
+    file: { filename: "safe.webp" },
+  }, res);
+  assert.strictEqual(res.statusCode, 200);
+  assert.deepStrictEqual(traversalRemovals, []);
+};
+
 runRepositoryReadContracts()
+  .then(runUploadMiddlewareContracts)
+  .then(runCustomizationApiContracts)
   .then(() => console.log("customization catalog contracts passed"))
   .catch((error) => {
     console.error(error);
