@@ -348,6 +348,7 @@ const buildCancelQrTablePaymentIntentController = ({
   }
 
   let paymentIntent;
+  let externalCancellationReplay = false;
   try {
     paymentIntent = await getStripeClient().paymentIntents.retrieve(
       order.stripe_payment_intent_id,
@@ -357,16 +358,45 @@ const buildCancelQrTablePaymentIntentController = ({
         code: "STRIPE_PAYMENT_ALREADY_SUCCEEDED",
       });
     }
-    if (paymentIntent.status !== "canceled") {
-      paymentIntent = await getStripeClient().paymentIntents.cancel(
-        order.stripe_payment_intent_id,
-      );
-    }
   } catch (error) {
-    logger.error("Stripe PaymentIntent cancellation failed", error);
+    logger.error("Stripe PaymentIntent retrieval failed", error);
     return custom(res, 409, "Le paiement Stripe ne peut pas etre annule.", null, {
       code: "STRIPE_PAYMENT_CANCEL_FAILED",
     });
+  }
+
+  if (paymentIntent.status === "canceled") {
+    externalCancellationReplay = true;
+  } else {
+    try {
+      paymentIntent = await getStripeClient().paymentIntents.cancel(
+        order.stripe_payment_intent_id,
+      );
+    } catch (cancelError) {
+      logger.error("Stripe PaymentIntent cancellation failed", cancelError);
+      try {
+        paymentIntent = await getStripeClient().paymentIntents.retrieve(
+          order.stripe_payment_intent_id,
+        );
+      } catch (refreshError) {
+        logger.error("Stripe PaymentIntent cancellation refresh failed", refreshError);
+        return custom(res, 409, "Le paiement Stripe ne peut pas etre annule.", null, {
+          code: "STRIPE_PAYMENT_CANCEL_FAILED",
+        });
+      }
+
+      if (paymentIntent.status === "succeeded") {
+        return custom(res, 409, "Le paiement est deja confirme par Stripe.", null, {
+          code: "STRIPE_PAYMENT_ALREADY_SUCCEEDED",
+        });
+      }
+      if (paymentIntent.status !== "canceled") {
+        return custom(res, 409, "Le paiement Stripe ne peut pas etre annule.", null, {
+          code: "STRIPE_PAYMENT_CANCEL_FAILED",
+        });
+      }
+      externalCancellationReplay = true;
+    }
   }
 
   if (!paymentIntent || paymentIntent.status !== "canceled") {
@@ -393,7 +423,7 @@ const buildCancelQrTablePaymentIntentController = ({
         code: "STRIPE_ORDER_NOT_CANCELABLE",
       });
     }
-    return canceledStripeResponse(res, orderId, false);
+    return canceledStripeResponse(res, orderId, externalCancellationReplay);
   } catch (error) {
     logger.error("Provisional Stripe order cancellation failed", error);
     return custom(res, 500, "Erreur lors de l'annulation du paiement Stripe.", null, {

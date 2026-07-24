@@ -1167,6 +1167,72 @@ const runStripeCancellationControllerContracts = async () => {
   assert.strictEqual(internalCalls, 0);
   assert.ok(!JSON.stringify(response.payload).includes("secret"));
 
+  let refreshedStatus = "canceled";
+  let refreshCount = 0;
+  let fallbackReleaseCount = 0;
+  const fallbackLogs = [];
+  const buildCancelThrowController = () => buildCancelQrTablePaymentIntentController({
+    getStripeOrderForCancellation: async () => ({
+      id: 42,
+      shopid: 7,
+      payment_status: "requires_payment",
+      payment_provider: "stripe",
+      stripe_payment_intent_id: "pi_42",
+    }),
+    getStripe: () => ({
+      paymentIntents: {
+        retrieve: async () => {
+          refreshCount += 1;
+          if (refreshedStatus === "retrieve_failed" && refreshCount > 1) {
+            throw new Error("Stripe refresh secret failure");
+          }
+          return {
+            id: "pi_42",
+            status: refreshCount === 1 ? "requires_payment_method" : refreshedStatus,
+          };
+        },
+        cancel: async () => {
+          throw new Error("Stripe concurrent cancel secret failure");
+        },
+      },
+    }),
+    cancelProvisionalStripeOrder: async () => {
+      fallbackReleaseCount += 1;
+      return { canceled: true };
+    },
+    logger: { error: (...args) => fallbackLogs.push(args) },
+  });
+
+  response = makeResponse();
+  await buildCancelThrowController()(
+    { params: { orderId: "42" }, shopid: 7 },
+    response,
+  );
+  assert.strictEqual(response.statusCode, 200);
+  assert.strictEqual(response.payload.data.idempotent_replay, true);
+  assert.strictEqual(refreshCount, 2);
+  assert.strictEqual(fallbackReleaseCount, 1, "the local reservation is released once");
+  assert.ok(!JSON.stringify(response.payload).includes("secret"));
+
+  for (const [status, expectedCode] of [
+    ["succeeded", "STRIPE_PAYMENT_ALREADY_SUCCEEDED"],
+    ["processing", "STRIPE_PAYMENT_CANCEL_FAILED"],
+    ["retrieve_failed", "STRIPE_PAYMENT_CANCEL_FAILED"],
+  ]) {
+    refreshedStatus = status;
+    refreshCount = 0;
+    fallbackReleaseCount = 0;
+    response = makeResponse();
+    await buildCancelThrowController()(
+      { params: { orderId: "42" }, shopid: 7 },
+      response,
+    );
+    assert.strictEqual(response.statusCode, 409, status);
+    assert.strictEqual(response.payload.data.code, expectedCode, status);
+    assert.strictEqual(fallbackReleaseCount, 0, `${status} must not release locally`);
+    assert.ok(!JSON.stringify(response.payload).includes("secret"), status);
+  }
+
   stripeCalls = 0;
   internalCalls = 0;
   response = makeResponse();
