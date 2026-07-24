@@ -1,8 +1,300 @@
 const { nanoid } = require("nanoid");
 const conn = require("../config/db");
+const pool = require("../config/dbPool");
 const {
   buildCashRegisterArchiveFields,
 } = require("../helpers/cashRegisterPayment");
+const { parseMoney } = require("../helpers/money");
+const { withTransaction } = require("../helpers/withTransaction");
+
+const queryResult = async (connection, sql, params = []) => {
+  const [result] = await (connection || pool).query(sql, params);
+  return result;
+};
+
+const archiveSqlRepository = {
+  findOrderForArchive: ({ orderId, shopId, connection }) => {
+    const shopClause = shopId == null ? "" : " AND shopid = ?";
+    const params = shopId == null ? [orderId] : [orderId, shopId];
+    return queryResult(
+      connection,
+      `SELECT * FROM orders
+       WHERE id = ?${shopClause}
+       LIMIT 1 FOR UPDATE`,
+      params,
+    ).then((rows) => rows[0] || null);
+  },
+  insertArchive: ({ archive, connection }) => queryResult(
+    connection,
+    "INSERT INTO archives SET ?",
+    [archive],
+  ),
+  findOrderDetails: ({ orderId, connection }) => queryResult(
+    connection,
+    "SELECT * FROM orderdetail WHERE orderid = ? ORDER BY id FOR UPDATE",
+    [orderId],
+  ),
+  findActiveSnapshots: ({ detailIds, connection }) => (
+    detailIds.length === 0 ? Promise.resolve([]) : queryResult(
+      connection,
+      `SELECT * FROM orderdetail_customization_snapshots
+       WHERE orderdetail_id IN (?)
+       ORDER BY orderdetail_id, step_position, choice_position, id`,
+      [detailIds],
+    )
+  ),
+  insertArchiveDetail: ({ detail, connection }) => queryResult(
+    connection,
+    "INSERT INTO archivesdetail SET ?",
+    [detail],
+  ),
+  insertArchiveSnapshot: ({ snapshot, connection }) => queryResult(
+    connection,
+    "INSERT INTO archivesdetail_customization_snapshots SET ?",
+    [snapshot],
+  ),
+  deleteActiveSnapshots: ({ detailIds, connection }) => (
+    detailIds.length === 0 ? Promise.resolve({ affectedRows: 0 }) : queryResult(
+      connection,
+      "DELETE FROM orderdetail_customization_snapshots WHERE orderdetail_id IN (?)",
+      [detailIds],
+    )
+  ),
+  deleteLegacyCustomizations: ({ orderId, connection }) => queryResult(
+    connection,
+    "DELETE FROM orders_customization WHERE order_id = ?",
+    [orderId],
+  ),
+  deleteOrderDetails: ({ orderId, connection }) => queryResult(
+    connection,
+    "DELETE FROM orderdetail WHERE orderid = ?",
+    [orderId],
+  ),
+  deleteOrder: ({ orderId, connection }) => queryResult(
+    connection,
+    "DELETE FROM orders WHERE id = ?",
+    [orderId],
+  ),
+  findActiveOrderDetails: ({ orderId, connection }) => queryResult(
+    connection,
+    `SELECT *, orders.id AS id, orderdetail.id AS orderDetailsId
+     FROM orders
+     LEFT JOIN orderdetail ON orders.id = orderdetail.orderid
+     LEFT JOIN products ON orderdetail.productid = products.id
+     WHERE orders.id = ?
+     ORDER BY orders.created DESC`,
+    [orderId],
+  ),
+  findLegacyCustomizations: ({ orderId, detailIds, connection }) => (
+    detailIds.length === 0 ? Promise.resolve([]) : queryResult(
+      connection,
+      `SELECT orders_customization.order_id,
+              orders_customization.order_details_id,
+              orders_customization.product_id,
+              orders_customization.product_choice_id,
+              product_choice.name,
+              product_choice.price
+       FROM orders_customization
+       LEFT JOIN product_choice
+         ON product_choice.id = orders_customization.product_choice_id
+       WHERE orders_customization.order_id = ?
+         AND orders_customization.order_details_id IN (?)
+       ORDER BY orders_customization.order_details_id, orders_customization.id`,
+      [orderId, detailIds],
+    )
+  ),
+  findArchivedOrderDetailsById: ({ archiveId, connection }) => queryResult(
+    connection,
+    `SELECT *, archives.id AS id, archivesdetail.id AS archiveDetailsId
+     FROM archives
+     LEFT JOIN archivesdetail ON archives.id = archivesdetail.orderId
+     LEFT JOIN products ON archivesdetail.productid = products.id
+     WHERE archives.id = ?
+     ORDER BY archives.created DESC`,
+    [archiveId],
+  ),
+  findArchivedOrderDetailsByToken: ({ token, connection }) => queryResult(
+    connection,
+    `SELECT *, archives.id AS id, archivesdetail.id AS archiveDetailsId
+     FROM archives
+     LEFT JOIN archivesdetail ON archives.id = archivesdetail.orderId
+     LEFT JOIN products ON archivesdetail.productid = products.id
+     WHERE archives.token = ?`,
+    [token],
+  ),
+  findArchiveSnapshots: ({ detailIds, connection }) => (
+    detailIds.length === 0 ? Promise.resolve([]) : queryResult(
+      connection,
+      `SELECT * FROM archivesdetail_customization_snapshots
+       WHERE archivesdetail_id IN (?)
+       ORDER BY archivesdetail_id, step_position, choice_position, id`,
+      [detailIds],
+    )
+  ),
+};
+
+const groupBy = (rows, key) => rows.reduce((groups, row) => {
+  const value = row[key];
+  if (!groups.has(value)) groups.set(value, []);
+  groups.get(value).push(row);
+  return groups;
+}, new Map());
+
+const mapSnapshotCustomization = (row) => ({
+  step_name: row.step_name,
+  name: row.choice_name,
+  price: parseMoney(row.unit_extra_price),
+  product_choice_id: null,
+});
+
+const mapLegacyCustomization = (row) => ({
+  name: row.name,
+  product_choice_id: row.product_choice_id,
+  price: parseMoney(row.price),
+});
+
+const buildOrderArchiveModule = ({
+  repository = archiveSqlRepository,
+  withTransaction: runInTransaction = withTransaction,
+  createToken = nanoid,
+} = {}) => {
+  const hydrateActiveDetails = async (rows, orderId, connection) => {
+    const detailIds = rows.map((row) => row.orderDetailsId).filter(Boolean);
+    const snapshots = await repository.findActiveSnapshots({ detailIds, connection });
+    const snapshotsByDetail = groupBy(snapshots, "orderdetail_id");
+    const legacyDetailIds = detailIds.filter((detailId) => !snapshotsByDetail.has(detailId));
+    const legacyRows = await repository.findLegacyCustomizations({
+      orderId,
+      detailIds: legacyDetailIds,
+      connection,
+    });
+    const legacyByDetail = groupBy(legacyRows, "order_details_id");
+
+    return rows.map((row) => {
+      const result = { ...row };
+      if (snapshotsByDetail.has(row.orderDetailsId)) {
+        result.customizationList = snapshotsByDetail
+          .get(row.orderDetailsId)
+          .map(mapSnapshotCustomization);
+      } else if (legacyByDetail.has(row.orderDetailsId)) {
+        result.customizationList = legacyByDetail
+          .get(row.orderDetailsId)
+          .map(mapLegacyCustomization);
+      }
+      return result;
+    });
+  };
+
+  const hydrateArchivedDetails = async (rows, connection) => {
+    const detailIds = rows.map((row) => row.archiveDetailsId).filter(Boolean);
+    const snapshots = await repository.findArchiveSnapshots({ detailIds, connection });
+    const snapshotsByDetail = groupBy(snapshots, "archivesdetail_id");
+    return rows.map((row) => {
+      const result = { ...row };
+      if (snapshotsByDetail.has(row.archiveDetailsId)) {
+        result.customizationList = snapshotsByDetail
+          .get(row.archiveDetailsId)
+          .map(mapSnapshotCustomization);
+      }
+      return result;
+    });
+  };
+
+  const mArchiveOrder = (id, paymentMethod, shopId) => runInTransaction(
+    async (connection) => {
+      const order = await repository.findOrderForArchive({
+        orderId: id,
+        shopId,
+        connection,
+      });
+      if (!order) throw new Error("Commande introuvable");
+
+      const archivePaymentFields = buildCashRegisterArchiveFields({
+        order,
+        paymentMethod,
+      });
+      const archive = { ...order, ...archivePaymentFields, token: createToken() };
+      delete archive.id;
+      delete archive.client_order_token;
+      delete archive.client_order_payload_hash;
+      const archiveResult = await repository.insertArchive({ archive, connection });
+      const archiveOrderId = archiveResult.insertId;
+
+      const orderDetails = await repository.findOrderDetails({
+        orderId: id,
+        connection,
+      });
+      const detailIds = orderDetails.map((detail) => detail.id);
+      const activeSnapshots = await repository.findActiveSnapshots({
+        detailIds,
+        connection,
+      });
+      const snapshotsByDetail = groupBy(activeSnapshots, "orderdetail_id");
+
+      for (const detail of orderDetails) {
+        const archiveDetailResult = await repository.insertArchiveDetail({
+          detail: {
+            orderId: archiveOrderId,
+            productid: detail.productid,
+            qty: detail.qty,
+            total: detail.total,
+            price: detail.price,
+          },
+          connection,
+        });
+        for (const snapshot of snapshotsByDetail.get(detail.id) || []) {
+          await repository.insertArchiveSnapshot({
+            snapshot: {
+              archivesdetail_id: archiveDetailResult.insertId,
+              product_customization_step_id: snapshot.product_customization_step_id,
+              product_customization_step_choice_id:
+                snapshot.product_customization_step_choice_id,
+              step_name: snapshot.step_name,
+              step_position: snapshot.step_position,
+              choice_type: snapshot.choice_type,
+              choice_name: snapshot.choice_name,
+              choice_position: snapshot.choice_position,
+              unit_extra_price: snapshot.unit_extra_price,
+              linked_product_id: snapshot.linked_product_id,
+              created: snapshot.created,
+            },
+            connection,
+          });
+        }
+      }
+
+      await repository.deleteActiveSnapshots({ detailIds, connection });
+      await repository.deleteLegacyCustomizations({ orderId: id, connection });
+      await repository.deleteOrderDetails({ orderId: id, connection });
+      return repository.deleteOrder({ orderId: id, connection });
+    },
+  );
+
+  const mDetailOrder = async (id) => {
+    const rows = await repository.findActiveOrderDetails({ orderId: id });
+    return hydrateActiveDetails(rows, Number(id));
+  };
+
+  const mDetailArchivedOrder = async (id) => {
+    const rows = await repository.findArchivedOrderDetailsById({ archiveId: id });
+    return hydrateArchivedDetails(rows);
+  };
+
+  const mDetailArchivedOrderByToken = async (token) => {
+    const rows = await repository.findArchivedOrderDetailsByToken({ token });
+    return hydrateArchivedDetails(rows);
+  };
+
+  return {
+    hydrateArchivedDetails,
+    mArchiveOrder,
+    mDetailArchivedOrder,
+    mDetailArchivedOrderByToken,
+    mDetailOrder,
+  };
+};
+
+const orderArchiveModule = buildOrderArchiveModule();
 
 module.exports = {
   mAllOrder: (shopid) => {
@@ -625,6 +917,7 @@ module.exports = {
         SELECT 
             archivesdetail.*, 
             products.*, 
+            archivesdetail.id AS archiveDetailsId,
             archivesdetail.orderId, 
             archivesdetail.qty, 
             archivesdetail.price AS detailPrice, 
@@ -656,4 +949,18 @@ module.exports = {
       });
     });
   },
+};
+
+const legacyAllArchivedOrdersWithDetails = module.exports.mAllArchivedOrdersWithDetails;
+module.exports.buildOrderArchiveModule = buildOrderArchiveModule;
+module.exports.mArchiveOrder = orderArchiveModule.mArchiveOrder;
+module.exports.mDetailArchivedOrder = orderArchiveModule.mDetailArchivedOrder;
+module.exports.mDetailArchivedOrderByToken = orderArchiveModule.mDetailArchivedOrderByToken;
+module.exports.mDetailOrder = orderArchiveModule.mDetailOrder;
+module.exports.mAllArchivedOrdersWithDetails = async (...args) => {
+  const orders = await legacyAllArchivedOrdersWithDetails(...args);
+  return Promise.all(orders.map(async (order) => ({
+    ...order,
+    details: await orderArchiveModule.hydrateArchivedDetails(order.details || []),
+  })));
 };

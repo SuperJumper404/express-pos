@@ -30,6 +30,10 @@ const parseDatabaseUrl = (databaseUrl) => {
 
 const hasEnv = (key) => process.env[key] !== undefined;
 const database = parseDatabaseUrl(process.env.DATABASE_URL);
+const parsePositiveIntegerEnv = (value, fallback) => {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+};
 
 module.exports = {
   envPORT: process.env.PORT || process.env.APP_PORT || "5005",
@@ -50,6 +54,11 @@ module.exports = {
   envSTRIPEREFRESHURL: process.env.STRIPE_CONNECT_REFRESH_URL,
   envSTRIPEPAYMENTMETHODCONFIGURATIONID:
     process.env.STRIPE_PAYMENT_METHOD_CONFIGURATION_ID,
+  envSTRIPESTOCKRESERVATIONMINUTES: parsePositiveIntegerEnv(
+    process.env.STRIPE_STOCK_RESERVATION_MINUTES,
+    15,
+  ),
+  parsePositiveIntegerEnv,
 };
 
 console.log("Loaded env file:", envFile);

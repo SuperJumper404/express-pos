@@ -84,6 +84,11 @@ const {
 const {
   buildCustomizationChoiceImageUpload,
 } = require("../src/helpers/middleware/customizationChoiceImages");
+const callbackDbPath = require.resolve("../src/config/db");
+require.cache[callbackDbPath] = {
+  exports: { query: () => { throw new Error("unexpected legacy DB query"); } },
+};
+const { buildOrderArchiveModule } = require("../src/modules/m_orders");
 
 assert.deepStrictEqual(projectLegacyCustomizations([{
   product_step_id: 10,
@@ -1835,7 +1840,9 @@ const runTransactionalCheckoutContracts = async () => {
   result = await harness.checkout.createCheckout(harness.input);
   assert.strictEqual(result.payment_status, "requires_payment");
   assert.ok(harness.getState().reservations.every((row) => row.status === "reserved"));
-  assert.ok(harness.getState().reservations.every((row) => row.expires_at));
+  assert.ok(harness.getState().reservations.every(
+    (row) => row.expires_at === "2026-07-24 12:15:00",
+  ));
   assert.strictEqual(harness.getState().movements.length, 0);
 
   harness = makeCheckoutHarness();
@@ -2083,6 +2090,276 @@ const runCheckoutApiSurfaceContracts = async () => {
   assert.ok(require("../package.json").scripts.test.includes("reservation-lifecycle.test.js"));
 };
 
+const cloneArchiveState = (state) => ({
+  orders: state.orders.map((row) => ({ ...row })),
+  details: state.details.map((row) => ({ ...row })),
+  activeSnapshots: state.activeSnapshots.map((row) => ({ ...row })),
+  legacyCustomizations: state.legacyCustomizations.map((row) => ({ ...row })),
+  archives: state.archives.map((row) => ({ ...row })),
+  archiveDetails: state.archiveDetails.map((row) => ({ ...row })),
+  archiveSnapshots: state.archiveSnapshots.map((row) => ({ ...row })),
+  nextArchiveId: state.nextArchiveId,
+  nextArchiveDetailId: state.nextArchiveDetailId,
+});
+
+const makeArchiveHarness = ({ failSnapshotCopy = false } = {}) => {
+  let state = {
+    orders: [{
+      id: 42,
+      shopid: 7,
+      customerID: 12,
+      payment_status: "paid",
+      payment_provider: "stripe",
+      subtotal: 23,
+      created: "2026-07-24 12:00:00",
+    }],
+    details: [
+      { id: 70, orderid: 42, productid: 10, qty: 2, price: 11.5, total: 23 },
+      { id: 71, orderid: 42, productid: 20, qty: 1, price: 5, total: 5 },
+    ],
+    activeSnapshots: [{
+      id: 1,
+      orderdetail_id: 70,
+      product_customization_step_id: 5,
+      product_customization_step_choice_id: 8,
+      step_name: "Boisson",
+      step_position: 2,
+      choice_type: "simple",
+      choice_name: "Cola",
+      choice_position: 3,
+      unit_extra_price: "0.50",
+      linked_product_id: null,
+      created: "2026-07-24 12:00:00",
+    }, {
+      id: 2,
+      orderdetail_id: 70,
+      product_customization_step_id: 6,
+      product_customization_step_choice_id: 9,
+      step_name: "Dessert",
+      step_position: 4,
+      choice_type: "linked_product",
+      choice_name: "Tarte",
+      choice_position: 1,
+      unit_extra_price: "2.00",
+      linked_product_id: 30,
+      created: "2026-07-24 12:00:00",
+    }],
+    legacyCustomizations: [{
+      order_id: 42,
+      order_details_id: 70,
+      product_id: 10,
+      product_choice_id: 999,
+      name: "Legacy must not win",
+      price: "9.00",
+    }, {
+      order_id: 42,
+      order_details_id: 71,
+      product_id: 20,
+      product_choice_id: 12,
+      name: "Ancien choix",
+      price: "1.25",
+    }],
+    archives: [],
+    archiveDetails: [],
+    archiveSnapshots: [],
+    nextArchiveId: 100,
+    nextArchiveDetailId: 200,
+  };
+  const events = [];
+  const withTransaction = async (work) => {
+    const before = cloneArchiveState(state);
+    events.push("begin");
+    try {
+      const result = await work({ transaction: true });
+      events.push("commit");
+      return result;
+    } catch (error) {
+      state = before;
+      events.push("rollback");
+      throw error;
+    }
+  };
+  const repository = {
+    findOrderForArchive: async ({ orderId, shopId }) => state.orders.find(
+      (row) => row.id === Number(orderId) && (shopId == null || row.shopid === Number(shopId)),
+    ) || null,
+    insertArchive: async ({ archive }) => {
+      const id = state.nextArchiveId++;
+      state.archives.push({ id, ...archive });
+      events.push(["insert-archive", id]);
+      return { insertId: id };
+    },
+    findOrderDetails: async ({ orderId }) => state.details.filter(
+      (row) => row.orderid === Number(orderId),
+    ),
+    findActiveSnapshots: async ({ detailIds }) => state.activeSnapshots
+      .filter((row) => detailIds.includes(row.orderdetail_id))
+      .sort((left, right) => left.step_position - right.step_position
+        || left.choice_position - right.choice_position),
+    insertArchiveDetail: async ({ detail }) => {
+      const id = state.nextArchiveDetailId++;
+      state.archiveDetails.push({ id, ...detail });
+      events.push(["insert-archive-detail", id]);
+      return { insertId: id };
+    },
+    insertArchiveSnapshot: async ({ snapshot }) => {
+      if (failSnapshotCopy && state.archiveSnapshots.length === 1) {
+        throw new Error("archive snapshot copy failed");
+      }
+      state.archiveSnapshots.push({ id: state.archiveSnapshots.length + 1, ...snapshot });
+      events.push(["insert-archive-snapshot", snapshot.archivesdetail_id]);
+      return { insertId: state.archiveSnapshots.length };
+    },
+    deleteActiveSnapshots: async ({ detailIds }) => {
+      state.activeSnapshots = state.activeSnapshots.filter(
+        (row) => !detailIds.includes(row.orderdetail_id),
+      );
+      events.push("delete-active-snapshots");
+      return { affectedRows: detailIds.length };
+    },
+    deleteLegacyCustomizations: async ({ orderId }) => {
+      state.legacyCustomizations = state.legacyCustomizations.filter(
+        (row) => row.order_id !== Number(orderId),
+      );
+      return { affectedRows: 2 };
+    },
+    deleteOrderDetails: async ({ orderId }) => {
+      state.details = state.details.filter((row) => row.orderid !== Number(orderId));
+      events.push("delete-order-details");
+      return { affectedRows: 2 };
+    },
+    deleteOrder: async ({ orderId }) => {
+      const before = state.orders.length;
+      state.orders = state.orders.filter((row) => row.id !== Number(orderId));
+      events.push("delete-order");
+      return { affectedRows: before - state.orders.length };
+    },
+    findActiveOrderDetails: async ({ orderId }) => state.details
+      .filter((row) => row.orderid === Number(orderId))
+      .map((row) => ({ ...row, id: Number(orderId), orderDetailsId: row.id })),
+    findLegacyCustomizations: async ({ orderId, detailIds }) => state.legacyCustomizations
+      .filter((row) => row.order_id === Number(orderId)
+        && detailIds.includes(row.order_details_id)),
+    findArchivedOrderDetailsById: async ({ archiveId }) => state.archiveDetails
+      .filter((row) => row.orderId === Number(archiveId))
+      .map((row) => ({ ...row, id: Number(archiveId), archiveDetailsId: row.id })),
+    findArchivedOrderDetailsByToken: async ({ token }) => {
+      const archive = state.archives.find((row) => row.token === token);
+      if (!archive) return [];
+      return state.archiveDetails.filter((row) => row.orderId === archive.id)
+        .map((row) => ({ ...row, id: archive.id, archiveDetailsId: row.id }));
+    },
+    findArchiveSnapshots: async ({ detailIds }) => state.archiveSnapshots
+      .filter((row) => detailIds.includes(row.archivesdetail_id))
+      .sort((left, right) => left.step_position - right.step_position
+        || left.choice_position - right.choice_position),
+  };
+  const orderModule = buildOrderArchiveModule({
+    repository,
+    withTransaction,
+    createToken: () => "archive-token-42",
+  });
+  return {
+    orderModule,
+    events,
+    getState: () => state,
+  };
+};
+
+const runArchiveSnapshotContracts = async () => {
+  let harness = makeArchiveHarness();
+  const active = await harness.orderModule.mDetailOrder(42);
+  assert.deepStrictEqual(active[0].customizationList, [{
+    step_name: "Boisson",
+    name: "Cola",
+    price: 0.5,
+    product_choice_id: null,
+  }, {
+    step_name: "Dessert",
+    name: "Tarte",
+    price: 2,
+    product_choice_id: null,
+  }]);
+  assert.deepStrictEqual(active[1].customizationList, [{
+    name: "Ancien choix",
+    product_choice_id: 12,
+    price: 1.25,
+  }]);
+
+  const archiveResult = await harness.orderModule.mArchiveOrder(42, "Carte", 7);
+  assert.strictEqual(archiveResult.affectedRows, 1);
+  assert.strictEqual(harness.getState().orders.length, 0);
+  assert.strictEqual(harness.getState().details.length, 0);
+  assert.strictEqual(harness.getState().activeSnapshots.length, 0);
+  assert.strictEqual(harness.getState().archiveDetails.length, 2);
+  assert.deepStrictEqual(
+    harness.getState().archiveSnapshots.map((row) => ({
+      archivesdetail_id: row.archivesdetail_id,
+      step_name: row.step_name,
+      step_position: row.step_position,
+      choice_name: row.choice_name,
+      choice_position: row.choice_position,
+      unit_extra_price: row.unit_extra_price,
+      linked_product_id: row.linked_product_id,
+    })),
+    [{
+      archivesdetail_id: 200,
+      step_name: "Boisson",
+      step_position: 2,
+      choice_name: "Cola",
+      choice_position: 3,
+      unit_extra_price: "0.50",
+      linked_product_id: null,
+    }, {
+      archivesdetail_id: 200,
+      step_name: "Dessert",
+      step_position: 4,
+      choice_name: "Tarte",
+      choice_position: 1,
+      unit_extra_price: "2.00",
+      linked_product_id: 30,
+    }],
+  );
+  assert.ok(
+    harness.events.findIndex((event) => Array.isArray(event)
+      && event[0] === "insert-archive-snapshot")
+      < harness.events.indexOf("delete-active-snapshots"),
+  );
+
+  const archived = await harness.orderModule.mDetailArchivedOrder(100);
+  assert.deepStrictEqual(archived[0].customizationList, [{
+    step_name: "Boisson",
+    name: "Cola",
+    price: 0.5,
+    product_choice_id: null,
+  }, {
+    step_name: "Dessert",
+    name: "Tarte",
+    price: 2,
+    product_choice_id: null,
+  }]);
+  assert.strictEqual(
+    Object.prototype.hasOwnProperty.call(archived[1], "customizationList"),
+    false,
+    "legacy archives without snapshots keep their existing shape",
+  );
+  const archivedByToken = await harness.orderModule.mDetailArchivedOrderByToken(
+    "archive-token-42",
+  );
+  assert.deepStrictEqual(archivedByToken, archived);
+
+  harness = makeArchiveHarness({ failSnapshotCopy: true });
+  await assert.rejects(
+    () => harness.orderModule.mArchiveOrder(42, "Carte", 7),
+    /archive snapshot copy failed/,
+  );
+  assert.strictEqual(harness.getState().orders.length, 1);
+  assert.strictEqual(harness.getState().details.length, 2);
+  assert.strictEqual(harness.getState().activeSnapshots.length, 2);
+  assert.strictEqual(harness.getState().archives.length, 0);
+  assert.ok(harness.events.includes("rollback"));
+};
+
 runProductReadContracts()
   .then(runProductWriteContracts)
   .then(runProductControllerContracts)
@@ -2092,6 +2369,7 @@ runProductReadContracts()
   .then(runTransactionalCheckoutContracts)
   .then(runReservationContracts)
   .then(runCheckoutApiSurfaceContracts)
+  .then(runArchiveSnapshotContracts)
   .then(() => console.log("customization and checkout contracts passed"))
   .catch((error) => {
     console.error(error);

@@ -1,130 +1,65 @@
-const conn = require("../config/db");
+const pool = require("../config/dbPool");
+const { ORDER_STATUSES } = require("../helpers/orderStatus");
+const { finalizeReservations } = require("./m_checkout");
 const { resolveStripePaymentMethod } = require("../helpers/stripePaymentMethod");
+const { withTransaction } = require("../helpers/withTransaction");
 
-const now = () => new Date().toISOString().slice(0, 19).replace("T", " ");
+const formatDate = (value) => value.toISOString().slice(0, 19).replace("T", " ");
 
-const query = (sql, values = []) =>
-  new Promise((resolve, reject) => {
-    conn.query(sql, values, (err, result) => {
-      if (err) {
-        reject(new Error(err.message));
-      } else {
-        resolve(result);
-      }
-    });
-  });
-
-const insertOrderCustomization = (orderId, orderDetailId, productId, choices) => {
-  if (!Array.isArray(choices) || choices.length === 0) {
-    return Promise.resolve();
-  }
-
-  return query("INSERT INTO orders_customization SET ?", [
-    {
-      order_id: orderId,
-      order_details_id: orderDetailId,
-      product_id: productId,
-      product_choice_id: choices[0].id || choices[0].product_choice_id,
-    },
-  ]).then(() => {
-    const remaining = choices.slice(1);
-    return remaining.reduce(
-      (promise, choice) =>
-        promise.then(() =>
-          query("INSERT INTO orders_customization SET ?", [
-            {
-              order_id: orderId,
-              order_details_id: orderDetailId,
-              product_id: productId,
-              product_choice_id: choice.id || choice.product_choice_id,
-            },
-          ]),
-        ),
-      Promise.resolve(),
-    );
-  });
+const queryResult = async (connection, sql, values = []) => {
+  const [result] = await (connection || pool).query(sql, values);
+  return result;
 };
 
-const createPendingStripeOrder = ({ order, details }) =>
-  new Promise((resolve, reject) => {
-    conn.beginTransaction((transactionError) => {
-      if (transactionError) {
-        return reject(new Error(transactionError.message));
-      }
+const sqlRepository = {
+  createPaymentRecord: ({ data, connection }) => queryResult(
+    connection,
+    `INSERT INTO payments SET ?
+     ON DUPLICATE KEY UPDATE
+       order_id = VALUES(order_id),
+       shop_id = VALUES(shop_id),
+       amount = VALUES(amount),
+       amount_cents = VALUES(amount_cents),
+       application_fee_amount = VALUES(application_fee_amount),
+       currency = VALUES(currency),
+       status = VALUES(status)`,
+    [data],
+  ),
 
-      conn.query("INSERT INTO orders SET ?", order, async (orderError, result) => {
-        if (orderError) {
-          return conn.rollback(() => reject(new Error(orderError.message)));
-        }
-
-        const orderId = result.insertId;
-
-        try {
-          for (const item of details) {
-            const detailData = {
-              orderid: orderId,
-              productid: item.productid,
-              price: item.price,
-              qty: item.qty,
-              total: item.total,
-            };
-            const detailResult = await query("INSERT INTO orderdetail SET ?", [
-              detailData,
-            ]);
-            await insertOrderCustomization(
-              orderId,
-              detailResult.insertId,
-              item.productid,
-              item.customizationList,
-            );
-          }
-
-          conn.commit((commitError) => {
-            if (commitError) {
-              return conn.rollback(() => reject(new Error(commitError.message)));
-            }
-            resolve({ insertId: orderId });
-          });
-        } catch (error) {
-          conn.rollback(() => reject(error));
-        }
-      });
-    });
-  });
-
-const createPaymentRecord = (data) =>
-  query("INSERT INTO payments SET ?", [
-    {
-      order_id: data.order_id,
-      shop_id: data.shop_id,
-      stripe_payment_intent_id: data.stripe_payment_intent_id,
-      amount: data.amount,
-      amount_cents: data.amount_cents,
-      application_fee_amount: data.application_fee_amount,
-      currency: data.currency || "eur",
-      status: data.status,
-      created: now(),
-    },
-  ]);
-
-const attachPaymentIntentToOrder = (orderId, paymentIntentId) =>
-  query(
+  attachPaymentIntentToOrder: ({ orderId, paymentIntentId, connection }) => queryResult(
+    connection,
     `UPDATE orders
      SET stripe_payment_intent_id = ?,
          payment_provider = 'stripe',
          payment_status = 'requires_payment'
      WHERE id = ?`,
     [paymentIntentId, orderId],
-  );
+  ),
 
-const findPaymentByIntent = (paymentIntentId) =>
-  query("SELECT * FROM payments WHERE stripe_payment_intent_id = ? LIMIT 1", [
-    paymentIntentId,
-  ]);
+  findPaymentByIntent: ({ paymentIntentId, connection }) => queryResult(
+    connection,
+    `SELECT * FROM payments
+     WHERE stripe_payment_intent_id = ?
+     LIMIT 1${connection ? " FOR UPDATE" : ""}`,
+    [paymentIntentId],
+  ).then((rows) => rows[0] || null),
 
-const getPaidOrderForRefund = (orderId, shopId) =>
-  query(
-    `SELECT orders.*, payments.stripe_payment_intent_id, payments.status AS payment_record_status
+  findOrderById: ({ orderId, shopId, connection }) => {
+    const shopClause = shopId == null ? "" : " AND shopid = ?";
+    const params = shopId == null ? [orderId] : [orderId, shopId];
+    return queryResult(
+      connection,
+      `SELECT * FROM orders
+       WHERE id = ?${shopClause}
+       LIMIT 1${connection ? " FOR UPDATE" : ""}`,
+      params,
+    ).then((rows) => rows[0] || null);
+  },
+
+  getPaidOrderForRefund: ({ orderId, shopId, connection }) => queryResult(
+    connection,
+    `SELECT orders.*, payments.stripe_payment_intent_id,
+            payments.status AS payment_record_status
      FROM orders
      JOIN payments ON payments.order_id = orders.id
      WHERE orders.id = ?
@@ -132,10 +67,10 @@ const getPaidOrderForRefund = (orderId, shopId) =>
        AND orders.payment_status = 'paid'
      LIMIT 1`,
     [orderId, shopId],
-  );
+  ),
 
-const getPendingStripeOrderForCounter = (orderId, shopId) =>
-  query(
+  getPendingStripeOrderForCounter: ({ orderId, shopId, connection }) => queryResult(
+    connection,
     `SELECT orders.id,
             orders.shopid,
             orders.payment_status,
@@ -148,239 +83,337 @@ const getPendingStripeOrderForCounter = (orderId, shopId) =>
        AND orders.payment_provider = 'stripe'
      LIMIT 1`,
     [orderId, shopId],
-  );
+  ),
 
-const markPaymentSucceeded = (paymentIntent, charge = null) =>
-  new Promise((resolve, reject) => {
-    const paymentIntentId = paymentIntent.id;
-    const paymentMethod = resolveStripePaymentMethod({ paymentIntent, charge });
-
-    conn.beginTransaction(async (transactionError) => {
-      if (transactionError) {
-        return reject(new Error(transactionError.message));
-      }
-
-      try {
-        const paymentRows = await findPaymentByIntent(paymentIntentId);
-        if (!paymentRows.length) {
-          throw new Error("Paiement introuvable");
-        }
-
-        const payment = paymentRows[0];
-        const orderRows = await query("SELECT * FROM orders WHERE id = ? LIMIT 1", [
-          payment.order_id,
-        ]);
-        if (!orderRows.length) {
-          throw new Error("Commande introuvable");
-        }
-
-        if (orderRows[0].payment_status === "paid") {
-          return conn.commit((commitError) => {
-            if (commitError) {
-              return conn.rollback(() => reject(new Error(commitError.message)));
-            }
-            resolve({ alreadyPaid: true });
-          });
-        }
-
-        await query(
-          `UPDATE payments
-           SET status = 'succeeded',
-               stripe_charge_id = ?,
-               payment_method = ?,
-               updated = ?
-           WHERE stripe_payment_intent_id = ?`,
-          [
-            paymentIntent.latest_charge || null,
-            paymentMethod,
-            now(),
-            paymentIntentId,
-          ],
-        );
-
-        await query(
-          `UPDATE orders
-           SET payment_status = 'paid',
-               payment = ?,
-               finished = ?
-           WHERE id = ?`,
-          [paymentMethod, now(), payment.order_id],
-        );
-
-        const details = await query(
-          "SELECT * FROM orderdetail WHERE orderid = ?",
-          [payment.order_id],
-        );
-
-        for (const detail of details) {
-          await query("UPDATE products SET stock = stock - ? WHERE id = ?", [
-            detail.qty,
-            detail.productid,
-          ]);
-          await query("INSERT INTO stocks SET ?", [
-            {
-              productid: detail.productid,
-              category: "1",
-              qty: detail.qty,
-              operator: orderRows[0].customerID,
-              remark: "Paiement Stripe",
-              created: now(),
-              updated: now(),
-            },
-          ]);
-        }
-
-        conn.commit((commitError) => {
-          if (commitError) {
-            return conn.rollback(() => reject(new Error(commitError.message)));
-          }
-          resolve({ paid: true });
-        });
-      } catch (error) {
-        conn.rollback(() => reject(error));
-      }
-    });
-  });
-
-const markPaymentFailed = (paymentIntentId) =>
-  query(
+  updatePaymentSucceeded: ({
+    paymentIntentId, chargeId, paymentMethod, timestamp, connection,
+  }) => queryResult(
+    connection,
     `UPDATE payments
-     SET status = 'failed',
+     SET status = 'succeeded',
+         stripe_charge_id = ?,
+         payment_method = ?,
          updated = ?
      WHERE stripe_payment_intent_id = ?`,
-    [now(), paymentIntentId],
-  ).then(() =>
-    query(
-      `UPDATE orders
-       SET payment_status = 'failed'
-       WHERE stripe_payment_intent_id = ?`,
-      [paymentIntentId],
-    ),
-  );
+    [chargeId, paymentMethod, timestamp, paymentIntentId],
+  ),
 
-const markPaymentCanceled = (paymentIntentId) =>
-  query(
+  updateOrderSucceeded: ({ orderId, paymentMethod, timestamp, connection }) => queryResult(
+    connection,
+    `UPDATE orders
+     SET payment_status = 'paid',
+         payment = ?,
+         finished = ?
+     WHERE id = ? AND payment_status = 'requires_payment'`,
+    [paymentMethod, timestamp, orderId],
+  ),
+
+  updatePaymentTerminal: ({ paymentIntentId, status, timestamp, connection }) => queryResult(
+    connection,
     `UPDATE payments
-     SET status = 'canceled',
-         updated = ?
+     SET status = ?, updated = ?
      WHERE stripe_payment_intent_id = ?`,
-    [now(), paymentIntentId],
-  ).then(() =>
-    query(
-      `UPDATE orders
-       SET payment_status = 'canceled'
-       WHERE stripe_payment_intent_id = ?
-         AND payment_status = 'requires_payment'`,
-      [paymentIntentId],
-    ),
-  );
+    [status, timestamp, paymentIntentId],
+  ),
 
-const markStripeOrderPayAtCounter = (orderId, shopId) =>
-  new Promise((resolve, reject) => {
-    conn.beginTransaction(async (transactionError) => {
-      if (transactionError) {
-        return reject(new Error(transactionError.message));
-      }
+  updateOrderTerminal: ({ orderId, status, connection }) => queryResult(
+    connection,
+    `UPDATE orders
+     SET payment_status = ?
+     WHERE id = ? AND payment_status = 'requires_payment'`,
+    [status, orderId],
+  ),
 
-      try {
-        const orderRows = await query(
-          "SELECT * FROM orders WHERE id = ? AND shopid = ? LIMIT 1",
-          [orderId, shopId],
-        );
-        if (!orderRows.length) {
-          throw new Error("Commande introuvable");
-        }
+  updatePaymentAtCounter: ({ orderId, timestamp, connection }) => queryResult(
+    connection,
+    `UPDATE payments
+     SET status = 'canceled', updated = ?
+     WHERE order_id = ?`,
+    [timestamp, orderId],
+  ),
 
-        await query(
-          `UPDATE payments
-           SET status = 'canceled',
-               updated = ?
-           WHERE order_id = ?`,
-          [now(), orderId],
-        );
+  updateOrderAtCounter: ({ orderId, shopId, timestamp, connection }) => queryResult(
+    connection,
+    `UPDATE orders
+     SET status = 1,
+         payment_status = 'unpaid',
+         payment = 'Paiement au comptoir',
+         payment_provider = NULL,
+         stripe_payment_intent_id = NULL,
+         finished = ?
+     WHERE id = ?
+       AND shopid = ?
+       AND payment_status = 'requires_payment'
+       AND payment_provider = 'stripe'`,
+    [timestamp, orderId, shopId],
+  ),
 
-        const result = await query(
-          `UPDATE orders
-           SET status = 1,
-               payment_status = 'unpaid',
-               payment = 'Paiement au comptoir',
-               payment_provider = NULL,
-               stripe_payment_intent_id = NULL,
-               finished = ?
-           WHERE id = ?
-             AND shopid = ?
-             AND payment_status = 'requires_payment'
-             AND payment_provider = 'stripe'`,
-          [now(), orderId, shopId],
-        );
+  cancelPaymentsForOrder: ({ orderId, timestamp, connection }) => queryResult(
+    connection,
+    `UPDATE payments
+     SET status = 'canceled', updated = ?
+     WHERE order_id = ? AND status <> 'succeeded'`,
+    [timestamp, orderId],
+  ),
 
-        if (!result.affectedRows) {
-          throw new Error("Commande Stripe en attente introuvable");
-        }
+  cancelProvisionalOrder: ({ orderId, shopId, timestamp, connection }) => queryResult(
+    connection,
+    `UPDATE orders
+     SET payment_status = 'canceled', status = ?, finished = ?
+     WHERE id = ?
+       AND shopid = ?
+       AND payment_status = 'requires_payment'
+       AND payment_provider = 'stripe'`,
+    [ORDER_STATUSES.CANCELED, timestamp, orderId, shopId],
+  ),
 
-        const details = await query(
-          "SELECT * FROM orderdetail WHERE orderid = ?",
-          [orderId],
-        );
-
-        for (const detail of details) {
-          await query("UPDATE products SET stock = stock - ? WHERE id = ?", [
-            detail.qty,
-            detail.productid,
-          ]);
-          await query("INSERT INTO stocks SET ?", [
-            {
-              productid: detail.productid,
-              category: "1",
-              qty: detail.qty,
-              operator: orderRows[0].customerID,
-              remark: "Paiement au comptoir",
-              created: now(),
-              updated: now(),
-            },
-          ]);
-        }
-
-        conn.commit((commitError) => {
-          if (commitError) {
-            return conn.rollback(() => reject(new Error(commitError.message)));
-          }
-          resolve({ orderId });
-        });
-      } catch (error) {
-        conn.rollback(() => reject(error));
-      }
-    });
-  });
-
-const markPaymentRefunded = (orderId, refundId) =>
-  query(
+  updatePaymentRefunded: ({ orderId, refundId, timestamp, connection }) => queryResult(
+    connection,
     `UPDATE payments
      SET status = 'refunded',
          refunded_at = ?,
          updated = ?,
          stripe_charge_id = COALESCE(stripe_charge_id, ?)
      WHERE order_id = ?`,
-    [now(), now(), refundId, orderId],
-  ).then(() =>
-    query(
-      `UPDATE orders
-       SET payment_status = 'refunded',
-           status = 4
-       WHERE id = ?`,
-      [orderId],
-    ),
+    [timestamp, timestamp, refundId, orderId],
+  ),
+
+  updateOrderRefunded: ({ orderId, connection }) => queryResult(
+    connection,
+    `UPDATE orders
+     SET payment_status = 'refunded', status = ?
+     WHERE id = ?`,
+    [ORDER_STATUSES.CANCELED, orderId],
+  ),
+};
+
+const isReservationTransitionError = (error) => (
+  error && error.code === "RESERVATION_TRANSITION_INVALID"
+);
+
+const buildPaymentModule = ({
+  repository = sqlRepository,
+  withTransaction: runInTransaction = withTransaction,
+  finalizeReservations: settleReservations = finalizeReservations,
+  now = () => new Date(),
+} = {}) => {
+  const timestamp = () => formatDate(now());
+
+  const createPaymentRecord = (data) => repository.createPaymentRecord({
+    data: {
+      order_id: data.order_id,
+      shop_id: data.shop_id,
+      stripe_payment_intent_id: data.stripe_payment_intent_id,
+      amount: data.amount,
+      amount_cents: data.amount_cents,
+      application_fee_amount: data.application_fee_amount,
+      currency: data.currency || "eur",
+      status: data.status,
+      created: timestamp(),
+    },
+  });
+
+  const attachPaymentIntentToOrder = (orderId, paymentIntentId) => (
+    repository.attachPaymentIntentToOrder({ orderId, paymentIntentId })
   );
 
+  const getPaidOrderForRefund = (orderId, shopId) => (
+    repository.getPaidOrderForRefund({ orderId, shopId })
+  );
+
+  const getPendingStripeOrderForCounter = (orderId, shopId) => (
+    repository.getPendingStripeOrderForCounter({ orderId, shopId })
+  );
+
+  const markPaymentSucceeded = (paymentIntent, charge = null) => runInTransaction(
+    async (connection) => {
+      const paymentIntentId = paymentIntent.id;
+      const payment = await repository.findPaymentByIntent({
+        paymentIntentId,
+        connection,
+      });
+      if (!payment) throw new Error("Paiement introuvable");
+
+      const order = await repository.findOrderById({
+        orderId: payment.order_id,
+        connection,
+      });
+      if (!order) throw new Error("Commande introuvable");
+      if (order.payment_status === "paid") return { alreadyPaid: true };
+      if (order.payment_status !== "requires_payment") return { ignored: true };
+
+      try {
+        await settleReservations({
+          orderId: order.id,
+          status: "committed",
+          operator: order.operator || order.customerID,
+          connection,
+        });
+      } catch (error) {
+        if (isReservationTransitionError(error)) return { ignored: true };
+        throw error;
+      }
+
+      const paymentMethod = resolveStripePaymentMethod({ paymentIntent, charge });
+      const currentTimestamp = timestamp();
+      await repository.updatePaymentSucceeded({
+        paymentIntentId,
+        chargeId: paymentIntent.latest_charge || null,
+        paymentMethod,
+        timestamp: currentTimestamp,
+        connection,
+      });
+      await repository.updateOrderSucceeded({
+        orderId: order.id,
+        paymentMethod,
+        timestamp: currentTimestamp,
+        connection,
+      });
+      return { paid: true };
+    },
+  );
+
+  const markPaymentTerminal = (paymentIntentId, status) => runInTransaction(
+    async (connection) => {
+      const payment = await repository.findPaymentByIntent({
+        paymentIntentId,
+        connection,
+      });
+      if (!payment) return { missing: true };
+      const order = await repository.findOrderById({
+        orderId: payment.order_id,
+        connection,
+      });
+      if (!order) return { missing: true };
+      if (order.payment_status !== "requires_payment") return { ignored: true };
+
+      try {
+        await settleReservations({
+          orderId: order.id,
+          status: "released",
+          connection,
+        });
+      } catch (error) {
+        if (isReservationTransitionError(error)) return { ignored: true };
+        throw error;
+      }
+
+      const currentTimestamp = timestamp();
+      await repository.updatePaymentTerminal({
+        paymentIntentId,
+        status,
+        timestamp: currentTimestamp,
+        connection,
+      });
+      await repository.updateOrderTerminal({
+        orderId: order.id,
+        status,
+        connection,
+      });
+      return { status };
+    },
+  );
+
+  const markPaymentFailed = (paymentIntentId) => (
+    markPaymentTerminal(paymentIntentId, "failed")
+  );
+  const markPaymentCanceled = (paymentIntentId) => (
+    markPaymentTerminal(paymentIntentId, "canceled")
+  );
+
+  const markStripeOrderPayAtCounter = (orderId, shopId) => runInTransaction(
+    async (connection) => {
+      const order = await repository.findOrderById({ orderId, shopId, connection });
+      if (!order) throw new Error("Commande introuvable");
+      if (order.payment_status === "unpaid" && !order.payment_provider) {
+        return { orderId: Number(orderId), alreadyUpdated: true };
+      }
+      if (order.payment_status !== "requires_payment" || order.payment_provider !== "stripe") {
+        throw new Error("Commande Stripe en attente introuvable");
+      }
+
+      await settleReservations({
+        orderId: order.id,
+        status: "committed",
+        operator: order.operator || order.customerID,
+        connection,
+      });
+      const currentTimestamp = timestamp();
+      await repository.updatePaymentAtCounter({
+        orderId: order.id,
+        timestamp: currentTimestamp,
+        connection,
+      });
+      const result = await repository.updateOrderAtCounter({
+        orderId: order.id,
+        shopId,
+        timestamp: currentTimestamp,
+        connection,
+      });
+      if (!result.affectedRows) throw new Error("Commande Stripe en attente introuvable");
+      return { orderId: Number(orderId) };
+    },
+  );
+
+  const cancelProvisionalStripeOrder = (orderId, shopId) => runInTransaction(
+    async (connection) => {
+      const order = await repository.findOrderById({ orderId, shopId, connection });
+      if (!order) return { missing: true };
+      if (order.payment_status !== "requires_payment" || order.payment_provider !== "stripe") {
+        return { ignored: true };
+      }
+
+      await settleReservations({
+        orderId: order.id,
+        status: "released",
+        connection,
+      });
+      const currentTimestamp = timestamp();
+      await repository.cancelPaymentsForOrder({
+        orderId: order.id,
+        timestamp: currentTimestamp,
+        connection,
+      });
+      await repository.cancelProvisionalOrder({
+        orderId: order.id,
+        shopId,
+        timestamp: currentTimestamp,
+        connection,
+      });
+      return { canceled: true };
+    },
+  );
+
+  const markPaymentRefunded = (orderId, refundId) => runInTransaction(
+    async (connection) => {
+      const currentTimestamp = timestamp();
+      await repository.updatePaymentRefunded({
+        orderId,
+        refundId,
+        timestamp: currentTimestamp,
+        connection,
+      });
+      return repository.updateOrderRefunded({ orderId, connection });
+    },
+  );
+
+  return {
+    attachPaymentIntentToOrder,
+    cancelProvisionalStripeOrder,
+    createPaymentRecord,
+    getPaidOrderForRefund,
+    getPendingStripeOrderForCounter,
+    markPaymentCanceled,
+    markPaymentFailed,
+    markPaymentRefunded,
+    markPaymentSucceeded,
+    markStripeOrderPayAtCounter,
+  };
+};
+
+const paymentModule = buildPaymentModule();
+
 module.exports = {
-  attachPaymentIntentToOrder,
-  createPaymentRecord,
-  createPendingStripeOrder,
-  getPaidOrderForRefund,
-  getPendingStripeOrderForCounter,
-  markPaymentCanceled,
-  markPaymentFailed,
-  markPaymentRefunded,
-  markPaymentSucceeded,
-  markStripeOrderPayAtCounter,
+  ...paymentModule,
+  buildPaymentModule,
 };

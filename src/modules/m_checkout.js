@@ -7,11 +7,12 @@ const { withTransaction } = require("../helpers/withTransaction");
 const { validateConfiguredItem } = require("../helpers/customizationRules");
 const { buildStockRequirements } = require("../helpers/stockRequirements");
 const { nextReservationStatus } = require("../helpers/reservationLifecycle");
+const { envSTRIPESTOCKRESERVATIONMINUTES } = require("../helpers/env");
 const {
   getResolvedProductConfigurations,
 } = require("./m_customizations");
 
-const RESERVATION_TTL_MS = 15 * 60 * 1000;
+const RESERVATION_TTL_MS = envSTRIPESTOCKRESERVATIONMINUTES * 60 * 1000;
 
 const formatDate = (value) => value.toISOString().slice(0, 19).replace("T", " ");
 const cents = (value) => Math.round(Number(value) * 100);

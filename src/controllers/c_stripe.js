@@ -6,8 +6,7 @@ const {
   envSTRIPEWEBHOOKSECRET,
   envSTRIPEPAYMENTMETHODCONFIGURATIONID,
 } = require("../helpers/env");
-const { isMissing, parseMoney } = require("../helpers/money");
-const { ORDER_STATUSES } = require("../helpers/orderStatus");
+const DomainError = require("../helpers/domainError");
 const { custom, failed, success } = require("../helpers/response");
 const {
   isStripePaymentAllowed,
@@ -23,8 +22,8 @@ const {
 } = require("../modules/m_shop");
 const {
   attachPaymentIntentToOrder,
+  cancelProvisionalStripeOrder,
   createPaymentRecord,
-  createPendingStripeOrder,
   getPaidOrderForRefund,
   getPendingStripeOrderForCounter,
   markPaymentCanceled,
@@ -33,16 +32,7 @@ const {
   markPaymentSucceeded,
   markStripeOrderPayAtCounter,
 } = require("../modules/m_payments");
-
-const now = () => new Date().toISOString().slice(0, 19).replace("T", " ");
-
-const makeOrderNumber = () => {
-  const timestamp = new Date().valueOf().toString();
-  const randomValue = Math.floor(Math.random() * 100)
-    .toString()
-    .padStart(2, "0");
-  return (timestamp + randomValue).slice(-4);
-};
+const { createCheckout } = require("../modules/m_checkout");
 
 const getBaseUrl = (req) => `${req.protocol}://${req.get("host")}`;
 
@@ -140,23 +130,22 @@ exports.getConnectStatus = async (req, res) => {
   }
 };
 
-exports.createQrTablePaymentIntent = async (req, res) => {
+const buildQrTablePaymentIntentController = ({
+  getShopInfo = mGetShopInfo,
+  createCheckout: createStripeCheckout = createCheckout,
+  getStripe: getStripeClient = getStripe,
+  attachPaymentIntentToOrder: attachIntent = attachPaymentIntentToOrder,
+  createPaymentRecord: insertPaymentRecord = createPaymentRecord,
+  cancelProvisionalStripeOrder: cancelProvisional = cancelProvisionalStripeOrder,
+  publishableKey = envSTRIPEPUBLISHABLEKEY,
+  paymentMethodConfigurationId = envSTRIPEPAYMENTMETHODCONFIGURATIONID,
+  logger = console,
+} = {}) => async (req, res) => {
+  let provisionalOrderId = null;
+  let paymentIntent = null;
   try {
     const body = req.body || {};
-    const subtotal = parseMoney(body.subtotal);
-    const details = Array.isArray(body.items) ? body.items : [];
-
-    if (
-      !body.customer ||
-      isMissing(body.subtotal) ||
-      subtotal === null ||
-      !body.customerID ||
-      details.length === 0
-    ) {
-      return custom(res, 400, "Requete paiement invalide.", null, null);
-    }
-
-    const rows = await mGetShopInfo(req.shopid);
+    const rows = await getShopInfo(req.shopid);
     const shop = rows[0];
     if (!shop) {
       return custom(res, 404, "Restaurant introuvable.", null, null);
@@ -189,79 +178,89 @@ exports.createQrTablePaymentIntent = async (req, res) => {
       );
     }
 
-    const order = {
-      ordernumber: makeOrderNumber(),
+    const checkoutResult = await createStripeCheckout({
+      shopId: req.shopid,
+      actorId: req.id,
       customer: body.customer,
-      customerID: body.customerID,
-      operator: body.operator || null,
-      subtotal,
-      payment: "Stripe",
-      payment_status: "requires_payment",
-      payment_provider: "stripe",
-      remark: body.remark,
-      phone: body.phone,
-      status: ORDER_STATUSES.PENDING,
-      created: now(),
-      finished: now(),
-      shopid: req.shopid,
-    };
-    const orderDetails = details.map((item) => ({
-      productid: item.productid || item.id,
-      price: parseMoney(item.price),
-      qty: item.qty,
-      total: parseMoney(item.total),
-      customizationList: item.customizationList,
-    }));
-
-    const invalidDetail = orderDetails.some(
-      (item) =>
-        !item.productid ||
-        item.price === null ||
-        !item.qty ||
-        item.total === null,
-    );
-    if (invalidDetail) {
-      return custom(res, 400, "Details de commande invalides.", null, null);
+      items: Array.isArray(body.items) ? body.items.map((item) => ({
+        productId: item.product_id,
+        quantity: item.quantity,
+        selectedChoiceIds: item.selected_choice_ids,
+      })) : body.items,
+      expectedTotal: body.expected_total,
+      clientOrderToken: body.client_order_token,
+      paymentMode: "stripe",
+    });
+    provisionalOrderId = checkoutResult.orderId;
+    if (checkoutResult.payment_status !== "requires_payment") {
+      provisionalOrderId = null;
+      return custom(res, 409, "Cette commande a deja ete traitee.", null, {
+        orderId: checkoutResult.orderId,
+      });
     }
 
-    const orderResult = await createPendingStripeOrder({
-      order,
-      details: orderDetails,
-    });
-
     const stripeParams = buildDestinationPaymentIntentParams({
-      amount: subtotal,
+      amount: checkoutResult.total,
       currency: "eur",
       connectedAccountId: shop.stripe_account_id,
-      orderId: orderResult.insertId,
+      orderId: provisionalOrderId,
       shopId: req.shopid,
       commissionPercent: shop.stripe_commission_percent,
-      paymentMethodConfigurationId: envSTRIPEPAYMENTMETHODCONFIGURATIONID,
+      paymentMethodConfigurationId,
     });
 
-    const paymentIntent = await getStripe().paymentIntents.create(stripeParams);
-    await attachPaymentIntentToOrder(orderResult.insertId, paymentIntent.id);
-    await createPaymentRecord({
-      order_id: orderResult.insertId,
+    paymentIntent = await getStripeClient().paymentIntents.create(stripeParams, {
+      idempotencyKey: `qr-${req.shopid}-${body.client_order_token}`,
+    });
+    await attachIntent(provisionalOrderId, paymentIntent.id);
+    await insertPaymentRecord({
+      order_id: provisionalOrderId,
       shop_id: req.shopid,
       stripe_payment_intent_id: paymentIntent.id,
-      amount: subtotal,
-      amount_cents: toStripeAmount(subtotal),
+      amount: checkoutResult.total,
+      amount_cents: toStripeAmount(checkoutResult.total),
       application_fee_amount: stripeParams.application_fee_amount,
       currency: stripeParams.currency,
       status: paymentIntent.status,
     });
 
     success(res, "Paiement Stripe cree.", null, {
-      orderId: orderResult.insertId,
+      orderId: provisionalOrderId,
       paymentIntentId: paymentIntent.id,
       clientSecret: paymentIntent.client_secret,
-      publishableKey: envSTRIPEPUBLISHABLEKEY,
+      publishableKey,
     });
   } catch (error) {
-    failed(res, "Erreur lors de la creation du paiement Stripe.", error.message);
+    if (provisionalOrderId) {
+      if (paymentIntent && paymentIntent.status !== "canceled") {
+        try {
+          await getStripeClient().paymentIntents.cancel(paymentIntent.id);
+        } catch (cancelError) {
+          logger.error("Stripe PaymentIntent cleanup failed", cancelError);
+        }
+      }
+      try {
+        await cancelProvisional(provisionalOrderId, req.shopid);
+      } catch (cleanupError) {
+        logger.error("Provisional Stripe order cleanup failed", cleanupError);
+      }
+    }
+
+    if (error instanceof DomainError) {
+      const data = { code: error.code };
+      for (const key of Object.keys(error)) {
+        if (!["status", "code"].includes(key)) data[key] = error[key];
+      }
+      return custom(res, error.status, error.message, null, data);
+    }
+
+    logger.error("Stripe payment creation failed", error);
+    return failed(res, "Erreur lors de la creation du paiement Stripe.");
   }
 };
+
+exports.buildQrTablePaymentIntentController = buildQrTablePaymentIntentController;
+exports.createQrTablePaymentIntent = buildQrTablePaymentIntentController();
 
 exports.markQrTablePaymentAtCounter = async (req, res) => {
   try {
