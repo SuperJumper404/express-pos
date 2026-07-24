@@ -12,7 +12,7 @@ const queryResult = async (connection, sql, values = []) => {
 };
 
 const sqlRepository = {
-  createPaymentRecord: ({ data, connection }) => queryResult(
+  upsertPaymentRecord: ({ data, connection }) => queryResult(
     connection,
     `INSERT INTO payments SET ?
      ON DUPLICATE KEY UPDATE
@@ -22,7 +22,11 @@ const sqlRepository = {
        amount_cents = VALUES(amount_cents),
        application_fee_amount = VALUES(application_fee_amount),
        currency = VALUES(currency),
-       status = VALUES(status)`,
+       status = CASE
+         WHEN payments.status IN ('succeeded', 'canceled', 'failed', 'refunded')
+           THEN payments.status
+         ELSE VALUES(status)
+       END`,
     [data],
   ),
 
@@ -30,10 +34,12 @@ const sqlRepository = {
     connection,
     `UPDATE orders
      SET stripe_payment_intent_id = ?,
-         payment_provider = 'stripe',
-         payment_status = 'requires_payment'
-     WHERE id = ?`,
-    [paymentIntentId, orderId],
+         payment_provider = 'stripe'
+     WHERE id = ?
+       AND payment_status = 'requires_payment'
+       AND payment_provider = 'stripe'
+       AND (stripe_payment_intent_id IS NULL OR stripe_payment_intent_id = ?)`,
+    [paymentIntentId, orderId, paymentIntentId],
   ),
 
   findPaymentByIntent: ({ paymentIntentId, connection }) => queryResult(
@@ -198,23 +204,90 @@ const buildPaymentModule = ({
   now = () => new Date(),
 } = {}) => {
   const timestamp = () => formatDate(now());
+  const terminalPaymentStatuses = new Set([
+    "succeeded",
+    "canceled",
+    "failed",
+    "refunded",
+  ]);
 
-  const createPaymentRecord = (data) => repository.createPaymentRecord({
-    data: {
-      order_id: data.order_id,
-      shop_id: data.shop_id,
-      stripe_payment_intent_id: data.stripe_payment_intent_id,
-      amount: data.amount,
-      amount_cents: data.amount_cents,
-      application_fee_amount: data.application_fee_amount,
-      currency: data.currency || "eur",
-      status: data.status,
-      created: timestamp(),
-    },
+  const paymentRecordData = (data) => ({
+    order_id: data.order_id || data.orderId,
+    shop_id: data.shop_id || data.shopId,
+    stripe_payment_intent_id: data.stripe_payment_intent_id,
+    amount: data.amount,
+    amount_cents: data.amount_cents,
+    application_fee_amount: data.application_fee_amount,
+    currency: data.currency || "eur",
+    status: data.status,
+    created: data.created || timestamp(),
+  });
+
+  const createPaymentRecord = (data) => repository.upsertPaymentRecord({
+    data: paymentRecordData(data),
   });
 
   const attachPaymentIntentToOrder = (orderId, paymentIntentId) => (
     repository.attachPaymentIntentToOrder({ orderId, paymentIntentId })
+  );
+
+  const persistPaymentIntentForOrder = (data) => runInTransaction(
+    async (connection) => {
+      const existingPayment = await repository.findPaymentByIntent({
+        paymentIntentId: data.stripe_payment_intent_id,
+        connection,
+      });
+      const order = await repository.findOrderById({
+        orderId: data.orderId,
+        shopId: data.shopId,
+        connection,
+      });
+      if (!order) return { attached: false, missing: true };
+      if (order.payment_status !== "requires_payment" || order.payment_provider !== "stripe") {
+        return {
+          attached: false,
+          terminal: true,
+          payment_status: order.payment_status,
+        };
+      }
+      if (order.stripe_payment_intent_id
+        && order.stripe_payment_intent_id !== data.stripe_payment_intent_id) {
+        return {
+          attached: false,
+          terminal: true,
+          payment_status: "payment_intent_already_attached",
+        };
+      }
+
+      if (existingPayment && terminalPaymentStatuses.has(existingPayment.status)) {
+        return {
+          attached: false,
+          terminal: true,
+          payment_status: existingPayment.status,
+        };
+      }
+
+      if (order.stripe_payment_intent_id !== data.stripe_payment_intent_id) {
+        const attachment = await repository.attachPaymentIntentToOrder({
+          orderId: data.orderId,
+          shopId: data.shopId,
+          paymentIntentId: data.stripe_payment_intent_id,
+          connection,
+        });
+        if (!attachment.affectedRows) {
+          return {
+            attached: false,
+            terminal: true,
+            payment_status: "order_transitioned",
+          };
+        }
+      }
+      await repository.upsertPaymentRecord({
+        data: paymentRecordData(data),
+        connection,
+      });
+      return { attached: true };
+    },
   );
 
   const getPaidOrderForRefund = (orderId, shopId) => (
@@ -408,6 +481,7 @@ const buildPaymentModule = ({
     markPaymentRefunded,
     markPaymentSucceeded,
     markStripeOrderPayAtCounter,
+    persistPaymentIntentForOrder,
   };
 };
 

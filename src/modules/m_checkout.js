@@ -168,6 +168,26 @@ const sqlRepository = {
     [orderId],
   ),
 
+  lockOrderForReservationBackfill: ({ orderId, connection }) => queryResult(
+    connection,
+    `SELECT id, shopid, operator, customerID, client_order_token
+     FROM orders
+     WHERE id = ?
+     LIMIT 1
+     FOR UPDATE`,
+    [orderId],
+  ).then((rows) => rows[0] || null),
+
+  getLegacyOrderDetails: ({ orderId, connection }) => queryResult(
+    connection,
+    `SELECT productid, SUM(qty) AS quantity
+     FROM orderdetail
+     WHERE orderid = ?
+     GROUP BY productid
+     ORDER BY productid`,
+    [orderId],
+  ),
+
   lockProducts: ({ shopId, productIds, connection }) => {
     const shopClause = shopId == null ? "" : " AND shopid = ?";
     const params = shopId == null ? [productIds] : [productIds, shopId];
@@ -362,6 +382,115 @@ const buildCheckoutModule = ({
         orderId: Number(orderId),
         connection,
       });
+      if (action === "commit" && reservations.length === 0) {
+        const order = await repository.lockOrderForReservationBackfill({
+          orderId: Number(orderId),
+          connection,
+        });
+        if (!order || order.client_order_token !== null) {
+          throw new DomainError(
+            409,
+            "RESERVATION_INTEGRITY_ERROR",
+            "Checkout stock reservations are missing",
+            { order_id: Number(orderId) },
+          );
+        }
+
+        const details = await repository.getLegacyOrderDetails({
+          orderId: Number(orderId),
+          connection,
+        });
+        const requirements = details.map((detail) => ({
+          productId: Number(detail.productid),
+          quantity: Number(detail.quantity),
+        })).filter((detail) => (
+          Number.isSafeInteger(detail.productId)
+          && detail.productId > 0
+          && Number.isSafeInteger(detail.quantity)
+          && detail.quantity > 0
+        ));
+        if (requirements.length === 0 || requirements.length !== details.length) {
+          throw new DomainError(
+            409,
+            "RESERVATION_INTEGRITY_ERROR",
+            "Legacy order stock requirements cannot be reconstructed",
+            { order_id: Number(orderId) },
+          );
+        }
+
+        const productIds = uniqueSortedIds(requirements.map((detail) => detail.productId));
+        const products = await repository.lockProducts({
+          shopId: order.shopid,
+          productIds,
+          connection,
+        });
+        const shortages = requirements.reduce((result, requirement) => {
+          const product = findById(products, requirement.productId);
+          const available = product ? Number(product.stock) : 0;
+          if (!product || available < requirement.quantity) {
+            result.push({
+              product_id: requirement.productId,
+              requested: requirement.quantity,
+              available,
+            });
+          }
+          return result;
+        }, []);
+        if (shortages.length) {
+          throw new DomainError(409, "INSUFFICIENT_STOCK", "Insufficient stock", {
+            shortages,
+          });
+        }
+
+        const timestamp = formatDate(now());
+        for (const requirement of requirements) {
+          const stockUpdate = await repository.adjustStock({
+            shopId: order.shopid,
+            productId: requirement.productId,
+            delta: -requirement.quantity,
+            connection,
+          });
+          if (!stockUpdate.affectedRows) {
+            throw new DomainError(409, "INSUFFICIENT_STOCK", "Insufficient stock", {
+              shortages: [{
+                product_id: requirement.productId,
+                requested: requirement.quantity,
+                available: 0,
+              }],
+            });
+          }
+          await repository.insertReservation({
+            reservation: {
+              order_id: Number(orderId),
+              product_id: requirement.productId,
+              quantity: requirement.quantity,
+              status: "committed",
+              expires_at: null,
+              created: timestamp,
+              updated: timestamp,
+            },
+            connection,
+          });
+          await repository.insertMovement({
+            movement: {
+              productid: requirement.productId,
+              category: "1",
+              qty: requirement.quantity,
+              operator: Number(operator),
+              remark: "Legacy checkout reservation committed",
+              created: timestamp,
+              updated: timestamp,
+            },
+            connection,
+          });
+        }
+        return {
+          orderId: Number(orderId),
+          status: action,
+          changed: requirements.length,
+          compatibility_backfill: true,
+        };
+      }
       const transitions = reservations.map((reservation) => ({
         reservation,
         nextStatus: nextReservationStatus(reservation.status, action),

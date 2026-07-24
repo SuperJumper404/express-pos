@@ -1555,6 +1555,21 @@ const makeCheckoutHarness = ({
     findOrderByToken: async ({ shopId, token }) => state.orders.find(
       (row) => row.shopid === shopId && row.client_order_token === token,
     ) || null,
+    lockOrderForReservationBackfill: async ({ orderId }) => state.orders.find(
+      (row) => row.id === Number(orderId),
+    ) || null,
+    getLegacyOrderDetails: async ({ orderId }) => {
+      const quantities = new Map();
+      for (const detail of state.details.filter((row) => row.orderid === Number(orderId))) {
+        quantities.set(
+          detail.productid,
+          (quantities.get(detail.productid) || 0) + Number(detail.qty),
+        );
+      }
+      return [...quantities.entries()]
+        .sort(([left], [right]) => left - right)
+        .map(([productid, quantity]) => ({ productid, quantity }));
+    },
     getProducts: async ({ productIds }) => productIds
       .filter((id) => state.products.has(id))
       .map((id) => ({ id, shopid: 7, name: `Product ${id}`, price: id === 10 ? 10 : 2, stock: state.products.get(id), archived: 0 })),
@@ -2001,6 +2016,74 @@ const runReservationContracts = async () => {
   assert.strictEqual(await expired.checkout.releaseExpiredReservations(), 1);
   assert.strictEqual(await expired.checkout.releaseExpiredReservations(), 0);
   assert.strictEqual(expired.getState().products.get(10), 10);
+
+  const legacy = makeCheckoutHarness();
+  legacy.getState().orders.push({
+    id: 66,
+    shopid: 7,
+    operator: 9,
+    customerID: 12,
+    client_order_token: null,
+  });
+  legacy.getState().details.push({
+    id: 77,
+    orderid: 66,
+    productid: 10,
+    qty: 2,
+    price: 10,
+    total: 20,
+  });
+  let legacyResult = await legacy.checkout.finalizeReservations({
+    orderId: 66,
+    status: "committed",
+    operator: 9,
+  });
+  assert.strictEqual(legacyResult.compatibility_backfill, true);
+  assert.strictEqual(legacy.getState().products.get(10), 8);
+  assert.deepStrictEqual(
+    legacy.getState().reservations.map((row) => ({
+      product_id: row.product_id,
+      quantity: row.quantity,
+      status: row.status,
+    })),
+    [{ product_id: 10, quantity: 2, status: "committed" }],
+  );
+  assert.strictEqual(legacy.getState().movements.length, 1);
+  legacyResult = await legacy.checkout.finalizeReservations({
+    orderId: 66,
+    status: "committed",
+    operator: 9,
+  });
+  assert.strictEqual(legacyResult.changed, 0);
+  assert.strictEqual(legacy.getState().products.get(10), 8);
+  assert.strictEqual(legacy.getState().movements.length, 1);
+
+  const corruptV2 = makeCheckoutHarness();
+  corruptV2.getState().orders.push({
+    id: 67,
+    shopid: 7,
+    operator: 9,
+    customerID: 12,
+    client_order_token: "v2-token-without-reservation",
+  });
+  corruptV2.getState().details.push({
+    id: 78,
+    orderid: 67,
+    productid: 10,
+    qty: 2,
+    price: 10,
+    total: 20,
+  });
+  await assert.rejects(
+    () => corruptV2.checkout.finalizeReservations({
+      orderId: 67,
+      status: "committed",
+      operator: 9,
+    }),
+    (error) => error.code === "RESERVATION_INTEGRITY_ERROR" && error.status === 409,
+  );
+  assert.strictEqual(corruptV2.getState().products.get(10), 10);
+  assert.strictEqual(corruptV2.getState().movements.length, 0);
 };
 
 const runCheckoutApiSurfaceContracts = async () => {
@@ -2102,7 +2185,7 @@ const cloneArchiveState = (state) => ({
   nextArchiveDetailId: state.nextArchiveDetailId,
 });
 
-const makeArchiveHarness = ({ failSnapshotCopy = false } = {}) => {
+const makeArchiveHarness = ({ failAfterActiveDeletion = false } = {}) => {
   let state = {
     orders: [{
       id: 42,
@@ -2203,9 +2286,6 @@ const makeArchiveHarness = ({ failSnapshotCopy = false } = {}) => {
       return { insertId: id };
     },
     insertArchiveSnapshot: async ({ snapshot }) => {
-      if (failSnapshotCopy && state.archiveSnapshots.length === 1) {
-        throw new Error("archive snapshot copy failed");
-      }
       state.archiveSnapshots.push({ id: state.archiveSnapshots.length + 1, ...snapshot });
       events.push(["insert-archive-snapshot", snapshot.archivesdetail_id]);
       return { insertId: state.archiveSnapshots.length };
@@ -2232,6 +2312,7 @@ const makeArchiveHarness = ({ failSnapshotCopy = false } = {}) => {
       const before = state.orders.length;
       state.orders = state.orders.filter((row) => row.id !== Number(orderId));
       events.push("delete-order");
+      if (failAfterActiveDeletion) throw new Error("post-delete archive failure");
       return { affectedRows: before - state.orders.length };
     },
     findActiveOrderDetails: async ({ orderId }) => state.details
@@ -2348,15 +2429,18 @@ const runArchiveSnapshotContracts = async () => {
   );
   assert.deepStrictEqual(archivedByToken, archived);
 
-  harness = makeArchiveHarness({ failSnapshotCopy: true });
+  harness = makeArchiveHarness({ failAfterActiveDeletion: true });
   await assert.rejects(
     () => harness.orderModule.mArchiveOrder(42, "Carte", 7),
-    /archive snapshot copy failed/,
+    /post-delete archive failure/,
   );
   assert.strictEqual(harness.getState().orders.length, 1);
   assert.strictEqual(harness.getState().details.length, 2);
   assert.strictEqual(harness.getState().activeSnapshots.length, 2);
+  assert.strictEqual(harness.getState().legacyCustomizations.length, 2);
   assert.strictEqual(harness.getState().archives.length, 0);
+  assert.strictEqual(harness.getState().archiveDetails.length, 0);
+  assert.strictEqual(harness.getState().archiveSnapshots.length, 0);
   assert.ok(harness.events.includes("rollback"));
 };
 

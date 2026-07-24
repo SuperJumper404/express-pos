@@ -28,6 +28,7 @@ const { getStripe } = require("../config/stripe");
 const {
   markPaymentCanceled,
   markPaymentSucceeded,
+  markStripeOrderPayAtCounter,
 } = require("../modules/m_payments");
 const {
   buildCheckoutController,
@@ -70,10 +71,20 @@ const cancelPendingStripePayment = async (order) => {
   await markPaymentCanceled(paymentIntentId);
 };
 
-const syncPendingStripeBeforeCashRegisterArchive = async (order) => {
-  if (!shouldCancelPendingStripePayment(order)) return order;
+const buildPendingStripeArchiveSync = ({
+  getStripe: getStripeClient = getStripe,
+  markPaymentSucceeded: commitSucceededPayment = markPaymentSucceeded,
+  markStripeOrderPayAtCounter: commitPayAtCounter = markStripeOrderPayAtCounter,
+  findOrderById = mFindOrderById,
+} = {}) => async (order) => {
+  if (!shouldCancelPendingStripePayment(order)) {
+    if (order.payment_provider === "stripe" && order.payment_status !== "paid") {
+      throw new Error("Commande Stripe annulee ou echouee non encaissable");
+    }
+    return order;
+  }
 
-  const stripe = getStripe();
+  const stripe = getStripeClient();
   const paymentIntentId = order.stripe_payment_intent_id;
   const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
 
@@ -81,9 +92,9 @@ const syncPendingStripeBeforeCashRegisterArchive = async (order) => {
     const charge = paymentIntent.latest_charge
       ? await stripe.charges.retrieve(paymentIntent.latest_charge)
       : null;
-    await markPaymentSucceeded(paymentIntent, charge);
+    await commitSucceededPayment(paymentIntent, charge);
 
-    const refreshedOrders = await mFindOrderById(order.id, order.shopid);
+    const refreshedOrders = await findOrderById(order.id, order.shopid);
     return refreshedOrders[0] || order;
   }
 
@@ -91,12 +102,13 @@ const syncPendingStripeBeforeCashRegisterArchive = async (order) => {
     await stripe.paymentIntents.cancel(paymentIntentId);
   }
 
-  await markPaymentCanceled(paymentIntentId);
-  return {
-    ...order,
-    payment_status: "canceled",
-  };
+  await commitPayAtCounter(order.id, order.shopid);
+  const refreshedOrders = await findOrderById(order.id, order.shopid);
+  return refreshedOrders[0] || order;
 };
+
+const syncPendingStripeBeforeCashRegisterArchive = buildPendingStripeArchiveSync();
+exports.buildPendingStripeArchiveSync = buildPendingStripeArchiveSync;
 
 exports.allOrder = async (req, res) => {
   mAllOrder(req.shopid)

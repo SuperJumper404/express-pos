@@ -21,9 +21,7 @@ const {
   mUpdateStripeAccount,
 } = require("../modules/m_shop");
 const {
-  attachPaymentIntentToOrder,
   cancelProvisionalStripeOrder,
-  createPaymentRecord,
   getPaidOrderForRefund,
   getPendingStripeOrderForCounter,
   markPaymentCanceled,
@@ -31,6 +29,7 @@ const {
   markPaymentRefunded,
   markPaymentSucceeded,
   markStripeOrderPayAtCounter,
+  persistPaymentIntentForOrder,
 } = require("../modules/m_payments");
 const { createCheckout } = require("../modules/m_checkout");
 
@@ -134,8 +133,7 @@ const buildQrTablePaymentIntentController = ({
   getShopInfo = mGetShopInfo,
   createCheckout: createStripeCheckout = createCheckout,
   getStripe: getStripeClient = getStripe,
-  attachPaymentIntentToOrder: attachIntent = attachPaymentIntentToOrder,
-  createPaymentRecord: insertPaymentRecord = createPaymentRecord,
+  persistPaymentIntentForOrder: persistPaymentIntent = persistPaymentIntentForOrder,
   cancelProvisionalStripeOrder: cancelProvisional = cancelProvisionalStripeOrder,
   publishableKey = envSTRIPEPUBLISHABLEKEY,
   paymentMethodConfigurationId = envSTRIPEPAYMENTMETHODCONFIGURATIONID,
@@ -212,10 +210,9 @@ const buildQrTablePaymentIntentController = ({
     paymentIntent = await getStripeClient().paymentIntents.create(stripeParams, {
       idempotencyKey: `qr-${req.shopid}-${body.client_order_token}`,
     });
-    await attachIntent(provisionalOrderId, paymentIntent.id);
-    await insertPaymentRecord({
-      order_id: provisionalOrderId,
-      shop_id: req.shopid,
+    const persistence = await persistPaymentIntent({
+      orderId: provisionalOrderId,
+      shopId: req.shopid,
       stripe_payment_intent_id: paymentIntent.id,
       amount: checkoutResult.total,
       amount_cents: toStripeAmount(checkoutResult.total),
@@ -223,6 +220,20 @@ const buildQrTablePaymentIntentController = ({
       currency: stripeParams.currency,
       status: paymentIntent.status,
     });
+    if (!persistence.attached) {
+      if (paymentIntent.status !== "canceled") {
+        try {
+          await getStripeClient().paymentIntents.cancel(paymentIntent.id);
+        } catch (cancelError) {
+          logger.error("Stripe terminal PaymentIntent cleanup failed", cancelError);
+        }
+      }
+      provisionalOrderId = null;
+      return custom(res, 409, "Cette commande a deja ete traitee.", null, {
+        orderId: checkoutResult.orderId,
+        payment_status: persistence.payment_status || null,
+      });
+    }
 
     success(res, "Paiement Stripe cree.", null, {
       orderId: provisionalOrderId,
