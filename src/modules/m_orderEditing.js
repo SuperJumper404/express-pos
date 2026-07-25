@@ -100,6 +100,25 @@ const sqlRepository = {
     )
   ),
 
+  lockLegacyCustomizations: ({ detailIds, shopId, connection }) => (
+    detailIds.length === 0 ? Promise.resolve([]) : queryResult(
+      connection,
+      `SELECT orders_customization.order_details_id,
+              orders_customization.product_choice_id,
+              product_choice.name,
+              product_choice.price
+       FROM orders_customization
+       JOIN orderdetail ON orderdetail.id = orders_customization.order_details_id
+       JOIN orders ON orders.id = orderdetail.orderid
+       LEFT JOIN product_choice
+         ON product_choice.id = orders_customization.product_choice_id
+       WHERE orders_customization.order_details_id IN (?) AND orders.shopid = ?
+       ORDER BY orders_customization.order_details_id, orders_customization.id
+       FOR UPDATE`,
+      [detailIds, shopId],
+    )
+  ),
+
   lockReservations: ({ orderId, shopId, connection }) => queryResult(
     connection,
     `SELECT reservations.*
@@ -345,15 +364,24 @@ const requirementDeltas = (before, after) => new Map(
     ]),
 );
 
-const revisionItems = (details, snapshots) => details.map((detail) => ({
-  ...detail,
-  selections: snapshots
-    .filter((snapshot) => Number(snapshot.orderdetail_id) === Number(detail.id))
-    .map((snapshot) => ({
-      product_customization_step_choice_id:
-        snapshot.product_customization_step_choice_id,
-    })),
-}));
+const revisionItems = (details, snapshots, legacyCustomizations = []) => {
+  const snapshotDetailIds = new Set(
+    snapshots.map((snapshot) => Number(snapshot.orderdetail_id)),
+  );
+  return details.map((detail) => ({
+    ...detail,
+    selections: snapshotDetailIds.has(Number(detail.id))
+      ? snapshots
+        .filter((snapshot) => Number(snapshot.orderdetail_id) === Number(detail.id))
+        .map((snapshot) => ({
+          product_customization_step_choice_id:
+            snapshot.product_customization_step_choice_id,
+        }))
+      : legacyCustomizations
+        .filter((selection) => Number(selection.order_details_id) === Number(detail.id))
+        .map(() => ({ product_customization_step_choice_id: null })),
+  }));
+};
 
 const RECONFIGURATION_ERROR_CODES = new Set([
   "CUSTOMIZATION_CHOICE_NOT_ALLOWED",
@@ -465,8 +493,19 @@ const buildOrderEditingModule = ({
         shopId: amendment.shopId,
         connection,
       });
+      const snapshotDetailIds = new Set(
+        snapshots.map((snapshot) => Number(snapshot.orderdetail_id)),
+      );
+      const legacyCustomizations = await repository.lockLegacyCustomizations({
+        detailIds: detailIds.filter((detailId) => !snapshotDetailIds.has(detailId)),
+        shopId: amendment.shopId,
+        connection,
+      });
 
-      const currentRevision = buildContentRevision(order, revisionItems(details, snapshots));
+      const currentRevision = buildContentRevision(
+        order,
+        revisionItems(details, snapshots, legacyCustomizations),
+      );
       if (currentRevision !== amendment.contentRevision) {
         throw new DomainError(
           409,

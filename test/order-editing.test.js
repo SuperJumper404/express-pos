@@ -228,6 +228,7 @@ const makeAmendHarness = ({
   product11Stock = 1,
   product12Stock = 5,
   failSnapshotInsert = false,
+  legacy = false,
   reservationsReleased = false,
 } = {}) => {
   let state = {
@@ -258,7 +259,14 @@ const makeAmendHarness = ({
       unit_extra_price: 1,
       linked_product_id: 11,
     }],
-    legacyCustomizations: [{ id: 1, order_id: 42, order_details_id: 71 }],
+    legacyCustomizations: legacy ? [{
+      id: 1,
+      order_id: 42,
+      order_details_id: 71,
+      product_choice_id: 77,
+      name: "Ancien choix",
+      price: "1.25",
+    }] : [],
     reservations: [
       { id: 1, order_id: 42, product_id: 10, quantity: 2, status: reservationsReleased ? "released" : "committed" },
       { id: 2, order_id: 42, product_id: 11, quantity: 2, status: reservationsReleased ? "released" : "committed" },
@@ -284,6 +292,20 @@ const makeAmendHarness = ({
     }
   };
   const repository = {
+    findOrder: async ({ orderId, shopId }) => (
+      state.order.id === Number(orderId) && state.order.shopid === Number(shopId)
+        ? { ...state.order }
+        : null
+    ),
+    findOrderDetails: async ({ orderId }) => state.details
+      .filter((row) => row.orderid === Number(orderId))
+      .map((row) => ({ ...row })),
+    findSnapshots: async ({ detailIds }) => state.snapshots
+      .filter((row) => detailIds.includes(row.orderdetail_id))
+      .map((row) => ({ ...row })),
+    findLegacyCustomizations: async ({ detailIds }) => state.legacyCustomizations
+      .filter((row) => detailIds.includes(row.order_details_id))
+      .map((row) => ({ ...row })),
     lockOrder: async ({ orderId, shopId }) => {
       events.push("lock-order");
       return state.order.id === Number(orderId) && state.order.shopid === Number(shopId)
@@ -297,6 +319,12 @@ const makeAmendHarness = ({
     lockSnapshots: async ({ detailIds }) => {
       events.push("lock-snapshots");
       return state.snapshots.filter((row) => detailIds.includes(row.orderdetail_id))
+        .map((row) => ({ ...row }));
+    },
+    lockLegacyCustomizations: async ({ detailIds }) => {
+      events.push("lock-legacy-customizations");
+      return state.legacyCustomizations
+        .filter((row) => detailIds.includes(row.order_details_id))
         .map((row) => ({ ...row }));
     },
     lockReservations: async ({ orderId }) => {
@@ -589,6 +617,42 @@ const runEmptyCartCancellationContract = async () => {
   )));
 };
 
+const runLegacyRevisionSymmetryContract = async () => {
+  let harness = makeAmendHarness({ legacy: true });
+  let editable = await harness.editing.getEditableOrder({ orderId: 42, shopId: 7 });
+  assert.strictEqual(editable.items[1].requires_reconfiguration, true);
+  assert.strictEqual(
+    editable.items[1].selections[0].product_customization_step_choice_id,
+    null,
+  );
+  await assert.rejects(
+    () => harness.editing.amendOrder({
+      orderId: 42,
+      shopId: 7,
+      operatorId: 9,
+      contentRevision: editable.content_revision,
+      expectedTotal: 10,
+      items: [{ productId: 10, quantity: 1, selectedChoiceIds: [999] }],
+    }),
+    (error) => error.code === "ORDER_RECONFIGURATION_REQUIRED",
+    "the GET revision must pass before legacy reconfiguration validation",
+  );
+
+  harness = makeAmendHarness({ legacy: true });
+  editable = await harness.editing.getEditableOrder({ orderId: 42, shopId: 7 });
+  const canceled = await harness.editing.amendOrder({
+    orderId: 42,
+    shopId: 7,
+    operatorId: 9,
+    contentRevision: editable.content_revision,
+    expectedTotal: 0,
+    items: [],
+  });
+  assert.strictEqual(canceled.canceled, true);
+  assert.strictEqual(harness.getState().order.status, 4);
+  assert.strictEqual(harness.getState().legacyCustomizations.length, 0);
+};
+
 const runAmendControllerContracts = async () => {
   const calls = [];
   const controller = buildAmendOrderController({
@@ -670,6 +734,7 @@ runEditableReadContracts()
   .then(runControllerContracts)
   .then(runAmendOrderContracts)
   .then(runEmptyCartCancellationContract)
+  .then(runLegacyRevisionSymmetryContract)
   .then(runAmendControllerContracts)
   .then(runRouterContract)
   .then(() => console.log("order editing tests passed"))
