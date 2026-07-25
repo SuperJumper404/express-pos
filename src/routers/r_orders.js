@@ -1,10 +1,12 @@
 const orders = require("../controllers/c_orders");
+const orderEditing = require("../controllers/c_orderEditing");
 const { authentication } = require("../helpers/middleware/auth");
 const express = require("express");
 const routers = express.Router();
 
 routers
   .get("/orders", authentication, orders.allOrder)
+  .get("/orders/:id/edit", authentication, orderEditing.getEditableOrder)
   .get("/detailorder/:id", authentication, orders.detailOrder)
   .post("/orders/checkout", authentication, orders.checkout)
   // Legacy split-write endpoints. New checkout clients must use /orders/checkout.
