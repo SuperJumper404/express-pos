@@ -7,6 +7,7 @@ const routers = express.Router();
 routers
   .get("/orders", authentication, orders.allOrder)
   .get("/orders/:id/edit", authentication, orderEditing.getEditableOrder)
+  .patch("/orders/:id/items", authentication, orderEditing.amendOrder)
   .get("/detailorder/:id", authentication, orders.detailOrder)
   .post("/orders/checkout", authentication, orders.checkout)
   // Legacy split-write endpoints. New checkout clients must use /orders/checkout.
