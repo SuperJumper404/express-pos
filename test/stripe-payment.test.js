@@ -1107,6 +1107,7 @@ const runStripeCheckoutControllerContracts = async () => {
     customer: request.body.customer,
     items: [{ productId: 10, quantity: 2, selectedChoiceIds: [101] }],
     expectedTotal: "23.00",
+    isTakeaway: false,
     clientOrderToken: "stripe-token-1",
     paymentMode: "stripe",
   }]);
@@ -1139,6 +1140,7 @@ const runStripeCheckoutControllerContracts = async () => {
     customer: { id: 13, name: "Grace", phone: "0304", remark: "Table 8" },
     items: [{ productId: 10, quantity: 1, selectedChoiceIds: [101] }],
     expectedTotal: "11.50",
+    isTakeaway: false,
     clientOrderToken: "stripe-token-legacy",
     paymentMode: "stripe",
   });
