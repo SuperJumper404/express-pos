@@ -35,7 +35,6 @@ const {
   createCheckout,
 } = require("../modules/m_checkout");
 const {
-  assertOrderStatusTransition,
   transitionOrderStatus,
 } = require("../modules/m_orderTransitions");
 
@@ -293,7 +292,6 @@ exports.addDetailOrder = (req, res) => {
 };
 const buildUpdateOrderController = ({
   transitionOrderStatus: transitionStatus = transitionOrderStatus,
-  findOrderById = mFindOrderById,
   cancelPendingStripePayment: syncCanceledPayment = cancelPendingStripePayment,
   markPaymentCanceled: settleCanceledPayment = markPaymentCanceled,
 } = {}) => async (req, res) => {
@@ -305,40 +303,25 @@ const buildUpdateOrderController = ({
     return custom(res, 400, "Requête invalide.", null, null);
   }
 
-  let canceledPaymentIntentId = null;
-  let localCancellationError;
+  let cancellationError;
   try {
-    if (nextStatus === ORDER_STATUSES.CANCELED) {
-      const orders = await findOrderById(orderId, shopId);
-      if (!orders.length) {
-        return custom(res, 404, "Commande introuvable.", null, null);
-      }
-      assertOrderStatusTransition(orders[0], nextStatus);
-      try {
-        canceledPaymentIntentId = await syncCanceledPayment(orders[0]);
-      } catch (error) {
-        return failed(
-          res,
-          "Erreur lors de l'annulation du paiement Stripe.",
-          error.message,
-        );
-      }
-    }
-
     const { result } = await transitionStatus({
       orderId,
       shopId,
       operator,
       nextStatus,
-      ...(canceledPaymentIntentId && {
+      ...(nextStatus === ORDER_STATUSES.CANCELED && {
         beforeTransition: async ({ order, connection }) => {
           try {
-            await settleCanceledPayment(
-              canceledPaymentIntentId,
-              { connection, order },
-            );
+            const paymentIntentId = await syncCanceledPayment(order);
+            if (paymentIntentId) {
+              await settleCanceledPayment(
+                paymentIntentId,
+                { connection, order },
+              );
+            }
           } catch (error) {
-            localCancellationError = error;
+            cancellationError = error;
             throw error;
           }
         },
@@ -349,7 +332,7 @@ const buildUpdateOrderController = ({
     }
     return success(res, "Commande mise à jour avec succès.", null, null);
   } catch (error) {
-    if (error === localCancellationError) {
+    if (error === cancellationError) {
       return failed(
         res,
         "Erreur lors de l'annulation du paiement Stripe.",
