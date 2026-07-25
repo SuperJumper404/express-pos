@@ -55,6 +55,7 @@ const canonicalPayload = (input) => {
       remark: customer.remark == null ? null : String(customer.remark).trim(),
     },
     expected_total: parseMoney(input.expectedTotal),
+    is_takeaway: input.isTakeaway === true,
     items,
     payment_mode: typeof input.paymentMode === "string"
       ? input.paymentMode.trim().toLowerCase()
@@ -73,6 +74,13 @@ const invalidRequest = (field) => new DomainError(
   "Invalid checkout request",
   { field },
 );
+
+const normalizeBoolean = (value, field, fallback = false) => {
+  if (value === undefined || value === null || value === "") return fallback;
+  if ([true, 1, "1"].includes(value)) return true;
+  if ([false, 0, "0"].includes(value)) return false;
+  throw invalidRequest(field);
+};
 
 const comparableChoiceIds = (values) => {
   if (!Array.isArray(values)) return values;
@@ -119,6 +127,7 @@ const normalizeCheckoutRequestBody = (body = {}, { paymentModeOverride } = {}) =
     customer,
     items,
     expectedTotal: body.expected_total,
+    isTakeaway: normalizeBoolean(body.is_takeaway, "is_takeaway"),
     clientOrderToken: body.client_order_token,
     paymentMode: paymentModeOverride !== undefined
       ? paymentModeOverride
@@ -160,6 +169,7 @@ const validateCheckoutInput = (input = {}) => {
   if (typeof input.paymentMode !== "string" || !input.paymentMode.trim()) {
     throw invalidRequest("payment_mode");
   }
+  const isTakeaway = normalizeBoolean(input.isTakeaway, "is_takeaway");
 
   return {
     shopId: Number(input.shopId),
@@ -172,6 +182,7 @@ const validateCheckoutInput = (input = {}) => {
     },
     items,
     expectedTotal,
+    isTakeaway,
     clientOrderToken: input.clientOrderToken.trim(),
     paymentMode: input.paymentMode.trim().toLowerCase(),
   };
@@ -638,6 +649,7 @@ const buildCheckoutModule = ({
           created: timestamp,
           finished: timestamp,
           remark: checkout.customer.remark,
+          is_takeaway: checkout.isTakeaway ? 1 : 0,
           client_order_token: checkout.clientOrderToken,
           client_order_payload_hash: payloadHash,
         },

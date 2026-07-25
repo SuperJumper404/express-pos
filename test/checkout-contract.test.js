@@ -1866,6 +1866,11 @@ const runTransactionalCheckoutContracts = async () => {
     canonicalPayloadHash(checkoutInput()),
     "authenticated context is not part of the canonical request body",
   );
+  assert.notStrictEqual(
+    canonicalPayloadHash(checkoutInput({ isTakeaway: false })),
+    canonicalPayloadHash(checkoutInput({ isTakeaway: true })),
+    "takeaway packaging must be part of the idempotency hash",
+  );
 
   const replayHash = canonicalPayloadHash(checkoutInput());
   let harness = makeCheckoutHarness({
@@ -1925,7 +1930,10 @@ const runTransactionalCheckoutContracts = async () => {
   assert.ok(harness.events.includes("rollback"));
 
   harness = makeCheckoutHarness();
-  result = await harness.checkout.createCheckout(harness.input);
+  result = await harness.checkout.createCheckout({
+    ...harness.input,
+    isTakeaway: true,
+  });
   assert.deepStrictEqual(result, {
     orderId: 500,
     total: 23,
@@ -1940,6 +1948,8 @@ const runTransactionalCheckoutContracts = async () => {
   assert.strictEqual(harness.getState().reservations.length, 2);
   assert.ok(harness.getState().reservations.every((row) => row.status === "committed"));
   assert.strictEqual(harness.getState().movements.length, 2);
+  assert.strictEqual(harness.getState().orders[0].is_takeaway, 1);
+  assert.strictEqual(harness.getState().orders[0].customerID, 12);
 
   harness = makeCheckoutHarness({ paymentMode: "stripe" });
   result = await harness.checkout.createCheckout(harness.input);
@@ -2021,6 +2031,10 @@ const runTransactionalCheckoutContracts = async () => {
   await assert.rejects(
     () => harness.checkout.createCheckout(checkoutInput({ shopId: 0 })),
     (error) => error.code === "CHECKOUT_REQUEST_INVALID",
+  );
+  await assert.rejects(
+    () => harness.checkout.createCheckout(checkoutInput({ isTakeaway: "yes" })),
+    (error) => error.code === "CHECKOUT_REQUEST_INVALID" && error.field === "is_takeaway",
   );
 
   for (const [field, invalidInput] of [
@@ -2234,6 +2248,7 @@ const runCheckoutApiSurfaceContracts = async () => {
     customer: { id: "12", name: "Ada", phone: "0102", remark: "Sans sac" },
     items: [{ productId: "10", quantity: 2, selectedChoiceIds: [102, 101] }],
     expectedTotal: "23.00",
+    isTakeaway: false,
     clientOrderToken: "checkout-token-1",
     paymentMode: "cash",
   }]);
@@ -2260,6 +2275,7 @@ const runCheckoutApiSurfaceContracts = async () => {
     customer: { id: "13", name: "Grace", phone: "0304", remark: "Table 8" },
     items: [{ productId: "10", quantity: 1, selectedChoiceIds: [101] }],
     expectedTotal: "11.50",
+    isTakeaway: false,
     clientOrderToken: "checkout-token-2",
     paymentMode: "card",
   });
