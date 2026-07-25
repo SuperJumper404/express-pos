@@ -44,6 +44,7 @@ const buildHarness = () => {
     ordernumber: "0042",
     customer: "Ada",
     subtotal: "23.00",
+    is_takeaway: 1,
   }, {
     id: 43,
     shopid: 7,
@@ -158,6 +159,10 @@ const runRevisionContracts = () => {
     ordered[0],
   ];
   assert.strictEqual(buildContentRevision(order, ordered), buildContentRevision(order, reordered));
+  assert.notStrictEqual(
+    buildContentRevision({ id: 42, is_takeaway: 0 }, ordered),
+    buildContentRevision({ id: 42, is_takeaway: 1 }, ordered),
+  );
 };
 
 const runEditableReadContracts = async () => {
@@ -165,6 +170,7 @@ const runEditableReadContracts = async () => {
   const unpaid = await editing.getEditableOrder({ orderId: 42, shopId: 7 });
   assert.strictEqual(unpaid.order.id, 42);
   assert.strictEqual(unpaid.order.payment_status, "unpaid");
+  assert.strictEqual(unpaid.order.is_takeaway, true);
   assert.strictEqual(unpaid.items[0].orderdetail_id, 70);
   assert.strictEqual(unpaid.items[0].product_id, 10);
   assert.strictEqual(unpaid.items[0].quantity, 2);
@@ -507,6 +513,11 @@ const runAmendOrderContracts = async () => {
   let harness = makeAmendHarness();
   const result = await harness.amend();
   assert.strictEqual(result.order_id, 42);
+  assert.strictEqual(harness.getState().order.is_takeaway, 0);
+
+  harness = makeAmendHarness();
+  await harness.amend({ isTakeaway: true });
+  assert.strictEqual(harness.getState().order.is_takeaway, 1);
   assert.strictEqual(result.total, 43);
   assert.strictEqual(result.canceled, false);
   assert.strictEqual(harness.getState().order.status, 1);

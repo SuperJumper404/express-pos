@@ -233,6 +233,7 @@ const sortedChoiceIds = (item) => (item.selections || [])
 const buildContentRevision = (order = {}, items = []) => {
   const canonicalContent = {
     order_id: valueForRevision(order.id),
+    is_takeaway: [true, 1, "1"].includes(order.is_takeaway),
     items: [...items]
       .sort((left, right) => Number(left.orderdetail_id || left.id)
         - Number(right.orderdetail_id || right.id))
@@ -283,6 +284,13 @@ const invalidEditRequest = (field) => new DomainError(
   { field },
 );
 
+const normalizeOptionalBoolean = (value, field) => {
+  if (value === undefined) return undefined;
+  if ([true, 1, "1"].includes(value)) return true;
+  if ([false, 0, "0"].includes(value)) return false;
+  throw invalidEditRequest(field);
+};
+
 const normalizeEditItems = (items) => {
   if (!Array.isArray(items)) throw invalidEditRequest("items");
   return items.map((item, index) => {
@@ -322,6 +330,7 @@ const validateAmendInput = (input = {}) => {
     operatorId: Number(input.operatorId),
     contentRevision: input.contentRevision.trim(),
     expectedTotal,
+    isTakeaway: normalizeOptionalBoolean(input.isTakeaway, "is_takeaway"),
     items: normalizeEditItems(input.items),
   };
 };
@@ -451,7 +460,10 @@ const buildOrderEditingModule = ({
     });
 
     return {
-      order: { ...order },
+      order: {
+        ...order,
+        is_takeaway: [true, 1, "1"].includes(order.is_takeaway),
+      },
       items,
       content_revision: buildContentRevision(order, items),
     };
@@ -650,9 +662,13 @@ const buildOrderEditingModule = ({
       }
 
       const canceled = amendment.items.length === 0;
+      const nextIsTakeaway = amendment.isTakeaway === undefined
+        ? [true, 1, "1"].includes(order.is_takeaway)
+        : amendment.isTakeaway;
       const orderChanges = {
         subtotal: quote.total,
         finished: timestamp,
+        is_takeaway: nextIsTakeaway ? 1 : 0,
         ...(canceled && { status: 4 }),
       };
       const orderUpdate = await repository.updateOrder({

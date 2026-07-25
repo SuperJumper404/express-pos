@@ -39,7 +39,12 @@ const allowedKeys = (value, keys) => (
 );
 
 const normalizeAmendBody = (body) => {
-  const topLevelKeys = new Set(["content_revision", "expected_total", "items"]);
+  const topLevelKeys = new Set([
+    "content_revision",
+    "expected_total",
+    "is_takeaway",
+    "items",
+  ]);
   if (!allowedKeys(body, topLevelKeys)) throw invalidRequest("body");
   if (!Array.isArray(body.items)) throw invalidRequest("items");
   const itemKeys = new Set([
@@ -61,9 +66,17 @@ const normalizeAmendBody = (body) => {
         : selectedChoiceIds.map(Number),
     };
   });
+  const isTakeaway = body.is_takeaway;
+  if (isTakeaway !== undefined
+    && ![true, false, 1, 0, "1", "0"].includes(isTakeaway)) {
+    throw invalidRequest("is_takeaway");
+  }
   return {
     contentRevision: body.content_revision,
     expectedTotal: body.expected_total,
+    ...(isTakeaway !== undefined && {
+      isTakeaway: [true, 1, "1"].includes(isTakeaway),
+    }),
     items,
   };
 };
