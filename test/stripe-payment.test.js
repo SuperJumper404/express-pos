@@ -17,6 +17,7 @@ const { buildCashRegisterArchiveFields } = require("../src/helpers/cashRegisterP
 const { parsePositiveIntegerEnv } = require("../src/helpers/env");
 const { buildCheckoutModule } = require("../src/modules/m_checkout");
 const { buildPaymentModule } = require("../src/modules/m_payments");
+const { buildOrderEditingModule } = require("../src/modules/m_orderEditing");
 const callbackDbPath = require.resolve("../src/config/db");
 require.cache[callbackDbPath] = {
   exports: { query: () => { throw new Error("unexpected legacy DB query"); } },
@@ -256,6 +257,7 @@ const makeStripeLifecycleHarness = ({
         (row) => row.id === Number(orderId) && (shopId == null || row.shopid === Number(shopId)),
       ) || null;
     },
+    lockOrder: (input) => paymentRepository.findOrderById(input),
     attachPaymentIntentToOrder: async ({ orderId, shopId, paymentIntentId }) => {
       if (failAttachment) throw new Error("SQL attach failure");
       const order = state.orders.find(
@@ -371,6 +373,115 @@ const succeededIntent = {
   id: "pi_42",
   latest_charge: "ch_42",
   payment_method_types: ["card"],
+};
+
+const runPaymentEditRaceContract = async () => {
+  const makeDeferred = () => {
+    let resolve;
+    const promise = new Promise((done) => { resolve = done; });
+    return { promise, resolve };
+  };
+  const state = {
+    order: {
+      id: 42,
+      shopid: 7,
+      customerID: 12,
+      operator: 9,
+      status: ORDER_STATUSES.PENDING,
+      payment_status: "requires_payment",
+      payment_provider: "stripe",
+    },
+    payment: {
+      order_id: 42,
+      stripe_payment_intent_id: "pi_42",
+      status: "requires_payment",
+    },
+  };
+  let lockTail = Promise.resolve();
+  const editLockAttempted = makeDeferred();
+  let editPassedEligibility = false;
+  const runInTransaction = async (work) => {
+    const connection = {};
+    try {
+      return await work(connection);
+    } finally {
+      if (connection.releaseOrder) connection.releaseOrder();
+    }
+  };
+  const acquireOrderLock = async (connection, owner) => {
+    const previous = lockTail;
+    let release;
+    lockTail = new Promise((done) => { release = done; });
+    if (owner === "edit") editLockAttempted.resolve();
+    await previous;
+    connection.releaseOrder = release;
+    return state.order;
+  };
+  const paymentSettlementEntered = makeDeferred();
+  const finishPaymentSettlement = makeDeferred();
+  const payments = buildPaymentModule({
+    withTransaction: runInTransaction,
+    repository: {
+      findPaymentByIntent: async () => state.payment,
+      findOrderById: async () => state.order,
+      lockOrder: async ({ connection }) => acquireOrderLock(connection, "payment"),
+      updatePaymentSucceeded: async () => {
+        state.payment.status = "succeeded";
+        return { affectedRows: 1 };
+      },
+      updateOrderSucceeded: async () => {
+        state.order.payment_status = "paid";
+        return { affectedRows: 1 };
+      },
+    },
+    finalizeReservations: async () => {
+      paymentSettlementEntered.resolve();
+      await finishPaymentSettlement.promise;
+      return { changed: 1 };
+    },
+    now: () => new Date("2026-07-24T12:00:00.000Z"),
+  });
+  const editing = buildOrderEditingModule({
+    withTransaction: runInTransaction,
+    repository: {
+      lockOrder: ({ connection }) => acquireOrderLock(connection, "edit"),
+      lockDetails: async () => {
+        editPassedEligibility = true;
+        throw new Error("edit crossed eligibility while payment was settling");
+      },
+    },
+  });
+
+  const payment = payments.markPaymentSucceeded(succeededIntent);
+  await paymentSettlementEntered.promise;
+  const amendment = editing.amendOrder({
+    orderId: 42,
+    shopId: 7,
+    operatorId: 9,
+    contentRevision: "stale-revision",
+    expectedTotal: 0,
+    items: [],
+  }).then(
+    (value) => ({ value }),
+    (error) => ({ error }),
+  );
+  await editLockAttempted.promise;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.strictEqual(
+    editPassedEligibility,
+    false,
+    "an edit waits on the order row while payment reservations are finalized",
+  );
+
+  finishPaymentSettlement.resolve();
+  await payment;
+  const amendmentOutcome = await amendment;
+  assert.strictEqual(
+    amendmentOutcome.error && amendmentOutcome.error.code,
+    "ORDER_NOT_EDITABLE",
+    "the edit re-checks eligibility after the payment commits",
+  );
+  assert.strictEqual(state.order.payment_status, "paid");
 };
 
 const runStripeReservationContracts = async () => {
@@ -1339,7 +1450,8 @@ const runStripeCancellationControllerContracts = async () => {
   assert.strictEqual(raceReadCount, 2);
 };
 
-runStripeReservationContracts()
+runPaymentEditRaceContract()
+  .then(runStripeReservationContracts)
   .then(runCashRegisterArchiveContract)
   .then(runStripeCheckoutControllerContracts)
   .then(runStripeCancellationControllerContracts)

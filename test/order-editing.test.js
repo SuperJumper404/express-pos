@@ -1,6 +1,7 @@
 const assert = require("assert");
 const fs = require("fs");
 const DomainError = require("../src/helpers/domainError");
+const { ORDER_STATUSES } = require("../src/helpers/orderStatus");
 const {
   buildOrderEditingModule,
   buildContentRevision,
@@ -10,6 +11,14 @@ const {
   buildOrderEditingController,
   buildAmendOrderController,
 } = require("../src/controllers/c_orderEditing");
+const callbackDbPath = require.resolve("../src/config/db");
+require.cache[callbackDbPath] = {
+  exports: { query: () => { throw new Error("unexpected legacy DB query"); } },
+};
+const { buildUpdateOrderController } = require("../src/controllers/c_orders");
+const {
+  buildOrderTransitionModule,
+} = require("../src/modules/m_orderTransitions");
 
 const makeResponse = () => {
   const response = {};
@@ -728,6 +737,138 @@ const runAmendControllerContracts = async () => {
   });
 };
 
+const deferred = () => {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+};
+
+const runPreparationEditRaceContract = async () => {
+  const state = {
+    order: {
+      id: 42,
+      shopid: 7,
+      status: ORDER_STATUSES.PENDING,
+      payment_status: "unpaid",
+    },
+  };
+  let lockTail = Promise.resolve();
+  let lockCount = 0;
+  const runInTransaction = async (work) => {
+    const connection = {};
+    try {
+      return await work(connection);
+    } finally {
+      if (connection.releaseOrder) connection.releaseOrder();
+    }
+  };
+  const lockOrder = async ({ connection }) => {
+    const previous = lockTail;
+    let release;
+    lockTail = new Promise((done) => { release = done; });
+    await previous;
+    lockCount += 1;
+    connection.releaseOrder = release;
+    return state.order;
+  };
+  const transitionEntered = deferred();
+  const finishTransition = deferred();
+  const transitions = buildOrderTransitionModule({
+    withTransaction: runInTransaction,
+    repository: {
+      lockOrder,
+      updateStatus: async ({ nextStatus }) => {
+        transitionEntered.resolve();
+        await finishTransition.promise;
+        state.order.status = nextStatus;
+        return { affectedRows: 1 };
+      },
+    },
+  });
+  const editing = buildOrderEditingModule({
+    withTransaction: runInTransaction,
+    repository: { lockOrder },
+  });
+
+  const preparation = transitions.transitionOrderStatus({
+    orderId: 42,
+    shopId: 7,
+    operator: 9,
+    nextStatus: ORDER_STATUSES.PREPARING,
+  });
+  await transitionEntered.promise;
+  assert.strictEqual(lockCount, 1, "preparation owns the order lock before updating status");
+  const amendment = editing.amendOrder({
+    orderId: 42,
+    shopId: 7,
+    operatorId: 9,
+    contentRevision: "stale-revision",
+    expectedTotal: 0,
+    items: [],
+  });
+  finishTransition.resolve();
+
+  await preparation;
+  await assert.rejects(
+    amendment,
+    (error) => error.code === "ORDER_NOT_EDITABLE",
+    "the edit must re-read PREPARING after waiting for the transition lock",
+  );
+  assert.strictEqual(state.order.status, ORDER_STATUSES.PREPARING);
+};
+
+const runTransitionValidationContract = async () => {
+  let updates = 0;
+  const transitions = buildOrderTransitionModule({
+    withTransaction: async (work) => work({ transaction: true }),
+    repository: {
+      lockOrder: async () => ({
+        id: 42,
+        shopid: 7,
+        status: ORDER_STATUSES.PENDING,
+      }),
+      updateStatus: async () => {
+        updates += 1;
+        return { affectedRows: 1 };
+      },
+    },
+  });
+  await assert.rejects(
+    () => transitions.transitionOrderStatus({
+      orderId: 42,
+      shopId: 7,
+      operator: 9,
+      nextStatus: ORDER_STATUSES.FINISHED,
+    }),
+    (error) => error.code === "ORDER_STATUS_TRANSITION_INVALID" && error.status === 422,
+  );
+  assert.strictEqual(updates, 0, "an invalid transition must not update the order");
+};
+
+const runStatusControllerContract = async () => {
+  let received;
+  const controller = buildUpdateOrderController({
+    transitionOrderStatus: async (input) => {
+      received = input;
+      return { result: { affectedRows: 1 } };
+    },
+  });
+  const response = makeResponse();
+  await controller({
+    params: { id: "42" },
+    shopid: 7,
+    id: 9,
+    body: { operator: 999, status: ORDER_STATUSES.PREPARING, subtotal: 999 },
+  }, response);
+  assert.deepStrictEqual(received, {
+    orderId: 42,
+    shopId: 7,
+    operator: 9,
+    nextStatus: ORDER_STATUSES.PREPARING,
+  });
+  assert.strictEqual(response.statusCode, 200);
+};
+
 runEligibilityContracts();
 runRevisionContracts();
 runEditableReadContracts()
@@ -736,6 +877,9 @@ runEditableReadContracts()
   .then(runEmptyCartCancellationContract)
   .then(runLegacyRevisionSymmetryContract)
   .then(runAmendControllerContracts)
+  .then(runPreparationEditRaceContract)
+  .then(runTransitionValidationContract)
+  .then(runStatusControllerContract)
   .then(runRouterContract)
   .then(() => console.log("order editing tests passed"))
   .catch((error) => {

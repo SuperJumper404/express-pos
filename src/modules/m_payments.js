@@ -62,6 +62,18 @@ const sqlRepository = {
     ).then((rows) => rows[0] || null);
   },
 
+  lockOrder: ({ orderId, shopId, connection }) => {
+    const shopClause = shopId == null ? "" : " AND shopid = ?";
+    const params = shopId == null ? [orderId] : [orderId, shopId];
+    return queryResult(
+      connection,
+      `SELECT * FROM orders
+       WHERE id = ?${shopClause}
+       LIMIT 1 FOR UPDATE`,
+      params,
+    ).then((rows) => rows[0] || null);
+  },
+
   getPaidOrderForRefund: ({ orderId, shopId, connection }) => queryResult(
     connection,
     `SELECT orders.*, payments.stripe_payment_intent_id,
@@ -237,7 +249,7 @@ const buildPaymentModule = ({
         paymentIntentId: data.stripe_payment_intent_id,
         connection,
       });
-      const order = await repository.findOrderById({
+      const order = await repository.lockOrder({
         orderId: data.orderId,
         shopId: data.shopId,
         connection,
@@ -311,7 +323,7 @@ const buildPaymentModule = ({
       });
       if (!payment) throw new Error("Paiement introuvable");
 
-      const order = await repository.findOrderById({
+      const order = await repository.lockOrder({
         orderId: payment.order_id,
         connection,
       });
@@ -357,7 +369,7 @@ const buildPaymentModule = ({
         connection,
       });
       if (!payment) return { missing: true };
-      const order = await repository.findOrderById({
+      const order = await repository.lockOrder({
         orderId: payment.order_id,
         connection,
       });
@@ -400,7 +412,7 @@ const buildPaymentModule = ({
 
   const markStripeOrderPayAtCounter = (orderId, shopId) => runInTransaction(
     async (connection) => {
-      const order = await repository.findOrderById({ orderId, shopId, connection });
+      const order = await repository.lockOrder({ orderId, shopId, connection });
       if (!order) throw new Error("Commande introuvable");
       if (order.payment_status === "unpaid" && !order.payment_provider) {
         return { orderId: Number(orderId), alreadyUpdated: true };
@@ -434,7 +446,7 @@ const buildPaymentModule = ({
 
   const cancelProvisionalStripeOrder = (orderId, shopId) => runInTransaction(
     async (connection) => {
-      const order = await repository.findOrderById({ orderId, shopId, connection });
+      const order = await repository.lockOrder({ orderId, shopId, connection });
       if (!order) return { missing: true };
       if (order.payment_status !== "requires_payment" || order.payment_provider !== "stripe") {
         return { ignored: true };
