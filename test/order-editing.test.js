@@ -871,8 +871,12 @@ const runStatusControllerContract = async () => {
 
 const runForbiddenCancellationControllerContract = async () => {
   let stripeCancellationCalls = 0;
+  let transactions = 0;
   const transitions = buildOrderTransitionModule({
-    withTransaction: async (work) => work({ transaction: true }),
+    withTransaction: async (work) => {
+      transactions += 1;
+      return work({ transaction: true });
+    },
     repository: {
       lockOrder: async () => ({
         id: 42,
@@ -887,6 +891,14 @@ const runForbiddenCancellationControllerContract = async () => {
   });
   const controller = buildUpdateOrderController({
     transitionOrderStatus: transitions.transitionOrderStatus,
+    findOrderById: async () => [{
+      id: 42,
+      shopid: 7,
+      status: ORDER_STATUSES.FINISHED,
+      payment_status: "requires_payment",
+      payment_provider: "stripe",
+      stripe_payment_intent_id: "pi_42",
+    }],
     cancelPendingStripePayment: async () => {
       stripeCancellationCalls += 1;
     },
@@ -902,6 +914,7 @@ const runForbiddenCancellationControllerContract = async () => {
 
   assert.strictEqual(response.statusCode, 422);
   assert.strictEqual(response.payload.data.code, "ORDER_STATUS_TRANSITION_INVALID");
+  assert.strictEqual(transactions, 0, "a known-invalid cancellation opens no transaction");
   assert.strictEqual(
     stripeCancellationCalls,
     0,
@@ -912,6 +925,7 @@ const runForbiddenCancellationControllerContract = async () => {
 const runAllowedCancellationControllerContract = async () => {
   const events = [];
   const connection = { transaction: true };
+  let transactionActive = false;
   const lockedOrder = {
     id: 42,
     shopid: 7,
@@ -921,7 +935,14 @@ const runAllowedCancellationControllerContract = async () => {
     stripe_payment_intent_id: "pi_42",
   };
   const transitions = buildOrderTransitionModule({
-    withTransaction: async (work) => work(connection),
+    withTransaction: async (work) => {
+      transactionActive = true;
+      try {
+        return await work(connection);
+      } finally {
+        transactionActive = false;
+      }
+    },
     repository: {
       lockOrder: async () => {
         events.push("lock-order");
@@ -935,10 +956,21 @@ const runAllowedCancellationControllerContract = async () => {
   });
   const controller = buildUpdateOrderController({
     transitionOrderStatus: transitions.transitionOrderStatus,
-    cancelPendingStripePayment: async (order, options = {}) => {
+    findOrderById: async () => {
+      events.push("read-order");
+      return [lockedOrder];
+    },
+    cancelPendingStripePayment: async (order) => {
       assert.strictEqual(order, lockedOrder);
-      assert.strictEqual(options.connection, connection);
+      assert.strictEqual(transactionActive, false, "Stripe runs outside the DB transaction");
       events.push("cancel-stripe");
+      return "pi_42";
+    },
+    markPaymentCanceled: async (paymentIntentId, options = {}) => {
+      assert.strictEqual(paymentIntentId, "pi_42");
+      assert.strictEqual(options.connection, connection);
+      assert.strictEqual(options.order, lockedOrder);
+      events.push("cancel-local-payment");
     },
   });
 
@@ -949,7 +981,67 @@ const runAllowedCancellationControllerContract = async () => {
     body: { status: ORDER_STATUSES.CANCELED },
   }, makeResponse());
 
-  assert.deepStrictEqual(events, ["lock-order", "cancel-stripe", "update-status"]);
+  assert.deepStrictEqual(events, [
+    "read-order",
+    "cancel-stripe",
+    "lock-order",
+    "cancel-local-payment",
+    "update-status",
+  ]);
+};
+
+const runCancellationRaceContract = async () => {
+  const preflightOrder = {
+    id: 42,
+    shopid: 7,
+    status: ORDER_STATUSES.PENDING,
+    payment_status: "requires_payment",
+    payment_provider: "stripe",
+    stripe_payment_intent_id: "pi_42",
+  };
+  const concurrentlyFinishedOrder = {
+    ...preflightOrder,
+    status: ORDER_STATUSES.FINISHED,
+  };
+  let stripeCancellationCalls = 0;
+  let statusUpdates = 0;
+  let localPaymentUpdates = 0;
+  const transitions = buildOrderTransitionModule({
+    withTransaction: async (work) => work({ transaction: true }),
+    repository: {
+      lockOrder: async () => concurrentlyFinishedOrder,
+      updateStatus: async () => {
+        statusUpdates += 1;
+        return { affectedRows: 1 };
+      },
+    },
+  });
+  const controller = buildUpdateOrderController({
+    transitionOrderStatus: transitions.transitionOrderStatus,
+    findOrderById: async () => [preflightOrder],
+    cancelPendingStripePayment: async () => {
+      stripeCancellationCalls += 1;
+      return "pi_42";
+    },
+    markPaymentCanceled: async () => {
+      localPaymentUpdates += 1;
+    },
+  });
+  const response = makeResponse();
+
+  await controller({
+    params: { id: "42" },
+    shopid: 7,
+    id: 9,
+    body: { status: ORDER_STATUSES.CANCELED },
+  }, response);
+
+  assert.strictEqual(stripeCancellationCalls, 1);
+  assert.strictEqual(response.statusCode, 422);
+  assert.strictEqual(response.payload.data.code, "ORDER_STATUS_TRANSITION_INVALID");
+  assert.strictEqual(localPaymentUpdates, 0);
+  assert.strictEqual(statusUpdates, 0, "a concurrent FINISHED status is never overwritten");
+  assert.strictEqual(concurrentlyFinishedOrder.status, ORDER_STATUSES.FINISHED);
 };
 
 runEligibilityContracts();
@@ -964,6 +1056,7 @@ runEditableReadContracts()
   .then(runTransitionValidationContract)
   .then(runStatusControllerContract)
   .then(runAllowedCancellationControllerContract)
+  .then(runCancellationRaceContract)
   .then(runForbiddenCancellationControllerContract)
   .then(runRouterContract)
   .then(() => console.log("order editing tests passed"))

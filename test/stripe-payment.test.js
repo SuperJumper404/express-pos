@@ -394,6 +394,7 @@ const runPaymentEditRaceContract = async () => {
     },
     payment: {
       order_id: 42,
+      shop_id: 7,
       stripe_payment_intent_id: "pi_42",
       status: "requires_payment",
     },
@@ -488,16 +489,21 @@ const runPaymentEditRaceContract = async () => {
 const runSucceededPaymentShopScopeContract = async () => {
   const connection = { transaction: true };
   const received = {};
+  const events = [];
   const payments = buildPaymentModule({
     withTransaction: async (work) => work(connection),
     repository: {
-      findPaymentByIntent: async () => ({
-        order_id: 42,
-        shop_id: 7,
-        stripe_payment_intent_id: "pi_42",
-        status: "requires_payment",
-      }),
+      findPaymentByIntent: async ({ connection: suppliedConnection }) => {
+        events.push(suppliedConnection ? "lock-payment" : "read-payment");
+        return {
+          order_id: 42,
+          shop_id: 7,
+          stripe_payment_intent_id: "pi_42",
+          status: "requires_payment",
+        };
+      },
       lockOrder: async (input) => {
+        events.push("lock-order");
         received.lockOrder = input;
         return {
           id: 42,
@@ -521,6 +527,11 @@ const runSucceededPaymentShopScopeContract = async () => {
 
   await payments.markPaymentSucceeded(succeededIntent);
 
+  assert.deepStrictEqual(events.slice(0, 3), [
+    "read-payment",
+    "lock-order",
+    "lock-payment",
+  ]);
   assert.deepStrictEqual(received.lockOrder, {
     orderId: 42,
     shopId: 7,
@@ -538,16 +549,21 @@ const runSucceededPaymentShopScopeContract = async () => {
 const runTerminalPaymentShopScopeContract = async () => {
   const connection = { transaction: true };
   const received = {};
+  const events = [];
   const payments = buildPaymentModule({
     withTransaction: async (work) => work(connection),
     repository: {
-      findPaymentByIntent: async () => ({
-        order_id: 42,
-        shop_id: 7,
-        stripe_payment_intent_id: "pi_42",
-        status: "requires_payment",
-      }),
+      findPaymentByIntent: async ({ connection: suppliedConnection }) => {
+        events.push(suppliedConnection ? "lock-payment" : "read-payment");
+        return {
+          order_id: 42,
+          shop_id: 7,
+          stripe_payment_intent_id: "pi_42",
+          status: "requires_payment",
+        };
+      },
       lockOrder: async (input) => {
+        events.push("lock-order");
         received.lockOrder = input;
         return {
           id: 42,
@@ -571,6 +587,11 @@ const runTerminalPaymentShopScopeContract = async () => {
 
   await payments.markPaymentFailed("pi_42");
 
+  assert.deepStrictEqual(events.slice(0, 3), [
+    "read-payment",
+    "lock-order",
+    "lock-payment",
+  ]);
   assert.deepStrictEqual(received.lockOrder, {
     orderId: 42,
     shopId: 7,
@@ -634,6 +655,31 @@ const runCanceledPaymentUsesSuppliedOrderLockContract = async () => {
     status: "canceled",
     connection,
   });
+};
+
+const runRefundLockOrderContract = async () => {
+  const events = [];
+  const payments = buildPaymentModule({
+    withTransaction: async (work) => work({ transaction: true }),
+    repository: {
+      lockOrder: async () => {
+        events.push("lock-order");
+        return { id: 42, shopid: 7, payment_status: "paid" };
+      },
+      updatePaymentRefunded: async () => {
+        events.push("update-payment");
+        return { affectedRows: 1 };
+      },
+      updateOrderRefunded: async () => {
+        events.push("update-order");
+        return { affectedRows: 1 };
+      },
+    },
+  });
+
+  await payments.markPaymentRefunded(42, "re_42");
+
+  assert.deepStrictEqual(events, ["lock-order", "update-payment", "update-order"]);
 };
 
 const runStripeReservationContracts = async () => {
@@ -745,7 +791,7 @@ const runStripeReservationContracts = async () => {
     status: "requires_payment_method",
   });
   assert.strictEqual(persistence.attached, true);
-  assert.deepStrictEqual(harness.events.slice(1, 3), ["lock-payment", "lock-order"]);
+  assert.deepStrictEqual(harness.events.slice(1, 3), ["lock-order", "lock-payment"]);
   assert.strictEqual(harness.getState().orders[0].payment_status, "requires_payment");
   assert.strictEqual(harness.getState().payments[0].status, "requires_payment_method");
 
@@ -1605,6 +1651,7 @@ const runStripeCancellationControllerContracts = async () => {
 runSucceededPaymentShopScopeContract()
   .then(runTerminalPaymentShopScopeContract)
   .then(runCanceledPaymentUsesSuppliedOrderLockContract)
+  .then(runRefundLockOrderContract)
   .then(runPaymentEditRaceContract)
   .then(runStripeReservationContracts)
   .then(runCashRegisterArchiveContract)

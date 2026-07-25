@@ -35,6 +35,7 @@ const {
   createCheckout,
 } = require("../modules/m_checkout");
 const {
+  assertOrderStatusTransition,
   transitionOrderStatus,
 } = require("../modules/m_orderTransitions");
 
@@ -62,7 +63,7 @@ const stripePaymentNotSettledError = () => new DomainError(
   "Le paiement Stripe ne peut pas etre confirme pour cette commande.",
 );
 
-const cancelPendingStripePayment = async (order, { connection } = {}) => {
+const cancelPendingStripePayment = async (order) => {
   if (!hasPendingStripePayment(order)) return;
 
   const stripe = getStripe();
@@ -77,7 +78,7 @@ const cancelPendingStripePayment = async (order, { connection } = {}) => {
     await stripe.paymentIntents.cancel(paymentIntentId);
   }
 
-  await markPaymentCanceled(paymentIntentId, { connection, order });
+  return paymentIntentId;
 };
 
 const buildPendingStripeArchiveSync = ({
@@ -292,7 +293,9 @@ exports.addDetailOrder = (req, res) => {
 };
 const buildUpdateOrderController = ({
   transitionOrderStatus: transitionStatus = transitionOrderStatus,
+  findOrderById = mFindOrderById,
   cancelPendingStripePayment: syncCanceledPayment = cancelPendingStripePayment,
+  markPaymentCanceled: settleCanceledPayment = markPaymentCanceled,
 } = {}) => async (req, res) => {
   const orderId = Number(req.params.id);
   const shopId = Number(req.shopid);
@@ -302,19 +305,40 @@ const buildUpdateOrderController = ({
     return custom(res, 400, "Requête invalide.", null, null);
   }
 
-  let stripeCancellationError;
+  let canceledPaymentIntentId = null;
+  let localCancellationError;
   try {
+    if (nextStatus === ORDER_STATUSES.CANCELED) {
+      const orders = await findOrderById(orderId, shopId);
+      if (!orders.length) {
+        return custom(res, 404, "Commande introuvable.", null, null);
+      }
+      assertOrderStatusTransition(orders[0], nextStatus);
+      try {
+        canceledPaymentIntentId = await syncCanceledPayment(orders[0]);
+      } catch (error) {
+        return failed(
+          res,
+          "Erreur lors de l'annulation du paiement Stripe.",
+          error.message,
+        );
+      }
+    }
+
     const { result } = await transitionStatus({
       orderId,
       shopId,
       operator,
       nextStatus,
-      ...(nextStatus === ORDER_STATUSES.CANCELED && {
+      ...(canceledPaymentIntentId && {
         beforeTransition: async ({ order, connection }) => {
           try {
-            await syncCanceledPayment(order, { connection });
+            await settleCanceledPayment(
+              canceledPaymentIntentId,
+              { connection, order },
+            );
           } catch (error) {
-            stripeCancellationError = error;
+            localCancellationError = error;
             throw error;
           }
         },
@@ -325,7 +349,7 @@ const buildUpdateOrderController = ({
     }
     return success(res, "Commande mise à jour avec succès.", null, null);
   } catch (error) {
-    if (error === stripeCancellationError) {
+    if (error === localCancellationError) {
       return failed(
         res,
         "Erreur lors de l'annulation du paiement Stripe.",

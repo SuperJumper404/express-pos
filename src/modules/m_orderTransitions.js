@@ -36,6 +36,16 @@ const sqlRepository = {
 
 const formatDate = (value) => value.toISOString().slice(0, 19).replace("T", " ");
 
+const assertOrderStatusTransition = (order, nextStatus) => {
+  if (!ALLOWED_TRANSITIONS.has(`${Number(order.status)}:${Number(nextStatus)}`)) {
+    throw new DomainError(
+      422,
+      "ORDER_STATUS_TRANSITION_INVALID",
+      "Changement de statut non autorisé pour cette commande.",
+    );
+  }
+};
+
 const buildOrderTransitionModule = ({
   repository = sqlRepository,
   withTransaction: runInTransaction = withTransaction,
@@ -49,13 +59,7 @@ const buildOrderTransitionModule = ({
       if (!order) {
         throw new DomainError(404, "ORDER_NOT_FOUND", "Commande introuvable.");
       }
-      if (!ALLOWED_TRANSITIONS.has(`${Number(order.status)}:${Number(nextStatus)}`)) {
-        throw new DomainError(
-          422,
-          "ORDER_STATUS_TRANSITION_INVALID",
-          "Changement de statut non autorisé pour cette commande.",
-        );
-      }
+      assertOrderStatusTransition(order, nextStatus);
       if (beforeTransition) {
         await beforeTransition({ order, connection });
       }
@@ -78,6 +82,7 @@ const orderTransitionModule = buildOrderTransitionModule();
 
 module.exports = {
   ALLOWED_TRANSITIONS,
+  assertOrderStatusTransition,
   buildOrderTransitionModule,
   transitionOrderStatus: orderTransitionModule.transitionOrderStatus,
 };

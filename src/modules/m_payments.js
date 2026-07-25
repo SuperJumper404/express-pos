@@ -247,16 +247,16 @@ const buildPaymentModule = ({
 
   const persistPaymentIntentForOrder = (data) => runInTransaction(
     async (connection) => {
-      const existingPayment = await repository.findPaymentByIntent({
-        paymentIntentId: data.stripe_payment_intent_id,
-        connection,
-      });
       const order = await repository.lockOrder({
         orderId: data.orderId,
         shopId: data.shopId,
         connection,
       });
       if (!order) return { attached: false, missing: true };
+      const existingPayment = await repository.findPaymentByIntent({
+        paymentIntentId: data.stripe_payment_intent_id,
+        connection,
+      });
       if (order.payment_status !== "requires_payment" || order.payment_provider !== "stripe") {
         return {
           attached: false,
@@ -316,21 +316,28 @@ const buildPaymentModule = ({
     repository.findOrderById({ orderId, shopId })
   );
 
-  const markPaymentSucceeded = (paymentIntent, charge = null) => runInTransaction(
-    async (connection) => {
-      const paymentIntentId = paymentIntent.id;
+  const markPaymentSucceeded = async (paymentIntent, charge = null) => {
+    const paymentIntentId = paymentIntent.id;
+    const paymentReference = await repository.findPaymentByIntent({ paymentIntentId });
+    if (!paymentReference) throw new Error("Paiement introuvable");
+
+    return runInTransaction(async (connection) => {
+      const order = await repository.lockOrder({
+        orderId: paymentReference.order_id,
+        shopId: paymentReference.shop_id,
+        connection,
+      });
+      if (!order) throw new Error("Commande introuvable");
+
       const payment = await repository.findPaymentByIntent({
         paymentIntentId,
         connection,
       });
       if (!payment) throw new Error("Paiement introuvable");
-
-      const order = await repository.lockOrder({
-        orderId: payment.order_id,
-        shopId: payment.shop_id,
-        connection,
-      });
-      if (!order) throw new Error("Commande introuvable");
+      if (Number(payment.order_id) !== Number(order.id)
+        || Number(payment.shop_id) !== Number(order.shopid)) {
+        throw new Error("Paiement introuvable");
+      }
       if (order.payment_status === "paid") return { alreadyPaid: true };
       if (order.payment_status !== "requires_payment") return { ignored: true };
 
@@ -363,68 +370,86 @@ const buildPaymentModule = ({
         connection,
       });
       return { paid: true };
-    },
-  );
+    });
+  };
 
   const applyPaymentTerminal = async ({
     paymentIntentId, status, connection, lockedOrder,
   }) => {
-      const payment = await repository.findPaymentByIntent({
-        paymentIntentId,
-        connection,
-      });
-      if (!payment) return { missing: true };
-      const order = lockedOrder || await repository.lockOrder({
-          orderId: payment.order_id,
-          shopId: payment.shop_id,
-          connection,
-        });
-      if (!order) return { missing: true };
-      if (Number(order.id) !== Number(payment.order_id)
-        || Number(order.shopid) !== Number(payment.shop_id)) {
-        return { missing: true };
-      }
-      if (order.payment_status !== "requires_payment") return { ignored: true };
+    const payment = await repository.findPaymentByIntent({
+      paymentIntentId,
+      connection,
+    });
+    if (!payment) return { missing: true };
+    const order = lockedOrder || await repository.lockOrder({
+      orderId: payment.order_id,
+      shopId: payment.shop_id,
+      connection,
+    });
+    if (!order) return { missing: true };
+    if (Number(order.id) !== Number(payment.order_id)
+      || Number(order.shopid) !== Number(payment.shop_id)) {
+      return { missing: true };
+    }
+    if (order.payment_status !== "requires_payment") return { ignored: true };
 
-      try {
-        await settleReservations({
-          orderId: order.id,
-          status: "released",
-          connection,
-        });
-      } catch (error) {
-        if (isReservationTransitionError(error)) return { ignored: true };
-        throw error;
-      }
-
-      const currentTimestamp = timestamp();
-      await repository.updatePaymentTerminal({
-        paymentIntentId,
-        status,
-        timestamp: currentTimestamp,
-        connection,
-      });
-      await repository.updateOrderTerminal({
+    try {
+      await settleReservations({
         orderId: order.id,
-        shopId: payment.shop_id,
-        status,
+        status: "released",
         connection,
       });
-      return { status };
+    } catch (error) {
+      if (isReservationTransitionError(error)) return { ignored: true };
+      throw error;
+    }
+
+    const currentTimestamp = timestamp();
+    await repository.updatePaymentTerminal({
+      paymentIntentId,
+      status,
+      timestamp: currentTimestamp,
+      connection,
+    });
+    await repository.updateOrderTerminal({
+      orderId: order.id,
+      shopId: payment.shop_id,
+      status,
+      connection,
+    });
+    return { status };
   };
 
-  const markPaymentTerminal = (
+  const markPaymentTerminal = async (
     paymentIntentId,
     status,
     { connection, order } = {},
   ) => {
-    const work = (transactionConnection) => applyPaymentTerminal({
-      paymentIntentId,
-      status,
-      connection: transactionConnection,
-      lockedOrder: order,
+    if (connection) {
+      return applyPaymentTerminal({
+        paymentIntentId,
+        status,
+        connection,
+        lockedOrder: order,
+      });
+    }
+
+    const paymentReference = await repository.findPaymentByIntent({ paymentIntentId });
+    if (!paymentReference) return { missing: true };
+    return runInTransaction(async (transactionConnection) => {
+      const lockedOrder = await repository.lockOrder({
+        orderId: paymentReference.order_id,
+        shopId: paymentReference.shop_id,
+        connection: transactionConnection,
+      });
+      if (!lockedOrder) return { missing: true };
+      return applyPaymentTerminal({
+        paymentIntentId,
+        status,
+        connection: transactionConnection,
+        lockedOrder,
+      });
     });
-    return connection ? work(connection) : runInTransaction(work);
   };
 
   const markPaymentFailed = (paymentIntentId, options) => (
@@ -499,6 +524,8 @@ const buildPaymentModule = ({
 
   const markPaymentRefunded = (orderId, refundId) => runInTransaction(
     async (connection) => {
+      const order = await repository.lockOrder({ orderId, connection });
+      if (!order) return { missing: true };
       const currentTimestamp = timestamp();
       await repository.updatePaymentRefunded({
         orderId,
