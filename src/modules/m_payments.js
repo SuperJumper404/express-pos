@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const pool = require("../config/dbPool");
 const { ORDER_STATUSES } = require("../helpers/orderStatus");
 const { finalizeReservations } = require("./m_checkout");
@@ -40,6 +41,66 @@ const sqlRepository = {
        AND payment_provider = 'stripe'
        AND (stripe_payment_intent_id IS NULL OR stripe_payment_intent_id = ?)`,
     [paymentIntentId, orderId, paymentIntentId],
+  ),
+
+  stagePaymentCanceled: ({ orderId, paymentIntentId, timestamp, connection }) => queryResult(
+    connection,
+    `UPDATE payments
+     SET status = 'canceled', updated = ?
+     WHERE order_id = ?
+       AND stripe_payment_intent_id = ?
+       AND status <> 'succeeded'`,
+    [timestamp, orderId, paymentIntentId],
+  ),
+
+  stageOrderPaymentReplacement: ({
+    orderId, shopId, paymentIntentId, replacementAttemptToken, connection,
+  }) => queryResult(
+    connection,
+    `UPDATE orders
+     SET payment_status = 'unpaid',
+         stripe_payment_intent_id = NULL,
+         stripe_replacement_attempt_token = ?
+     WHERE id = ?
+       AND shopid = ?
+       AND status = ?
+       AND payment_status = 'requires_payment'
+       AND payment_provider = 'stripe'
+       AND stripe_payment_intent_id = ?`,
+    [replacementAttemptToken, orderId, shopId, ORDER_STATUSES.PENDING, paymentIntentId],
+  ),
+
+  rotatePaymentReplacementAttempt: ({
+    orderId, shopId, currentAttemptToken, replacementAttemptToken, connection,
+  }) => queryResult(
+    connection,
+    `UPDATE orders
+     SET stripe_replacement_attempt_token = ?
+     WHERE id = ?
+       AND shopid = ?
+       AND status = ?
+       AND payment_status = 'unpaid'
+       AND payment_provider = 'stripe'
+       AND stripe_payment_intent_id IS NULL
+       AND stripe_replacement_attempt_token <=> ?`,
+    [replacementAttemptToken, orderId, shopId, ORDER_STATUSES.PENDING, currentAttemptToken],
+  ),
+
+  attachReplacementPaymentIntent: ({
+    orderId, shopId, paymentIntentId, replacementAttemptToken, connection,
+  }) => queryResult(
+    connection,
+    `UPDATE orders
+     SET payment_status = 'requires_payment',
+         stripe_payment_intent_id = ?
+     WHERE id = ?
+       AND shopid = ?
+       AND status = ?
+       AND payment_status = 'unpaid'
+       AND payment_provider = 'stripe'
+       AND stripe_payment_intent_id IS NULL
+       AND stripe_replacement_attempt_token = ?`,
+    [paymentIntentId, orderId, shopId, ORDER_STATUSES.PENDING, replacementAttemptToken],
   ),
 
   findPaymentByIntent: ({ paymentIntentId, connection }) => queryResult(
@@ -218,6 +279,7 @@ const buildPaymentModule = ({
   now = () => new Date(),
 } = {}) => {
   const timestamp = () => formatDate(now());
+  const replacementAttemptToken = () => crypto.randomBytes(32).toString("hex");
   const terminalPaymentStatuses = new Set([
     "succeeded",
     "canceled",
@@ -455,6 +517,127 @@ const buildPaymentModule = ({
   const markPaymentFailed = (paymentIntentId, options) => (
     markPaymentTerminal(paymentIntentId, "failed", options)
   );
+
+  const stagePaymentReplacement = async ({
+    orderId, shopId, paymentIntentId, connection,
+  }) => {
+    if (!connection) throw new Error("Payment replacement requires an active transaction");
+    const token = replacementAttemptToken();
+    const currentTimestamp = timestamp();
+    const payment = await repository.stagePaymentCanceled({
+      orderId,
+      paymentIntentId,
+      timestamp: currentTimestamp,
+      connection,
+    });
+    const order = await repository.stageOrderPaymentReplacement({
+      orderId,
+      shopId,
+      paymentIntentId,
+      replacementAttemptToken: token,
+      connection,
+    });
+    return {
+      ready: Boolean(payment.affectedRows && order.affectedRows),
+      replacement_attempt_token: order.affectedRows ? token : null,
+    };
+  };
+
+  const rotatePaymentReplacementAttempt = async ({
+    orderId, shopId, currentAttemptToken, connection,
+  }) => {
+    if (!connection) throw new Error("Payment replacement requires an active transaction");
+    const token = replacementAttemptToken();
+    const result = await repository.rotatePaymentReplacementAttempt({
+      orderId,
+      shopId,
+      currentAttemptToken,
+      replacementAttemptToken: token,
+      connection,
+    });
+    return {
+      ready: Boolean(result.affectedRows),
+      replacement_attempt_token: result.affectedRows ? token : null,
+    };
+  };
+
+  const persistReplacementPaymentIntent = (data) => runInTransaction(
+    async (connection) => {
+      if (!data.replacement_attempt_token
+        || ["canceled", "succeeded"].includes(data.status)) {
+        return { attached: false, terminal_intent: true };
+      }
+      const order = await repository.lockOrder({
+        orderId: data.orderId,
+        shopId: data.shopId,
+        connection,
+      });
+      if (!order) return { attached: false, missing: true };
+      const existingPayment = await repository.findPaymentByIntent({
+        paymentIntentId: data.stripe_payment_intent_id,
+        connection,
+      });
+      if (order.payment_status === "requires_payment"
+        && order.payment_provider === "stripe"
+        && order.stripe_payment_intent_id === data.stripe_payment_intent_id
+        && order.stripe_replacement_attempt_token === data.replacement_attempt_token) {
+        if (!existingPayment) {
+          await repository.upsertPaymentRecord({
+            data: paymentRecordData(data),
+            connection,
+          });
+        }
+        return { attached: true, idempotent_replay: true };
+      }
+      if (order.stripe_replacement_attempt_token !== data.replacement_attempt_token) {
+        return { attached: false, stale_attempt: true };
+      }
+      if (Number(order.status) !== ORDER_STATUSES.PENDING
+        || order.payment_status !== "unpaid"
+        || order.payment_provider !== "stripe"
+        || order.stripe_payment_intent_id != null) {
+        return { attached: false, terminal: true, payment_status: order.payment_status };
+      }
+      const attachment = await repository.attachReplacementPaymentIntent({
+        orderId: data.orderId,
+        shopId: data.shopId,
+        paymentIntentId: data.stripe_payment_intent_id,
+        replacementAttemptToken: data.replacement_attempt_token,
+        connection,
+      });
+      if (!attachment.affectedRows) return { attached: false, stale_attempt: true };
+      await repository.upsertPaymentRecord({
+        data: paymentRecordData(data),
+        connection,
+      });
+      return { attached: true };
+    },
+  );
+
+  const recoverCanceledEditPayment = ({ orderId, shopId, paymentIntentId }) => (
+    runInTransaction(async (connection) => {
+      const order = await repository.lockOrder({ orderId, shopId, connection });
+      if (!order) return { recovered: false, missing: true };
+      if (order.payment_status === "unpaid"
+        && order.payment_provider === "stripe"
+        && order.stripe_payment_intent_id == null) {
+        return { recovered: true, idempotent_replay: true };
+      }
+      if (Number(order.status) !== ORDER_STATUSES.PENDING
+        || order.payment_status !== "requires_payment"
+        || order.payment_provider !== "stripe"
+        || order.stripe_payment_intent_id !== paymentIntentId) {
+        return { recovered: false, terminal: true };
+      }
+      const staged = await stagePaymentReplacement({
+        orderId,
+        shopId,
+        paymentIntentId,
+        connection,
+      });
+      return { recovered: staged.ready, ...staged };
+    })
+  );
   const markPaymentCanceled = (paymentIntentId, options) => (
     markPaymentTerminal(paymentIntentId, "canceled", options)
   );
@@ -550,6 +733,10 @@ const buildPaymentModule = ({
     markPaymentSucceeded,
     markStripeOrderPayAtCounter,
     persistPaymentIntentForOrder,
+    persistReplacementPaymentIntent,
+    recoverCanceledEditPayment,
+    rotatePaymentReplacementAttempt,
+    stagePaymentReplacement,
   };
 };
 

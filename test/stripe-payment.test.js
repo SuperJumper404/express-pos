@@ -25,6 +25,7 @@ require.cache[callbackDbPath] = {
 const {
   buildCancelQrTablePaymentIntentController,
   buildQrTablePaymentIntentController,
+  buildRegenerateOrderPaymentIntent,
 } = require("../src/controllers/c_stripe");
 const {
   buildArchiveOrderController,
@@ -1648,6 +1649,225 @@ const runStripeCancellationControllerContracts = async () => {
   assert.strictEqual(raceReadCount, 2);
 };
 
+const runReplacementPaymentContracts = async () => {
+  const migrationPath = require("path").join(
+    __dirname,
+    "../db/migrations/20260725090000_order_edit_replacement_attempt.sql",
+  );
+  assert.strictEqual(require("fs").existsSync(migrationPath), true);
+  const migration = require("fs").readFileSync(migrationPath, "utf8");
+  assert.match(migration, /ADD COLUMN `stripe_replacement_attempt_token` varchar\(64\) DEFAULT NULL/);
+  assert.match(migration, /DROP COLUMN `stripe_replacement_attempt_token`/);
+
+  const events = [];
+  const persisted = [];
+  let attachedIntentId = null;
+  const stripeClient = {
+    paymentIntents: {
+      create: async (params, options) => {
+        events.push(["create", params, options]);
+        return {
+          id: "pi_replacement",
+          client_secret: "secret_replacement",
+          status: "requires_payment_method",
+        };
+      },
+      retrieve: async (id) => {
+        events.push(["retrieve", id]);
+        return {
+          id,
+          client_secret: "secret_replacement",
+          status: "requires_payment_method",
+        };
+      },
+      cancel: async (id) => {
+        events.push(["cancel", id]);
+        return { id, status: "canceled" };
+      },
+    },
+  };
+  const regenerate = buildRegenerateOrderPaymentIntent({
+    getShopInfo: async () => [{
+      id: 7,
+      stripe_account_id: "acct_7",
+      stripe_charges_enabled: 1,
+      stripe_commission_percent: 5,
+    }],
+    getStripe: () => stripeClient,
+    persistReplacementPaymentIntent: async (data) => {
+      persisted.push(data);
+      attachedIntentId = data.stripe_payment_intent_id;
+      return { attached: true };
+    },
+    publishableKey: "pk_test",
+  });
+  const order = {
+    id: 42,
+    shopid: 7,
+    status: 1,
+    subtotal: 31,
+    payment_provider: "stripe",
+    payment_status: "unpaid",
+    stripe_payment_intent_id: null,
+    stripe_replacement_attempt_token: "attempt-current",
+  };
+  const result = await regenerate({ order, contentRevision: "revision-new" });
+  assert.deepStrictEqual(result, {
+    orderId: 42,
+    paymentIntentId: "pi_replacement",
+    clientSecret: "secret_replacement",
+    publishableKey: "pk_test",
+  });
+  assert.strictEqual(events[0][1].amount, 3100, "the replacement uses the edited total");
+  assert.strictEqual(
+    events[0][2].idempotencyKey,
+    "order-edit:7:42:revision-new",
+  );
+  assert.strictEqual(persisted[0].replacement_attempt_token, "attempt-current");
+
+  events.length = 0;
+  await regenerate({
+    order: { ...order, payment_status: "requires_payment", stripe_payment_intent_id: attachedIntentId },
+    contentRevision: "revision-new",
+  });
+  assert.deepStrictEqual(events, [["retrieve", "pi_replacement"]],
+    "an attached replacement is returned without creating another intent");
+
+  let persistenceAttempt = 0;
+  const retryKeys = [];
+  const retry = buildRegenerateOrderPaymentIntent({
+    getShopInfo: async () => [{
+      id: 7,
+      stripe_account_id: "acct_7",
+      stripe_charges_enabled: 1,
+      stripe_commission_percent: 5,
+    }],
+    getStripe: () => ({ paymentIntents: {
+      create: async (_params, options) => {
+        retryKeys.push(options.idempotencyKey);
+        return {
+          id: "pi_same",
+          client_secret: "secret_same",
+          status: "requires_payment_method",
+        };
+      },
+    } }),
+    persistReplacementPaymentIntent: async () => {
+      persistenceAttempt += 1;
+      if (persistenceAttempt === 1) throw new Error("database unavailable after Stripe create");
+      return { attached: true };
+    },
+  });
+  await assert.rejects(
+    () => retry({ order, contentRevision: "revision-new" }),
+    /database unavailable/,
+  );
+  const recovered = await retry({ order, contentRevision: "revision-new" });
+  assert.strictEqual(recovered.paymentIntentId, "pi_same");
+  assert.deepStrictEqual(retryKeys, [
+    "order-edit:7:42:revision-new",
+    "order-edit:7:42:revision-new",
+  ], "retrying after an attachment failure reuses the Stripe idempotency key");
+
+  const paymentState = {
+    order: {
+      ...order,
+      stripe_replacement_attempt_token: "attempt-current",
+    },
+    payments: [],
+  };
+  const payments = buildPaymentModule({
+    withTransaction: async (work) => work({ transaction: true }),
+    repository: {
+      lockOrder: async () => paymentState.order,
+      findPaymentByIntent: async ({ paymentIntentId }) => paymentState.payments.find(
+        (payment) => payment.stripe_payment_intent_id === paymentIntentId,
+      ) || null,
+      stagePaymentCanceled: async ({ orderId, paymentIntentId }) => {
+        const payment = paymentState.payments.find((row) => (
+          Number(row.order_id) === Number(orderId)
+          && row.stripe_payment_intent_id === paymentIntentId
+          && row.status !== "succeeded"
+        ));
+        if (!payment) return { affectedRows: 0 };
+        payment.status = "canceled";
+        return { affectedRows: 1 };
+      },
+      stageOrderPaymentReplacement: async ({
+        paymentIntentId, replacementAttemptToken,
+      }) => {
+        if (paymentState.order.payment_status !== "requires_payment"
+          || paymentState.order.stripe_payment_intent_id !== paymentIntentId) {
+          return { affectedRows: 0 };
+        }
+        paymentState.order.payment_status = "unpaid";
+        paymentState.order.stripe_payment_intent_id = null;
+        paymentState.order.stripe_replacement_attempt_token = replacementAttemptToken;
+        return { affectedRows: 1 };
+      },
+      attachReplacementPaymentIntent: async ({ paymentIntentId, replacementAttemptToken }) => {
+        if (paymentState.order.stripe_replacement_attempt_token !== replacementAttemptToken) {
+          return { affectedRows: 0 };
+        }
+        paymentState.order.stripe_payment_intent_id = paymentIntentId;
+        paymentState.order.payment_status = "requires_payment";
+        return { affectedRows: 1 };
+      },
+      upsertPaymentRecord: async ({ data }) => {
+        paymentState.payments.push({ ...data });
+        return { affectedRows: 1 };
+      },
+    },
+  });
+  paymentState.order.payment_status = "requires_payment";
+  paymentState.order.stripe_payment_intent_id = "pi_old";
+  paymentState.order.stripe_replacement_attempt_token = null;
+  paymentState.payments.push({
+    order_id: 42,
+    stripe_payment_intent_id: "pi_old",
+    status: "requires_payment_method",
+  });
+  const staged = await payments.stagePaymentReplacement({
+    orderId: 42,
+    shopId: 7,
+    paymentIntentId: "pi_old",
+    connection: { transaction: true },
+  });
+  assert.strictEqual(staged.ready, true);
+  assert.match(staged.replacement_attempt_token, /^[a-f0-9]{64}$/);
+  assert.strictEqual(paymentState.order.payment_status, "unpaid");
+  assert.strictEqual(paymentState.order.stripe_payment_intent_id, null);
+  assert.strictEqual(paymentState.payments[0].status, "canceled");
+
+  paymentState.order.stripe_replacement_attempt_token = "attempt-current";
+  const stale = await payments.persistReplacementPaymentIntent({
+    orderId: 42,
+    shopId: 7,
+    stripe_payment_intent_id: "pi_stale",
+    replacement_attempt_token: "attempt-stale",
+    amount: 31,
+    amount_cents: 3100,
+    application_fee_amount: 155,
+    currency: "eur",
+    status: "requires_payment_method",
+  });
+  assert.deepStrictEqual(stale, { attached: false, stale_attempt: true });
+  assert.strictEqual(paymentState.order.stripe_payment_intent_id, null);
+  assert.strictEqual(
+    paymentState.payments.some((payment) => payment.stripe_payment_intent_id === "pi_stale"),
+    false,
+  );
+
+  const routerSource = require("fs").readFileSync(
+    require.resolve("../src/routers/r_stripe"),
+    "utf8",
+  );
+  assert.match(
+    routerSource,
+    /\.post\([\s\S]*"\/stripe\/orders\/:id\/replacement-payment",[\s\S]*authentication,[\s\S]*orderEditing\.replacementPayment/,
+  );
+};
+
 runSucceededPaymentShopScopeContract()
   .then(runTerminalPaymentShopScopeContract)
   .then(runCanceledPaymentUsesSuppliedOrderLockContract)
@@ -1657,6 +1877,7 @@ runSucceededPaymentShopScopeContract()
   .then(runCashRegisterArchiveContract)
   .then(runStripeCheckoutControllerContracts)
   .then(runStripeCancellationControllerContracts)
+  .then(runReplacementPaymentContracts)
   .then(() => console.log("stripePayment tests passed"))
   .catch((error) => {
     console.error(error);

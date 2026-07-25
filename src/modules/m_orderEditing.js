@@ -573,6 +573,10 @@ const buildOrderEditingModule = ({
         throw new DomainError(409, "INSUFFICIENT_STOCK", "Stock insuffisant.", { shortages });
       }
 
+      if (input.prepareStripeReplacement && order.payment_provider === "stripe") {
+        await input.prepareStripeReplacement({ order, connection });
+      }
+
       for (const [productId, delta] of deltas) {
         if (delta === 0) continue;
         const result = await repository.adjustStock({

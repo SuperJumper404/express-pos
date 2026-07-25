@@ -10,6 +10,7 @@ const {
 const {
   buildOrderEditingController,
   buildAmendOrderController,
+  buildReplacementPaymentController,
 } = require("../src/controllers/c_orderEditing");
 const callbackDbPath = require.resolve("../src/config/db");
 require.cache[callbackDbPath] = {
@@ -590,6 +591,210 @@ const runAmendOrderContracts = async () => {
   assert.deepStrictEqual([...harness.getState().products], [
     [10, 3], [11, 3], [12, 5], [20, 3], [30, 5],
   ], "released reservations cause the full edited requirements to be reserved again");
+
+  harness = makeAmendHarness();
+  harness.getState().order.payment_provider = "stripe";
+  harness.getState().order.payment_status = "requires_payment";
+  harness.getState().order.stripe_payment_intent_id = "pi_old";
+  await harness.amend({
+    prepareStripeReplacement: async ({ order, connection }) => {
+      assert.strictEqual(connection.transaction, true);
+      assert.strictEqual(order.stripe_payment_intent_id, "pi_old");
+      harness.events.push("prepare-stripe-replacement");
+    },
+  });
+  assert.ok(
+    harness.events.indexOf("prepare-stripe-replacement")
+      < harness.events.findIndex((event) => Array.isArray(event) && event[0] === "stock"),
+    "Stripe is settled before the first order-content write",
+  );
+};
+
+const runStripeAmendControllerContracts = async () => {
+  const events = [];
+  const pendingOrder = {
+    id: 42,
+    shopid: 7,
+    status: 1,
+    payment_provider: "stripe",
+    payment_status: "requires_payment",
+    stripe_payment_intent_id: "pi_old",
+  };
+  const controller = buildAmendOrderController({
+    amendOrder: async (input) => {
+      await input.prepareStripeReplacement({
+        order: pendingOrder,
+        connection: { transaction: true },
+      });
+      events.push("sql-commit");
+      return {
+        order_id: 42,
+        total: 31,
+        canceled: false,
+        content_revision: "revision-new",
+      };
+    },
+    getStripe: () => ({
+      paymentIntents: {
+        retrieve: async (id) => {
+          events.push(["retrieve", id]);
+          return { id, status: "requires_payment_method" };
+        },
+        cancel: async (id) => {
+          events.push(["cancel", id]);
+          return { id, status: "canceled" };
+        },
+      },
+    }),
+    stagePaymentReplacement: async ({ connection }) => {
+      assert.strictEqual(connection.transaction, true);
+      events.push("stage-replacement");
+      return { ready: true, replacement_attempt_token: "attempt-current" };
+    },
+    regenerateOrderPaymentIntent: async ({ order, contentRevision }) => {
+      events.push(["create-replacement", order.subtotal, contentRevision]);
+      assert.strictEqual(order.stripe_replacement_attempt_token, "attempt-current");
+      return { paymentIntentId: "pi_new", clientSecret: "secret_new" };
+    },
+    logger: { error: () => {} },
+  });
+  let response = makeResponse();
+  await controller({
+    params: { id: "42" }, shopid: 7, id: 9,
+    body: { content_revision: "revision-old", expected_total: 31, items: [] },
+  }, response);
+  assert.strictEqual(response.statusCode, 200);
+  assert.strictEqual(response.payload.data.payment_refresh, "succeeded");
+  assert.strictEqual(response.payload.data.payment.paymentIntentId, "pi_new");
+  assert.deepStrictEqual(events, [
+    ["retrieve", "pi_old"],
+    ["cancel", "pi_old"],
+    "stage-replacement",
+    "sql-commit",
+    ["create-replacement", 31, "revision-new"],
+  ]);
+
+  let sqlCommitted = false;
+  const refreshFailureController = buildAmendOrderController({
+    amendOrder: async (input) => {
+      await input.prepareStripeReplacement({
+        order: { ...pendingOrder },
+        connection: { transaction: true },
+      });
+      sqlCommitted = true;
+      return {
+        order_id: 42,
+        total: 31,
+        canceled: false,
+        content_revision: "revision-new",
+      };
+    },
+    getStripe: () => ({ paymentIntents: {
+      retrieve: async () => ({ id: "pi_old", status: "canceled" }),
+    } }),
+    stagePaymentReplacement: async () => ({
+      ready: true,
+      replacement_attempt_token: "attempt-current",
+    }),
+    regenerateOrderPaymentIntent: async () => {
+      assert.strictEqual(sqlCommitted, true, "Stripe creation starts only after SQL commit");
+      throw new Error("Stripe temporarily unavailable");
+    },
+    logger: { error: () => {} },
+  });
+  response = makeResponse();
+  await refreshFailureController({
+    params: { id: "42" }, shopid: 7, id: 9,
+    body: { content_revision: "revision-old", expected_total: 31, items: [] },
+  }, response);
+  assert.strictEqual(response.statusCode, 200);
+  assert.strictEqual(response.payload.data.payment_status, "unpaid");
+  assert.strictEqual(response.payload.data.payment_refresh, "required");
+
+  let recoveredCanceledIntent = null;
+  const sqlFailureController = buildAmendOrderController({
+    amendOrder: async (input) => {
+      await input.prepareStripeReplacement({
+        order: { ...pendingOrder },
+        connection: { transaction: true },
+      });
+      throw new DomainError(409, "ORDER_EDIT_CONFLICT", "write failed");
+    },
+    getStripe: () => ({ paymentIntents: {
+      retrieve: async () => ({ id: "pi_old", status: "requires_payment_method" }),
+      cancel: async () => ({ id: "pi_old", status: "canceled" }),
+    } }),
+    stagePaymentReplacement: async () => ({
+      ready: true,
+      replacement_attempt_token: "rolled-back-attempt",
+    }),
+    recoverCanceledEditPayment: async (input) => {
+      recoveredCanceledIntent = input;
+      return { recovered: true, replacement_attempt_token: "recovery-attempt" };
+    },
+    logger: { error: () => {} },
+  });
+  response = makeResponse();
+  await sqlFailureController({
+    params: { id: "42" }, shopid: 7, id: 9,
+    body: { content_revision: "revision-old", expected_total: 31, items: [] },
+  }, response);
+  assert.strictEqual(response.statusCode, 409);
+  assert.strictEqual(response.payload.data.payment_refresh, "required");
+  assert.deepStrictEqual(recoveredCanceledIntent, {
+    orderId: 42,
+    shopId: 7,
+    paymentIntentId: "pi_old",
+  });
+
+  let paidSyncs = 0;
+  const paidController = buildAmendOrderController({
+    amendOrder: async (input) => input.prepareStripeReplacement({
+      order: pendingOrder,
+      connection: { transaction: true },
+    }),
+    getStripe: () => ({ paymentIntents: {
+      retrieve: async () => ({ id: "pi_old", status: "succeeded" }),
+    } }),
+    markPaymentSucceeded: async () => { paidSyncs += 1; },
+    logger: { error: () => {} },
+  });
+  response = makeResponse();
+  await paidController({
+    params: { id: "42" }, shopid: 7, id: 9,
+    body: { content_revision: "revision-old", expected_total: 31, items: [] },
+  }, response);
+  assert.strictEqual(response.statusCode, 409);
+  assert.strictEqual(response.payload.data.code, "ORDER_NOT_EDITABLE");
+  assert.strictEqual(response.payload.data.payment_status, "paid");
+  assert.strictEqual(paidSyncs, 1, "the succeeded intent is synchronized after releasing the edit lock");
+
+  const retryController = buildReplacementPaymentController({
+    getEditableOrder: async () => ({
+      order: {
+        id: 42,
+        shopid: 7,
+        status: 1,
+        subtotal: 31,
+        payment_provider: "stripe",
+        payment_status: "unpaid",
+        stripe_payment_intent_id: null,
+        stripe_replacement_attempt_token: "attempt-current",
+      },
+      content_revision: "revision-new",
+    }),
+    regenerateOrderPaymentIntent: async ({ order, contentRevision }) => ({
+      paymentIntentId: `pi-${order.stripe_replacement_attempt_token}`,
+      contentRevision,
+    }),
+  });
+  response = makeResponse();
+  await retryController({ params: { id: "42" }, shopid: 7 }, response);
+  assert.strictEqual(response.statusCode, 200);
+  assert.deepStrictEqual(response.payload.data, {
+    paymentIntentId: "pi-attempt-current",
+    contentRevision: "revision-new",
+  });
 };
 
 const runEmptyCartCancellationContract = async () => {
@@ -687,7 +892,9 @@ const runAmendControllerContracts = async () => {
     },
   }, response);
   assert.strictEqual(response.statusCode, 200);
-  assert.deepStrictEqual(calls[0], {
+  const { prepareStripeReplacement, ...received } = calls[0];
+  assert.strictEqual(typeof prepareStripeReplacement, "function");
+  assert.deepStrictEqual(received, {
     orderId: 42,
     shopId: 7,
     operatorId: 9,
@@ -1072,6 +1279,7 @@ runRevisionContracts();
 runEditableReadContracts()
   .then(runControllerContracts)
   .then(runAmendOrderContracts)
+  .then(runStripeAmendControllerContracts)
   .then(runEmptyCartCancellationContract)
   .then(runLegacyRevisionSymmetryContract)
   .then(runAmendControllerContracts)
