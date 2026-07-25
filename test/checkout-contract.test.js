@@ -9,6 +9,7 @@ const {
   buildCheckoutController,
   canonicalPayloadHash,
 } = require("../src/modules/m_checkout");
+const { buildOrderQuoteModule } = require("../src/modules/m_orderQuote");
 
 const routerSource = fs.readFileSync(
   require.resolve("../src/routers/r_customizations"),
@@ -1562,6 +1563,52 @@ const checkoutConfiguration = () => new Map([[10, [{
   }],
 }]]]);
 
+const runSharedOrderQuoteContract = async () => {
+  const quote = buildOrderQuoteModule({
+    repository: {
+      getProducts: async ({ shopId, productIds }) => {
+        assert.strictEqual(shopId, 7);
+        assert.deepStrictEqual(productIds, [10]);
+        return [{
+          id: 10,
+          shopid: 7,
+          name: "Menu",
+          price: 8,
+          stock: 5,
+          archived: 0,
+          is_hidden: 0,
+        }];
+      },
+    },
+    getResolvedProductConfigurations: async () => new Map([[10, [{
+      product_step_id: 20,
+      name: "Boisson",
+      minimum_choices: 1,
+      maximum_choices: 1,
+      active: true,
+      available: true,
+      choices: [{
+        product_step_choice_id: 101,
+        choice_type: "linked_product",
+        choice_name: "Boisson liee",
+        extra_price: 1.5,
+        active: true,
+        available: true,
+        linked_product_id: 11,
+      }],
+    }]]]),
+  });
+
+  const result = await quote.quoteOrderItems({
+    shopId: 7,
+    items: [{ productId: 10, quantity: 2, selectedChoiceIds: [101] }],
+    connection: { transaction: true },
+  });
+
+  assert.strictEqual(result.total, 19);
+  assert.deepStrictEqual([...result.requirements.entries()], [[10, 2], [11, 2]]);
+};
+
 const makeCheckoutHarness = ({
   existingOrder = null,
   expectedSnapshotError = false,
@@ -2601,6 +2648,7 @@ runProductReadContracts()
   .then(runRepositoryReadContracts)
   .then(runUploadMiddlewareContracts)
   .then(runCustomizationApiContracts)
+  .then(runSharedOrderQuoteContract)
   .then(runTransactionalCheckoutContracts)
   .then(runReservationContracts)
   .then(runCheckoutApiSurfaceContracts)

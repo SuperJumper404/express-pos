@@ -11,6 +11,7 @@ const { envSTRIPESTOCKRESERVATIONMINUTES } = require("../helpers/env");
 const {
   getResolvedProductConfigurations,
 } = require("./m_customizations");
+const { buildOrderQuoteModule } = require("./m_orderQuote");
 
 const RESERVATION_TTL_MS = envSTRIPESTOCKRESERVATIONMINUTES * 60 * 1000;
 
@@ -310,11 +311,7 @@ const sqlRepository = {
   ),
 };
 
-const isUnavailable = (value) => value === true || value === 1 || value === "1";
 const findById = (rows, id) => rows.find((row) => String(row.id) === String(id));
-const findConfiguration = (configurations, productId) => configurations.get(productId)
-  || configurations.get(String(productId))
-  || [];
 const replayResult = (order) => ({
   orderId: order.id,
   total: parseMoney(order.subtotal),
@@ -367,6 +364,12 @@ const buildCheckoutModule = ({
   const runWithConnection = (connection, work) => (
     connection ? work(connection) : runInTransaction(work)
   );
+  const { quoteOrderItems } = buildOrderQuoteModule({
+    repository,
+    getResolvedProductConfigurations: loadConfigurations,
+    validateConfiguredItem: validateItem,
+    buildStockRequirements: stockRequirements,
+  });
 
   const releaseExpiredReservations = (options = {}) => runWithConnection(
     options.connection,
@@ -596,71 +599,16 @@ const buildCheckoutModule = ({
         return replayResult(existing);
       }
 
-      const parentProductIds = uniqueSortedIds(checkout.items.map((item) => item.productId));
-      const products = await repository.getProducts({
-        shopId: checkout.shopId,
-        productIds: parentProductIds,
-        connection,
-      });
-      if (products.length !== parentProductIds.length) {
-        const missingIds = parentProductIds.filter((id) => !findById(products, id));
-        throw new DomainError(404, "PRODUCT_NOT_FOUND", "Product not found", {
-          product_ids: missingIds,
-        });
-      }
-      for (const product of products) {
-        if (isUnavailable(product.archived) || isUnavailable(product.is_hidden)) {
-          throw new DomainError(422, "PRODUCT_UNAVAILABLE", "Product is unavailable", {
-            product_id: product.id,
-          });
-        }
-      }
-
-      const configurations = await loadConfigurations({
-        shopId: checkout.shopId,
-        productIds: parentProductIds,
-        connection,
-      });
-      const resolvedItems = checkout.items.map((item) => {
-        const product = findById(products, item.productId);
-        const steps = findConfiguration(configurations, item.productId);
-        let validated;
-        try {
-          validated = validateItem({
-            product,
-            steps,
-            selectedChoiceIds: item.selectedChoiceIds,
-          });
-        } catch (error) {
-          if (error instanceof DomainError) {
-            error.product_id = item.productId;
-          }
-          throw error;
-        }
-        const unitPrice = parseMoney(validated.unitPrice);
-        const lineTotal = parseMoney(unitPrice * item.quantity);
-        return {
-          ...item,
-          product,
-          steps,
-          unitPrice,
-          lineTotal,
-          selectedChoices: validated.selectedChoices,
-        };
-      });
-      const total = parseMoney(
-        resolvedItems.reduce((sum, item) => sum + cents(item.lineTotal), 0) / 100,
-      );
-      const serverQuote = {
+      const {
+        resolvedItems,
         total,
-        items: resolvedItems.map((item) => ({
-          product_id: item.productId,
-          quantity: item.quantity,
-          selected_choice_ids: [...item.selectedChoiceIds].sort((a, b) => a - b),
-          unit_price: item.unitPrice,
-          total: item.lineTotal,
-        })),
-      };
+        serverQuote,
+        requirements,
+      } = await quoteOrderItems({
+        shopId: checkout.shopId,
+        items: checkout.items,
+        connection,
+      });
       if (cents(total) !== cents(checkout.expectedTotal)) {
         throw new DomainError(
           409,
@@ -699,7 +647,6 @@ const buildCheckoutModule = ({
 
       await releaseExpiredReservations({ connection });
 
-      const requirements = stockRequirements(resolvedItems);
       const stockProductIds = uniqueSortedIds([...requirements.keys()]);
       const lockedProducts = await repository.lockProducts({
         shopId: checkout.shopId,
