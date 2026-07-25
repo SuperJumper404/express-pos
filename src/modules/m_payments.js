@@ -116,14 +116,16 @@ const sqlRepository = {
     [chargeId, paymentMethod, timestamp, paymentIntentId],
   ),
 
-  updateOrderSucceeded: ({ orderId, paymentMethod, timestamp, connection }) => queryResult(
+  updateOrderSucceeded: ({
+    orderId, shopId, paymentMethod, timestamp, connection,
+  }) => queryResult(
     connection,
     `UPDATE orders
      SET payment_status = 'paid',
          payment = ?,
          finished = ?
-     WHERE id = ? AND payment_status = 'requires_payment'`,
-    [paymentMethod, timestamp, orderId],
+     WHERE id = ? AND shopid = ? AND payment_status = 'requires_payment'`,
+    [paymentMethod, timestamp, orderId, shopId],
   ),
 
   updatePaymentTerminal: ({ paymentIntentId, status, timestamp, connection }) => queryResult(
@@ -134,12 +136,12 @@ const sqlRepository = {
     [status, timestamp, paymentIntentId],
   ),
 
-  updateOrderTerminal: ({ orderId, status, connection }) => queryResult(
+  updateOrderTerminal: ({ orderId, shopId, status, connection }) => queryResult(
     connection,
     `UPDATE orders
      SET payment_status = ?
-     WHERE id = ? AND payment_status = 'requires_payment'`,
-    [status, orderId],
+     WHERE id = ? AND shopid = ? AND payment_status = 'requires_payment'`,
+    [status, orderId, shopId],
   ),
 
   updatePaymentAtCounter: ({ orderId, timestamp, connection }) => queryResult(
@@ -325,6 +327,7 @@ const buildPaymentModule = ({
 
       const order = await repository.lockOrder({
         orderId: payment.order_id,
+        shopId: payment.shop_id,
         connection,
       });
       if (!order) throw new Error("Commande introuvable");
@@ -354,6 +357,7 @@ const buildPaymentModule = ({
       });
       await repository.updateOrderSucceeded({
         orderId: order.id,
+        shopId: payment.shop_id,
         paymentMethod,
         timestamp: currentTimestamp,
         connection,
@@ -362,18 +366,24 @@ const buildPaymentModule = ({
     },
   );
 
-  const markPaymentTerminal = (paymentIntentId, status) => runInTransaction(
-    async (connection) => {
+  const applyPaymentTerminal = async ({
+    paymentIntentId, status, connection, lockedOrder,
+  }) => {
       const payment = await repository.findPaymentByIntent({
         paymentIntentId,
         connection,
       });
       if (!payment) return { missing: true };
-      const order = await repository.lockOrder({
-        orderId: payment.order_id,
-        connection,
-      });
+      const order = lockedOrder || await repository.lockOrder({
+          orderId: payment.order_id,
+          shopId: payment.shop_id,
+          connection,
+        });
       if (!order) return { missing: true };
+      if (Number(order.id) !== Number(payment.order_id)
+        || Number(order.shopid) !== Number(payment.shop_id)) {
+        return { missing: true };
+      }
       if (order.payment_status !== "requires_payment") return { ignored: true };
 
       try {
@@ -396,18 +406,32 @@ const buildPaymentModule = ({
       });
       await repository.updateOrderTerminal({
         orderId: order.id,
+        shopId: payment.shop_id,
         status,
         connection,
       });
       return { status };
-    },
-  );
+  };
 
-  const markPaymentFailed = (paymentIntentId) => (
-    markPaymentTerminal(paymentIntentId, "failed")
+  const markPaymentTerminal = (
+    paymentIntentId,
+    status,
+    { connection, order } = {},
+  ) => {
+    const work = (transactionConnection) => applyPaymentTerminal({
+      paymentIntentId,
+      status,
+      connection: transactionConnection,
+      lockedOrder: order,
+    });
+    return connection ? work(connection) : runInTransaction(work);
+  };
+
+  const markPaymentFailed = (paymentIntentId, options) => (
+    markPaymentTerminal(paymentIntentId, "failed", options)
   );
-  const markPaymentCanceled = (paymentIntentId) => (
-    markPaymentTerminal(paymentIntentId, "canceled")
+  const markPaymentCanceled = (paymentIntentId, options) => (
+    markPaymentTerminal(paymentIntentId, "canceled", options)
   );
 
   const markStripeOrderPayAtCounter = (orderId, shopId) => runInTransaction(

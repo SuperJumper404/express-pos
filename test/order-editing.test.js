@@ -869,6 +869,89 @@ const runStatusControllerContract = async () => {
   assert.strictEqual(response.statusCode, 200);
 };
 
+const runForbiddenCancellationControllerContract = async () => {
+  let stripeCancellationCalls = 0;
+  const transitions = buildOrderTransitionModule({
+    withTransaction: async (work) => work({ transaction: true }),
+    repository: {
+      lockOrder: async () => ({
+        id: 42,
+        shopid: 7,
+        status: ORDER_STATUSES.FINISHED,
+        payment_status: "requires_payment",
+        payment_provider: "stripe",
+        stripe_payment_intent_id: "pi_42",
+      }),
+      updateStatus: async () => ({ affectedRows: 1 }),
+    },
+  });
+  const controller = buildUpdateOrderController({
+    transitionOrderStatus: transitions.transitionOrderStatus,
+    cancelPendingStripePayment: async () => {
+      stripeCancellationCalls += 1;
+    },
+  });
+  const response = makeResponse();
+
+  await controller({
+    params: { id: "42" },
+    shopid: 7,
+    id: 9,
+    body: { status: ORDER_STATUSES.CANCELED },
+  }, response);
+
+  assert.strictEqual(response.statusCode, 422);
+  assert.strictEqual(response.payload.data.code, "ORDER_STATUS_TRANSITION_INVALID");
+  assert.strictEqual(
+    stripeCancellationCalls,
+    0,
+    "Stripe is untouched when the locked order cannot transition to CANCELED",
+  );
+};
+
+const runAllowedCancellationControllerContract = async () => {
+  const events = [];
+  const connection = { transaction: true };
+  const lockedOrder = {
+    id: 42,
+    shopid: 7,
+    status: ORDER_STATUSES.PENDING,
+    payment_status: "requires_payment",
+    payment_provider: "stripe",
+    stripe_payment_intent_id: "pi_42",
+  };
+  const transitions = buildOrderTransitionModule({
+    withTransaction: async (work) => work(connection),
+    repository: {
+      lockOrder: async () => {
+        events.push("lock-order");
+        return lockedOrder;
+      },
+      updateStatus: async () => {
+        events.push("update-status");
+        return { affectedRows: 1 };
+      },
+    },
+  });
+  const controller = buildUpdateOrderController({
+    transitionOrderStatus: transitions.transitionOrderStatus,
+    cancelPendingStripePayment: async (order, options = {}) => {
+      assert.strictEqual(order, lockedOrder);
+      assert.strictEqual(options.connection, connection);
+      events.push("cancel-stripe");
+    },
+  });
+
+  await controller({
+    params: { id: "42" },
+    shopid: 7,
+    id: 9,
+    body: { status: ORDER_STATUSES.CANCELED },
+  }, makeResponse());
+
+  assert.deepStrictEqual(events, ["lock-order", "cancel-stripe", "update-status"]);
+};
+
 runEligibilityContracts();
 runRevisionContracts();
 runEditableReadContracts()
@@ -880,6 +963,8 @@ runEditableReadContracts()
   .then(runPreparationEditRaceContract)
   .then(runTransitionValidationContract)
   .then(runStatusControllerContract)
+  .then(runAllowedCancellationControllerContract)
+  .then(runForbiddenCancellationControllerContract)
   .then(runRouterContract)
   .then(() => console.log("order editing tests passed"))
   .catch((error) => {

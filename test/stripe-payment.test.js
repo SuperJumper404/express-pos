@@ -189,6 +189,7 @@ const makeStripeLifecycleHarness = ({
     }],
     payments: paymentAttached ? [{
       order_id: 42,
+      shop_id: 7,
       stripe_payment_intent_id: "pi_42",
       status: paymentStatus,
     }] : [],
@@ -482,6 +483,157 @@ const runPaymentEditRaceContract = async () => {
     "the edit re-checks eligibility after the payment commits",
   );
   assert.strictEqual(state.order.payment_status, "paid");
+};
+
+const runSucceededPaymentShopScopeContract = async () => {
+  const connection = { transaction: true };
+  const received = {};
+  const payments = buildPaymentModule({
+    withTransaction: async (work) => work(connection),
+    repository: {
+      findPaymentByIntent: async () => ({
+        order_id: 42,
+        shop_id: 7,
+        stripe_payment_intent_id: "pi_42",
+        status: "requires_payment",
+      }),
+      lockOrder: async (input) => {
+        received.lockOrder = input;
+        return {
+          id: 42,
+          shopid: 7,
+          customerID: 12,
+          operator: 9,
+          status: ORDER_STATUSES.PENDING,
+          payment_status: "requires_payment",
+          payment_provider: "stripe",
+        };
+      },
+      updatePaymentSucceeded: async () => ({ affectedRows: 1 }),
+      updateOrderSucceeded: async (input) => {
+        received.updateOrderSucceeded = input;
+        return { affectedRows: 1 };
+      },
+    },
+    finalizeReservations: async () => ({ changed: 1 }),
+    now: () => new Date("2026-07-24T12:00:00.000Z"),
+  });
+
+  await payments.markPaymentSucceeded(succeededIntent);
+
+  assert.deepStrictEqual(received.lockOrder, {
+    orderId: 42,
+    shopId: 7,
+    connection,
+  });
+  assert.deepStrictEqual(received.updateOrderSucceeded, {
+    orderId: 42,
+    shopId: 7,
+    paymentMethod: "Carte",
+    timestamp: "2026-07-24 12:00:00",
+    connection,
+  });
+};
+
+const runTerminalPaymentShopScopeContract = async () => {
+  const connection = { transaction: true };
+  const received = {};
+  const payments = buildPaymentModule({
+    withTransaction: async (work) => work(connection),
+    repository: {
+      findPaymentByIntent: async () => ({
+        order_id: 42,
+        shop_id: 7,
+        stripe_payment_intent_id: "pi_42",
+        status: "requires_payment",
+      }),
+      lockOrder: async (input) => {
+        received.lockOrder = input;
+        return {
+          id: 42,
+          shopid: 7,
+          customerID: 12,
+          operator: 9,
+          status: ORDER_STATUSES.PENDING,
+          payment_status: "requires_payment",
+          payment_provider: "stripe",
+        };
+      },
+      updatePaymentTerminal: async () => ({ affectedRows: 1 }),
+      updateOrderTerminal: async (input) => {
+        received.updateOrderTerminal = input;
+        return { affectedRows: 1 };
+      },
+    },
+    finalizeReservations: async () => ({ changed: 1 }),
+    now: () => new Date("2026-07-24T12:00:00.000Z"),
+  });
+
+  await payments.markPaymentFailed("pi_42");
+
+  assert.deepStrictEqual(received.lockOrder, {
+    orderId: 42,
+    shopId: 7,
+    connection,
+  });
+  assert.deepStrictEqual(received.updateOrderTerminal, {
+    orderId: 42,
+    shopId: 7,
+    status: "failed",
+    connection,
+  });
+};
+
+const runCanceledPaymentUsesSuppliedOrderLockContract = async () => {
+  const connection = { transaction: true };
+  const lockedOrder = {
+    id: 42,
+    shopid: 7,
+    customerID: 12,
+    operator: 9,
+    status: ORDER_STATUSES.PENDING,
+    payment_status: "requires_payment",
+    payment_provider: "stripe",
+  };
+  let startedTransactions = 0;
+  let redundantOrderLocks = 0;
+  const nestedConnection = { transaction: "nested" };
+  const received = {};
+  const payments = buildPaymentModule({
+    withTransaction: async (work) => {
+      startedTransactions += 1;
+      return work(nestedConnection);
+    },
+    repository: {
+      findPaymentByIntent: async () => ({
+        order_id: 42,
+        shop_id: 7,
+        stripe_payment_intent_id: "pi_42",
+        status: "requires_payment",
+      }),
+      lockOrder: async () => {
+        redundantOrderLocks += 1;
+        return lockedOrder;
+      },
+      updatePaymentTerminal: async () => ({ affectedRows: 1 }),
+      updateOrderTerminal: async (input) => {
+        received.updateOrderTerminal = input;
+        return { affectedRows: 1 };
+      },
+    },
+    finalizeReservations: async () => ({ changed: 1 }),
+  });
+
+  await payments.markPaymentCanceled("pi_42", { connection, order: lockedOrder });
+
+  assert.strictEqual(startedTransactions, 0);
+  assert.strictEqual(redundantOrderLocks, 0);
+  assert.deepStrictEqual(received.updateOrderTerminal, {
+    orderId: 42,
+    shopId: 7,
+    status: "canceled",
+    connection,
+  });
 };
 
 const runStripeReservationContracts = async () => {
@@ -1450,7 +1602,10 @@ const runStripeCancellationControllerContracts = async () => {
   assert.strictEqual(raceReadCount, 2);
 };
 
-runPaymentEditRaceContract()
+runSucceededPaymentShopScopeContract()
+  .then(runTerminalPaymentShopScopeContract)
+  .then(runCanceledPaymentUsesSuppliedOrderLockContract)
+  .then(runPaymentEditRaceContract)
   .then(runStripeReservationContracts)
   .then(runCashRegisterArchiveContract)
   .then(runStripeCheckoutControllerContracts)

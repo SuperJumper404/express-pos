@@ -41,7 +41,9 @@ const buildOrderTransitionModule = ({
   withTransaction: runInTransaction = withTransaction,
   now = () => new Date(),
 } = {}) => {
-  const transitionOrderStatus = ({ orderId, shopId, nextStatus, operator }) => (
+  const transitionOrderStatus = ({
+    orderId, shopId, nextStatus, operator, beforeTransition,
+  }) => (
     runInTransaction(async (connection) => {
       const order = await repository.lockOrder({ orderId, shopId, connection });
       if (!order) {
@@ -53,6 +55,9 @@ const buildOrderTransitionModule = ({
           "ORDER_STATUS_TRANSITION_INVALID",
           "Changement de statut non autorisé pour cette commande.",
         );
+      }
+      if (beforeTransition) {
+        await beforeTransition({ order, connection });
       }
       const result = await repository.updateStatus({
         orderId,

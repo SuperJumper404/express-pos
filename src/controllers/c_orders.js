@@ -62,7 +62,7 @@ const stripePaymentNotSettledError = () => new DomainError(
   "Le paiement Stripe ne peut pas etre confirme pour cette commande.",
 );
 
-const cancelPendingStripePayment = async (order) => {
+const cancelPendingStripePayment = async (order, { connection } = {}) => {
   if (!hasPendingStripePayment(order)) return;
 
   const stripe = getStripe();
@@ -77,7 +77,7 @@ const cancelPendingStripePayment = async (order) => {
     await stripe.paymentIntents.cancel(paymentIntentId);
   }
 
-  await markPaymentCanceled(paymentIntentId);
+  await markPaymentCanceled(paymentIntentId, { connection, order });
 };
 
 const buildPendingStripeArchiveSync = ({
@@ -292,7 +292,6 @@ exports.addDetailOrder = (req, res) => {
 };
 const buildUpdateOrderController = ({
   transitionOrderStatus: transitionStatus = transitionOrderStatus,
-  findOrderById = mFindOrderById,
   cancelPendingStripePayment: syncCanceledPayment = cancelPendingStripePayment,
 } = {}) => async (req, res) => {
   const orderId = Number(req.params.id);
@@ -303,34 +302,36 @@ const buildUpdateOrderController = ({
     return custom(res, 400, "Requête invalide.", null, null);
   }
 
+  let stripeCancellationError;
   try {
-    if (nextStatus === ORDER_STATUSES.CANCELED) {
-      const orders = await findOrderById(orderId, shopId);
-      if (!orders.length) {
-        return custom(res, 404, "Commande introuvable.", null, null);
-      }
-      try {
-        await syncCanceledPayment(orders[0]);
-      } catch (error) {
-        return failed(
-          res,
-          "Erreur lors de l'annulation du paiement Stripe.",
-          error.message,
-        );
-      }
-    }
-
     const { result } = await transitionStatus({
       orderId,
       shopId,
       operator,
       nextStatus,
+      ...(nextStatus === ORDER_STATUSES.CANCELED && {
+        beforeTransition: async ({ order, connection }) => {
+          try {
+            await syncCanceledPayment(order, { connection });
+          } catch (error) {
+            stripeCancellationError = error;
+            throw error;
+          }
+        },
+      }),
     });
     if (!result.affectedRows) {
       return custom(res, 404, "Commande introuvable.", null, null);
     }
     return success(res, "Commande mise à jour avec succès.", null, null);
   } catch (error) {
+    if (error === stripeCancellationError) {
+      return failed(
+        res,
+        "Erreur lors de l'annulation du paiement Stripe.",
+        error.message,
+      );
+    }
     if (error instanceof DomainError) {
       return custom(res, error.status, error.message, null, { code: error.code });
     }
