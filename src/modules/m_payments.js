@@ -177,6 +177,15 @@ const sqlRepository = {
     [chargeId, paymentMethod, timestamp, paymentIntentId],
   ),
 
+  updatePaymentPending: ({ paymentIntentId, status, timestamp, connection }) => queryResult(
+    connection,
+    `UPDATE payments
+     SET status = ?, updated = ?
+     WHERE stripe_payment_intent_id = ?
+       AND status NOT IN ('succeeded', 'canceled', 'refunded')`,
+    [status, timestamp, paymentIntentId],
+  ),
+
   updateOrderSucceeded: ({
     orderId, shopId, paymentMethod, timestamp, connection,
   }) => queryResult(
@@ -283,7 +292,6 @@ const buildPaymentModule = ({
   const terminalPaymentStatuses = new Set([
     "succeeded",
     "canceled",
-    "failed",
     "refunded",
   ]);
 
@@ -435,6 +443,48 @@ const buildPaymentModule = ({
     });
   };
 
+  const markPaymentPending = async (paymentIntentId, status) => {
+    const paymentReference = await repository.findPaymentByIntent({ paymentIntentId });
+    if (!paymentReference) return { missing: true };
+
+    return runInTransaction(async (connection) => {
+      const order = await repository.lockOrder({
+        orderId: paymentReference.order_id,
+        shopId: paymentReference.shop_id,
+        connection,
+      });
+      if (!order || order.payment_status !== "requires_payment") return { ignored: true };
+
+      const payment = await repository.findPaymentByIntent({
+        paymentIntentId,
+        connection,
+      });
+      if (!payment
+        || Number(payment.order_id) !== Number(order.id)
+        || Number(payment.shop_id) !== Number(order.shopid)) {
+        return { missing: true };
+      }
+
+      await repository.updatePaymentPending({
+        paymentIntentId,
+        status,
+        timestamp: timestamp(),
+        connection,
+      });
+      return { status };
+    });
+  };
+
+  const markPaymentAttemptFailed = (paymentIntent) => markPaymentPending(
+    paymentIntent.id,
+    paymentIntent.status || "requires_payment_method",
+  );
+
+  const markPaymentProcessing = (paymentIntentId) => markPaymentPending(
+    paymentIntentId,
+    "processing",
+  );
+
   const applyPaymentTerminal = async ({
     paymentIntentId, status, connection, lockedOrder,
   }) => {
@@ -513,10 +563,6 @@ const buildPaymentModule = ({
       });
     });
   };
-
-  const markPaymentFailed = (paymentIntentId, options) => (
-    markPaymentTerminal(paymentIntentId, "failed", options)
-  );
 
   const stagePaymentReplacement = async ({
     orderId, shopId, paymentIntentId, connection,
@@ -727,8 +773,9 @@ const buildPaymentModule = ({
     getPaidOrderForRefund,
     getPendingStripeOrderForCounter,
     getStripeOrderForCancellation,
+    markPaymentAttemptFailed,
     markPaymentCanceled,
-    markPaymentFailed,
+    markPaymentProcessing,
     markPaymentRefunded,
     markPaymentSucceeded,
     markStripeOrderPayAtCounter,

@@ -25,8 +25,9 @@ const {
   getPaidOrderForRefund,
   getPendingStripeOrderForCounter,
   getStripeOrderForCancellation,
+  markPaymentAttemptFailed,
   markPaymentCanceled,
-  markPaymentFailed,
+  markPaymentProcessing,
   markPaymentRefunded,
   markPaymentSucceeded,
   markStripeOrderPayAtCounter,
@@ -627,10 +628,12 @@ exports.handleWebhook = async (req, res) => {
       await markPaymentSucceeded(paymentIntent, charge);
     }
 
-    if (
-      event.type === "payment_intent.payment_failed"
-    ) {
-      await markPaymentFailed(event.data.object.id);
+    if (event.type === "payment_intent.payment_failed") {
+      await markPaymentAttemptFailed(event.data.object);
+    }
+
+    if (event.type === "payment_intent.processing") {
+      await markPaymentProcessing(event.data.object.id);
     }
 
     if (event.type === "payment_intent.canceled") {

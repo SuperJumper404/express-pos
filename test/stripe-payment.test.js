@@ -307,6 +307,15 @@ const makeStripeLifecycleHarness = ({
       order.payment = paymentMethod;
       return { affectedRows: 1 };
     },
+    updatePaymentPending: async ({ paymentIntentId, status }) => {
+      const payment = state.payments.find(
+        (row) => row.stripe_payment_intent_id === paymentIntentId,
+      );
+      if (payment && !["succeeded", "canceled", "refunded"].includes(payment.status)) {
+        payment.status = status;
+      }
+      return { affectedRows: payment ? 1 : 0 };
+    },
     updatePaymentTerminal: async ({ paymentIntentId, status }) => {
       const payment = state.payments.find(
         (row) => row.stripe_payment_intent_id === paymentIntentId,
@@ -547,7 +556,7 @@ const runSucceededPaymentShopScopeContract = async () => {
   });
 };
 
-const runTerminalPaymentShopScopeContract = async () => {
+const runPendingPaymentShopScopeContract = async () => {
   const connection = { transaction: true };
   const received = {};
   const events = [];
@@ -576,9 +585,8 @@ const runTerminalPaymentShopScopeContract = async () => {
           payment_provider: "stripe",
         };
       },
-      updatePaymentTerminal: async () => ({ affectedRows: 1 }),
-      updateOrderTerminal: async (input) => {
-        received.updateOrderTerminal = input;
+      updatePaymentPending: async (input) => {
+        received.updatePaymentPending = input;
         return { affectedRows: 1 };
       },
     },
@@ -586,7 +594,10 @@ const runTerminalPaymentShopScopeContract = async () => {
     now: () => new Date("2026-07-24T12:00:00.000Z"),
   });
 
-  await payments.markPaymentFailed("pi_42");
+  await payments.markPaymentAttemptFailed({
+    id: "pi_42",
+    status: "requires_payment_method",
+  });
 
   assert.deepStrictEqual(events.slice(0, 3), [
     "read-payment",
@@ -598,10 +609,10 @@ const runTerminalPaymentShopScopeContract = async () => {
     shopId: 7,
     connection,
   });
-  assert.deepStrictEqual(received.updateOrderTerminal, {
-    orderId: 42,
-    shopId: 7,
-    status: "failed",
+  assert.deepStrictEqual(received.updatePaymentPending, {
+    paymentIntentId: "pi_42",
+    status: "requires_payment_method",
+    timestamp: "2026-07-24 12:00:00",
     connection,
   });
 };
@@ -708,17 +719,34 @@ const runStripeReservationContracts = async () => {
   assert.strictEqual(harness.getState().movements.length, 1);
   assert.strictEqual(harness.getState().orders[0].payment_status, "unpaid");
 
-  for (const transition of ["failed", "canceled"]) {
-    harness = makeStripeLifecycleHarness();
-    const action = transition === "failed" ? "markPaymentFailed" : "markPaymentCanceled";
-    await harness.payments[action]("pi_42");
-    await harness.payments[action]("pi_42");
-    assert.strictEqual(harness.getState().products.get(10), 10, `${transition} restores once`);
-    assert.strictEqual(harness.getState().reservations[0].status, "released");
-    await harness.payments.markPaymentSucceeded(succeededIntent);
-    assert.strictEqual(harness.getState().products.get(10), 10);
-    assert.strictEqual(harness.getState().orders[0].payment_status, transition);
-  }
+  harness = makeStripeLifecycleHarness();
+  await harness.payments.markPaymentAttemptFailed({
+    id: "pi_42",
+    status: "requires_payment_method",
+  });
+  assert.strictEqual(harness.getState().products.get(10), 8);
+  assert.strictEqual(harness.getState().reservations[0].status, "reserved");
+  assert.strictEqual(harness.getState().orders[0].payment_status, "requires_payment");
+  assert.strictEqual(harness.getState().payments[0].status, "requires_payment_method");
+  await harness.payments.markPaymentSucceeded(succeededIntent);
+  assert.strictEqual(harness.getState().orders[0].payment_status, "paid");
+  assert.strictEqual(harness.getState().reservations[0].status, "committed");
+
+  harness = makeStripeLifecycleHarness();
+  await harness.payments.markPaymentProcessing("pi_42");
+  assert.strictEqual(harness.getState().products.get(10), 8);
+  assert.strictEqual(harness.getState().reservations[0].status, "reserved");
+  assert.strictEqual(harness.getState().orders[0].payment_status, "requires_payment");
+  assert.strictEqual(harness.getState().payments[0].status, "processing");
+
+  harness = makeStripeLifecycleHarness();
+  await harness.payments.markPaymentCanceled("pi_42");
+  await harness.payments.markPaymentCanceled("pi_42");
+  assert.strictEqual(harness.getState().products.get(10), 10, "canceled restores once");
+  assert.strictEqual(harness.getState().reservations[0].status, "released");
+  await harness.payments.markPaymentSucceeded(succeededIntent);
+  assert.strictEqual(harness.getState().products.get(10), 10);
+  assert.strictEqual(harness.getState().orders[0].payment_status, "canceled");
 
   harness = makeStripeLifecycleHarness();
   await harness.payments.markPaymentSucceeded(succeededIntent);
@@ -1871,7 +1899,7 @@ const runReplacementPaymentContracts = async () => {
 };
 
 runSucceededPaymentShopScopeContract()
-  .then(runTerminalPaymentShopScopeContract)
+  .then(runPendingPaymentShopScopeContract)
   .then(runCanceledPaymentUsesSuppliedOrderLockContract)
   .then(runRefundLockOrderContract)
   .then(runPaymentEditRaceContract)
