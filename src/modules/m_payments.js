@@ -965,6 +965,7 @@ const buildPaymentModule = ({
     const refundIdMatches = payment.stripe_refund_id
       && refund.id === payment.stripe_refund_id;
     const externalReferenceMatches = !payment.stripe_refund_id
+      && Number(refund.amount) === Number(payment.amount_cents)
       && (
         (refund.payment_intent
           && refund.payment_intent === payment.stripe_payment_intent_id)

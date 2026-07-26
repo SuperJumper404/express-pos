@@ -814,6 +814,7 @@ const makeRefundLifecycleHarness = () => {
       shop_id: 7,
       stripe_payment_intent_id: "pi_42",
       stripe_charge_id: "ch_42",
+      amount_cents: 2300,
       stripe_refund_id: null,
       refund_status: null,
       refund_failure_reason: null,
@@ -951,11 +952,37 @@ const runSucceededRefundLifecycleContract = async () => {
       id: "re_extracted",
       status: "succeeded",
       payment_intent: "pi_42",
+      amount: 2300,
       charge: "ch_backfilled",
+      amount: 2300,
     }),
     { status: "succeeded", legacy_backfill: true },
   );
   assert.strictEqual(legacyChargeHarness.state.payment.stripe_charge_id, "ch_backfilled");
+
+  const partialLegacyHarness = makeRefundLifecycleHarness();
+  partialLegacyHarness.state.order.payment_status = "refunded";
+  partialLegacyHarness.state.order.status = ORDER_STATUSES.CANCELED;
+  Object.assign(partialLegacyHarness.state.payment, {
+    status: "refunded",
+    refund_status: "legacy_unknown",
+    refunded_at: "2026-07-25 10:00:00",
+    stripe_refund_id: null,
+  });
+  assert.deepStrictEqual(
+    await partialLegacyHarness.payments.reconcileStripeRefund({
+      id: "re_partial",
+      status: "pending",
+      payment_intent: "pi_42",
+      charge: "ch_42",
+      amount: 1200,
+    }),
+    { ignored: true },
+  );
+  assert.strictEqual(partialLegacyHarness.state.payment.stripe_refund_id, null);
+  assert.strictEqual(partialLegacyHarness.state.payment.refund_status, "legacy_unknown");
+  assert.strictEqual(partialLegacyHarness.state.order.payment_status, "refunded");
+  assert.deepStrictEqual(partialLegacyHarness.events, []);
 
   legacyChargeHarness = makeRefundLifecycleHarness();
   legacyChargeHarness.state.order.payment_status = "refunded";
@@ -1117,6 +1144,7 @@ const runRefundWebhookLookupContract = async () => {
       id: "re_legacy",
       status: "succeeded",
       payment_intent: "pi_42",
+      amount: 2300,
     }),
     { status: "succeeded", legacy_backfill: true },
   );
@@ -1143,6 +1171,7 @@ const runRefundWebhookLookupContract = async () => {
         id: "re_legacy",
         status: currentStatus,
         payment_intent: "pi_42",
+        amount: 2300,
         failure_reason: failureReason,
       }),
       {
@@ -1163,6 +1192,7 @@ const runRefundWebhookLookupContract = async () => {
         id: "re_legacy",
         status: "succeeded",
         payment_intent: "pi_42",
+        amount: 2300,
       }),
       { status: "succeeded" },
     );
@@ -1188,6 +1218,7 @@ const runRefundWebhookLookupContract = async () => {
       await harness.payments.reconcileStripeRefund({
         id: "re_legacy",
         status: "succeeded",
+        amount: 2300,
         ...mismatchedReference,
       }),
       { ignored: true },
