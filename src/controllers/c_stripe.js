@@ -6,8 +6,7 @@ const {
   envSTRIPEWEBHOOKSECRET,
   envSTRIPEPAYMENTMETHODCONFIGURATIONID,
 } = require("../helpers/env");
-const { isMissing, parseMoney } = require("../helpers/money");
-const { ORDER_STATUSES } = require("../helpers/orderStatus");
+const DomainError = require("../helpers/domainError");
 const { custom, failed, success } = require("../helpers/response");
 const {
   isStripePaymentAllowed,
@@ -22,27 +21,22 @@ const {
   mUpdateStripeAccount,
 } = require("../modules/m_shop");
 const {
-  attachPaymentIntentToOrder,
-  createPaymentRecord,
-  createPendingStripeOrder,
+  cancelProvisionalStripeOrder,
   getPaidOrderForRefund,
   getPendingStripeOrderForCounter,
+  getStripeOrderForCancellation,
   markPaymentCanceled,
   markPaymentFailed,
   markPaymentRefunded,
   markPaymentSucceeded,
   markStripeOrderPayAtCounter,
+  persistPaymentIntentForOrder,
+  persistReplacementPaymentIntent,
 } = require("../modules/m_payments");
-
-const now = () => new Date().toISOString().slice(0, 19).replace("T", " ");
-
-const makeOrderNumber = () => {
-  const timestamp = new Date().valueOf().toString();
-  const randomValue = Math.floor(Math.random() * 100)
-    .toString()
-    .padStart(2, "0");
-  return (timestamp + randomValue).slice(-4);
-};
+const {
+  createCheckout,
+  normalizeCheckoutRequestBody,
+} = require("../modules/m_checkout");
 
 const getBaseUrl = (req) => `${req.protocol}://${req.get("host")}`;
 
@@ -140,39 +134,42 @@ exports.getConnectStatus = async (req, res) => {
   }
 };
 
-exports.createQrTablePaymentIntent = async (req, res) => {
+const buildQrTablePaymentIntentController = ({
+  getShopInfo = mGetShopInfo,
+  createCheckout: createStripeCheckout = createCheckout,
+  getStripe: getStripeClient = getStripe,
+  persistPaymentIntentForOrder: persistPaymentIntent = persistPaymentIntentForOrder,
+  cancelProvisionalStripeOrder: cancelProvisional = cancelProvisionalStripeOrder,
+  isStripePaymentAllowed: stripePaymentAllowed = isStripePaymentAllowed,
+  publishableKey = envSTRIPEPUBLISHABLEKEY,
+  paymentMethodConfigurationId = envSTRIPEPAYMENTMETHODCONFIGURATIONID,
+  logger = console,
+} = {}) => async (req, res) => {
+  let provisionalOrderId = null;
+  let paymentIntent = null;
   try {
     const body = req.body || {};
-    const subtotal = parseMoney(body.subtotal);
-    const details = Array.isArray(body.items) ? body.items : [];
-
-    if (
-      !body.customer ||
-      isMissing(body.subtotal) ||
-      subtotal === null ||
-      !body.customerID ||
-      details.length === 0
-    ) {
-      return custom(res, 400, "Requete paiement invalide.", null, null);
-    }
-
-    const rows = await mGetShopInfo(req.shopid);
+    const rows = await getShopInfo(req.shopid);
     const shop = rows[0];
     if (!shop) {
-      return custom(res, 404, "Restaurant introuvable.", null, null);
+      return custom(res, 404, "Restaurant introuvable.", null, {
+        code: "SHOP_NOT_FOUND",
+      });
     }
 
     if ([true, 1, "1", "true"].includes(shop.kitchen_closed)) {
-      return custom(res, 422, "La cuisine est fermee.", null, null);
+      return custom(res, 422, "La cuisine est fermee.", null, {
+        code: "KITCHEN_CLOSED",
+      });
     }
 
-    if (!isStripePaymentAllowed(shop.qr_payment_mode)) {
+    if (!stripePaymentAllowed(shop.qr_payment_mode)) {
       return custom(
         res,
         422,
         "Le paiement Stripe n'est pas actif pour ce restaurant.",
         null,
-        null,
+        { code: "STRIPE_PAYMENT_DISABLED" },
       );
     }
 
@@ -185,83 +182,372 @@ exports.createQrTablePaymentIntent = async (req, res) => {
         422,
         "Le restaurant doit connecter Stripe avant d'accepter les paiements.",
         null,
-        null,
+        { code: "STRIPE_CONNECT_INCOMPLETE" },
       );
     }
 
-    const order = {
-      ordernumber: makeOrderNumber(),
-      customer: body.customer,
-      customerID: body.customerID,
-      operator: body.operator || null,
-      subtotal,
-      payment: "Stripe",
-      payment_status: "requires_payment",
-      payment_provider: "stripe",
-      remark: body.remark,
-      phone: body.phone,
-      status: ORDER_STATUSES.PENDING,
-      created: now(),
-      finished: now(),
-      shopid: req.shopid,
-    };
-    const orderDetails = details.map((item) => ({
-      productid: item.productid || item.id,
-      price: parseMoney(item.price),
-      qty: item.qty,
-      total: parseMoney(item.total),
-      customizationList: item.customizationList,
-    }));
-
-    const invalidDetail = orderDetails.some(
-      (item) =>
-        !item.productid ||
-        item.price === null ||
-        !item.qty ||
-        item.total === null,
-    );
-    if (invalidDetail) {
-      return custom(res, 400, "Details de commande invalides.", null, null);
+    const checkoutResult = await createStripeCheckout({
+      shopId: req.shopid,
+      actorId: req.id,
+      ...normalizeCheckoutRequestBody(body, { paymentModeOverride: "stripe" }),
+    });
+    provisionalOrderId = checkoutResult.orderId;
+    if (checkoutResult.payment_status !== "requires_payment") {
+      provisionalOrderId = null;
+      return custom(res, 409, "Cette commande a deja ete traitee.", null, {
+        orderId: checkoutResult.orderId,
+      });
     }
 
-    const orderResult = await createPendingStripeOrder({
-      order,
-      details: orderDetails,
-    });
-
     const stripeParams = buildDestinationPaymentIntentParams({
-      amount: subtotal,
+      amount: checkoutResult.total,
       currency: "eur",
       connectedAccountId: shop.stripe_account_id,
-      orderId: orderResult.insertId,
+      orderId: provisionalOrderId,
       shopId: req.shopid,
       commissionPercent: shop.stripe_commission_percent,
-      paymentMethodConfigurationId: envSTRIPEPAYMENTMETHODCONFIGURATIONID,
+      paymentMethodConfigurationId,
     });
 
-    const paymentIntent = await getStripe().paymentIntents.create(stripeParams);
-    await attachPaymentIntentToOrder(orderResult.insertId, paymentIntent.id);
-    await createPaymentRecord({
-      order_id: orderResult.insertId,
-      shop_id: req.shopid,
+    paymentIntent = await getStripeClient().paymentIntents.create(stripeParams, {
+      idempotencyKey: `qr-${req.shopid}-${body.client_order_token}`,
+    });
+    const persistence = await persistPaymentIntent({
+      orderId: provisionalOrderId,
+      shopId: req.shopid,
       stripe_payment_intent_id: paymentIntent.id,
-      amount: subtotal,
-      amount_cents: toStripeAmount(subtotal),
+      amount: checkoutResult.total,
+      amount_cents: toStripeAmount(checkoutResult.total),
       application_fee_amount: stripeParams.application_fee_amount,
       currency: stripeParams.currency,
       status: paymentIntent.status,
     });
+    if (!persistence.attached) {
+      if (paymentIntent.status !== "canceled") {
+        try {
+          await getStripeClient().paymentIntents.cancel(paymentIntent.id);
+        } catch (cancelError) {
+          logger.error("Stripe terminal PaymentIntent cleanup failed", cancelError);
+        }
+      }
+      provisionalOrderId = null;
+      return custom(res, 409, "Cette commande a deja ete traitee.", null, {
+        orderId: checkoutResult.orderId,
+        payment_status: persistence.payment_status || null,
+      });
+    }
 
     success(res, "Paiement Stripe cree.", null, {
-      orderId: orderResult.insertId,
+      orderId: provisionalOrderId,
       paymentIntentId: paymentIntent.id,
       clientSecret: paymentIntent.client_secret,
-      publishableKey: envSTRIPEPUBLISHABLEKEY,
+      publishableKey,
     });
   } catch (error) {
-    failed(res, "Erreur lors de la creation du paiement Stripe.", error.message);
+    if (provisionalOrderId) {
+      let externalCancellationConfirmed = !paymentIntent;
+      if (paymentIntent && paymentIntent.status !== "canceled") {
+        try {
+          const canceledPaymentIntent = await getStripeClient().paymentIntents.cancel(
+            paymentIntent.id,
+          );
+          externalCancellationConfirmed = canceledPaymentIntent
+            && canceledPaymentIntent.status === "canceled";
+        } catch (cancelError) {
+          logger.error("Stripe PaymentIntent cleanup failed", cancelError);
+        }
+      } else if (paymentIntent) {
+        externalCancellationConfirmed = true;
+      }
+      if (externalCancellationConfirmed) {
+        try {
+          await cancelProvisional(provisionalOrderId, req.shopid);
+        } catch (cleanupError) {
+          logger.error("Provisional Stripe order cleanup failed", cleanupError);
+        }
+      }
+    }
+
+    if (error instanceof DomainError) {
+      const data = { code: error.code };
+      for (const key of Object.keys(error)) {
+        if (!["status", "code"].includes(key)) data[key] = error[key];
+      }
+      return custom(res, error.status, error.message, null, data);
+    }
+
+    logger.error("Stripe payment creation failed", error);
+    return failed(res, "Erreur lors de la creation du paiement Stripe.");
   }
 };
+
+exports.buildQrTablePaymentIntentController = buildQrTablePaymentIntentController;
+exports.createQrTablePaymentIntent = buildQrTablePaymentIntentController();
+
+const buildRegenerateOrderPaymentIntent = ({
+  getShopInfo = mGetShopInfo,
+  getStripe: getStripeClient = getStripe,
+  persistReplacementPaymentIntent: persistReplacement = persistReplacementPaymentIntent,
+  publishableKey = envSTRIPEPUBLISHABLEKEY,
+  paymentMethodConfigurationId = envSTRIPEPAYMENTMETHODCONFIGURATIONID,
+} = {}) => async ({ order, contentRevision }) => {
+  const stripe = getStripeClient();
+  const paymentResponse = (paymentIntent) => ({
+    orderId: Number(order.id),
+    paymentIntentId: paymentIntent.id,
+    clientSecret: paymentIntent.client_secret,
+    publishableKey,
+  });
+  const usable = (paymentIntent) => paymentIntent
+    && !["canceled", "succeeded"].includes(paymentIntent.status)
+    && paymentIntent.client_secret;
+
+  if (order.stripe_payment_intent_id) {
+    let attached;
+    try {
+      attached = await stripe.paymentIntents.retrieve(order.stripe_payment_intent_id);
+    } catch (error) {
+      throw new DomainError(
+        409,
+        "STRIPE_PAYMENT_INTENT_UNAVAILABLE",
+        "Le paiement Stripe attache ne peut pas etre recupere.",
+      );
+    }
+    if (!usable(attached)) {
+      throw new DomainError(
+        409,
+        "STRIPE_PAYMENT_INTENT_TERMINAL",
+        "Le paiement Stripe attache n'est plus utilisable.",
+      );
+    }
+    return paymentResponse(attached);
+  }
+
+  if (!order.stripe_replacement_attempt_token) {
+    throw new DomainError(
+      409,
+      "STRIPE_REPLACEMENT_ATTEMPT_MISSING",
+      "La tentative de remplacement Stripe est introuvable.",
+    );
+  }
+  const rows = await getShopInfo(order.shopid);
+  const shop = rows[0];
+  if (!shop
+    || !shop.stripe_account_id
+    || ![true, 1, "1", "true"].includes(shop.stripe_charges_enabled)) {
+    throw new DomainError(
+      422,
+      "STRIPE_CONNECT_INCOMPLETE",
+      "Le restaurant doit connecter Stripe avant d'accepter les paiements.",
+    );
+  }
+  const params = buildDestinationPaymentIntentParams({
+    amount: order.subtotal,
+    currency: "eur",
+    connectedAccountId: shop.stripe_account_id,
+    orderId: order.id,
+    shopId: order.shopid,
+    commissionPercent: shop.stripe_commission_percent,
+    paymentMethodConfigurationId,
+  });
+  const paymentIntent = await stripe.paymentIntents.create(params, {
+    idempotencyKey: `order-edit:${order.shopid}:${order.id}:${contentRevision}`,
+  });
+  if (!usable(paymentIntent)) {
+    throw new DomainError(
+      409,
+      "STRIPE_PAYMENT_INTENT_TERMINAL",
+      "Le nouveau paiement Stripe n'est pas utilisable.",
+    );
+  }
+
+  let persistence;
+  try {
+    persistence = await persistReplacement({
+      orderId: order.id,
+      shopId: order.shopid,
+      stripe_payment_intent_id: paymentIntent.id,
+      amount: order.subtotal,
+      amount_cents: toStripeAmount(order.subtotal),
+      application_fee_amount: params.application_fee_amount,
+      currency: params.currency,
+      status: paymentIntent.status,
+      replacement_attempt_token: order.stripe_replacement_attempt_token,
+    });
+  } catch (error) {
+    // Keep the idempotent Stripe intent available for a later attachment retry.
+    throw error;
+  }
+  if (!persistence.attached) {
+    try {
+      await stripe.paymentIntents.cancel(paymentIntent.id);
+    } catch (error) {
+      // A stale intent is never attached locally; webhook handling remains harmless.
+    }
+    throw new DomainError(409, "ORDER_EDIT_CONFLICT", "La commande a change.");
+  }
+  return paymentResponse(paymentIntent);
+};
+
+exports.buildRegenerateOrderPaymentIntent = buildRegenerateOrderPaymentIntent;
+exports.regenerateOrderPaymentIntent = buildRegenerateOrderPaymentIntent();
+
+const isPositiveOrderId = (value) => {
+  if (typeof value === "number") return Number.isSafeInteger(value) && value > 0;
+  if (typeof value !== "string" || !/^\d+$/.test(value.trim())) return false;
+  const number = Number(value.trim());
+  return Number.isSafeInteger(number) && number > 0;
+};
+const isReleasedStripeOrder = (order) => order
+  && order.payment_provider === "stripe"
+  && ["canceled", "failed"].includes(order.payment_status);
+const canceledStripeResponse = (res, orderId, idempotentReplay) => custom(
+  res,
+  200,
+  idempotentReplay ? "Paiement Stripe deja annule." : "Paiement Stripe annule.",
+  null,
+  {
+    orderId,
+    canceled: true,
+    idempotent_replay: idempotentReplay,
+  },
+);
+
+const buildCancelQrTablePaymentIntentController = ({
+  getStripeOrderForCancellation: findOrder = getStripeOrderForCancellation,
+  getStripe: getStripeClient = getStripe,
+  cancelProvisionalStripeOrder: cancelProvisional = cancelProvisionalStripeOrder,
+  logger = console,
+} = {}) => async (req, res) => {
+  const rawOrderId = req.params && req.params.orderId;
+  if (!isPositiveOrderId(rawOrderId)) {
+    return custom(res, 400, "Identifiant de commande invalide.", null, {
+      code: "STRIPE_ORDER_CANCEL_INVALID",
+      field: "order_id",
+    });
+  }
+
+  const orderId = Number(rawOrderId);
+  let order;
+  try {
+    order = await findOrder(orderId, req.shopid);
+  } catch (error) {
+    logger.error("Stripe cancellation order lookup failed", error);
+    return custom(res, 500, "Erreur lors de l'annulation du paiement Stripe.", null, {
+      code: "INTERNAL_ERROR",
+    });
+  }
+
+  if (!order) {
+    return custom(res, 404, "Commande Stripe introuvable.", null, {
+      code: "STRIPE_ORDER_NOT_FOUND",
+    });
+  }
+
+  if (isReleasedStripeOrder(order)) {
+    return canceledStripeResponse(res, orderId, true);
+  }
+
+  if (order.payment_provider !== "stripe" || order.payment_status !== "requires_payment") {
+    return custom(res, 409, "Cette commande ne peut plus etre annulee.", null, {
+      code: "STRIPE_ORDER_NOT_CANCELABLE",
+      payment_status: order.payment_status || null,
+    });
+  }
+
+  if (!order.stripe_payment_intent_id) {
+    return custom(res, 409, "Le paiement Stripe ne peut pas etre annule.", null, {
+      code: "STRIPE_PAYMENT_CANCEL_FAILED",
+    });
+  }
+
+  let paymentIntent;
+  let externalCancellationReplay = false;
+  try {
+    paymentIntent = await getStripeClient().paymentIntents.retrieve(
+      order.stripe_payment_intent_id,
+    );
+    if (paymentIntent.status === "succeeded") {
+      return custom(res, 409, "Le paiement est deja confirme par Stripe.", null, {
+        code: "STRIPE_PAYMENT_ALREADY_SUCCEEDED",
+      });
+    }
+  } catch (error) {
+    logger.error("Stripe PaymentIntent retrieval failed", error);
+    return custom(res, 409, "Le paiement Stripe ne peut pas etre annule.", null, {
+      code: "STRIPE_PAYMENT_CANCEL_FAILED",
+    });
+  }
+
+  if (paymentIntent.status === "canceled") {
+    externalCancellationReplay = true;
+  } else {
+    try {
+      paymentIntent = await getStripeClient().paymentIntents.cancel(
+        order.stripe_payment_intent_id,
+      );
+    } catch (cancelError) {
+      logger.error("Stripe PaymentIntent cancellation failed", cancelError);
+      try {
+        paymentIntent = await getStripeClient().paymentIntents.retrieve(
+          order.stripe_payment_intent_id,
+        );
+      } catch (refreshError) {
+        logger.error("Stripe PaymentIntent cancellation refresh failed", refreshError);
+        return custom(res, 409, "Le paiement Stripe ne peut pas etre annule.", null, {
+          code: "STRIPE_PAYMENT_CANCEL_FAILED",
+        });
+      }
+
+      if (paymentIntent.status === "succeeded") {
+        return custom(res, 409, "Le paiement est deja confirme par Stripe.", null, {
+          code: "STRIPE_PAYMENT_ALREADY_SUCCEEDED",
+        });
+      }
+      if (paymentIntent.status !== "canceled") {
+        return custom(res, 409, "Le paiement Stripe ne peut pas etre annule.", null, {
+          code: "STRIPE_PAYMENT_CANCEL_FAILED",
+        });
+      }
+      externalCancellationReplay = true;
+    }
+  }
+
+  if (!paymentIntent || paymentIntent.status !== "canceled") {
+    return custom(res, 409, "Le paiement Stripe ne peut pas etre annule.", null, {
+      code: "STRIPE_PAYMENT_CANCEL_FAILED",
+    });
+  }
+
+  try {
+    const cancellation = await cancelProvisional(orderId, req.shopid);
+    if (cancellation && cancellation.missing) {
+      return custom(res, 404, "Commande Stripe introuvable.", null, {
+        code: "STRIPE_ORDER_NOT_FOUND",
+      });
+    }
+    if (cancellation && cancellation.ignored) {
+      const currentOrder = await findOrder(orderId, req.shopid);
+      if (isReleasedStripeOrder(currentOrder)) {
+        return canceledStripeResponse(res, orderId, true);
+      }
+    }
+    if (!cancellation || !cancellation.canceled) {
+      return custom(res, 409, "Cette commande ne peut plus etre annulee.", null, {
+        code: "STRIPE_ORDER_NOT_CANCELABLE",
+      });
+    }
+    return canceledStripeResponse(res, orderId, externalCancellationReplay);
+  } catch (error) {
+    logger.error("Provisional Stripe order cancellation failed", error);
+    return custom(res, 500, "Erreur lors de l'annulation du paiement Stripe.", null, {
+      code: "INTERNAL_ERROR",
+    });
+  }
+};
+
+exports.buildCancelQrTablePaymentIntentController = buildCancelQrTablePaymentIntentController;
+exports.cancelQrTablePaymentIntent = buildCancelQrTablePaymentIntentController();
 
 exports.markQrTablePaymentAtCounter = async (req, res) => {
   try {

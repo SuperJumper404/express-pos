@@ -95,3 +95,33 @@ sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin d
 === >start docker
 ====> metter docker en admin
 sudo usermod -aG docker $USER
+
+### Configuration de la machine host pour le prochain hosting
+
+Avant de lancer les GitHub Actions de deploiement, l'utilisateur du workflow
+doit pouvoir administrer les fichiers du projet sur la machine host.
+Pour l'environnement staging actuel, cet utilisateur est `vscodeserver`.
+
+Ajouter `vscodeserver` au groupe sudo :
+
+```
+sudo usermod -aG sudo vscodeserver
+```
+
+Autoriser `vscodeserver` a utiliser sudo sans mot de passe :
+
+```
+sudo visudo
+```
+
+Ajouter cette ligne a la fin du fichier ouvert par `visudo` :
+
+```
+vscodeserver ALL=(ALL) NOPASSWD:ALL
+```
+
+Corriger les droits des fichiers deja presents dans le dossier de deploiement :
+
+```
+sudo chown -R vscodeserver:vscodeserver /home/vscodeserver/smarteat
+```

@@ -5,7 +5,6 @@ const {
   mAddDetailOrder,
   mReduceStock,
   mAddNewStocks,
-  mUpdateOrders,
   mDeleteOrder,
   mOrdersbyUserId,
   mArchiveOrder,
@@ -17,6 +16,7 @@ const {
 } = require("../modules/m_orders");
 
 const { custom, success, failed } = require("../helpers/response");
+const DomainError = require("../helpers/domainError");
 const { envJWTKEY } = require("../helpers/env");
 const { isMissing, parseMoney } = require("../helpers/money");
 const { ORDER_STATUSES } = require("../helpers/orderStatus");
@@ -28,11 +28,23 @@ const { getStripe } = require("../config/stripe");
 const {
   markPaymentCanceled,
   markPaymentSucceeded,
+  markStripeOrderPayAtCounter,
 } = require("../modules/m_payments");
+const {
+  buildCheckoutController,
+  createCheckout,
+} = require("../modules/m_checkout");
+const {
+  transitionOrderStatus,
+} = require("../modules/m_orderTransitions");
 
 const jwt = require("jsonwebtoken");
 const response = require("../helpers/response");
 const { mGetShopInfo } = require("../modules/m_shop");
+
+exports.checkout = buildCheckoutController({
+  checkout: { createCheckout },
+});
 
 const moneyOrZero = (value) => {
   const parsed = parseMoney(value);
@@ -43,6 +55,12 @@ const hasPendingStripePayment = (order = {}) =>
   order.payment_provider === "stripe" &&
   order.payment_status === "requires_payment" &&
   order.stripe_payment_intent_id;
+
+const stripePaymentNotSettledError = () => new DomainError(
+  409,
+  "STRIPE_PAYMENT_NOT_SETTLED",
+  "Le paiement Stripe ne peut pas etre confirme pour cette commande.",
+);
 
 const cancelPendingStripePayment = async (order) => {
   if (!hasPendingStripePayment(order)) return;
@@ -59,13 +77,23 @@ const cancelPendingStripePayment = async (order) => {
     await stripe.paymentIntents.cancel(paymentIntentId);
   }
 
-  await markPaymentCanceled(paymentIntentId);
+  return paymentIntentId;
 };
 
-const syncPendingStripeBeforeCashRegisterArchive = async (order) => {
-  if (!shouldCancelPendingStripePayment(order)) return order;
+const buildPendingStripeArchiveSync = ({
+  getStripe: getStripeClient = getStripe,
+  markPaymentSucceeded: commitSucceededPayment = markPaymentSucceeded,
+  markStripeOrderPayAtCounter: commitPayAtCounter = markStripeOrderPayAtCounter,
+  findOrderById = mFindOrderById,
+} = {}) => async (order) => {
+  if (!shouldCancelPendingStripePayment(order)) {
+    if (order.payment_provider === "stripe" && order.payment_status !== "paid") {
+      throw new Error("Commande Stripe annulee ou echouee non encaissable");
+    }
+    return order;
+  }
 
-  const stripe = getStripe();
+  const stripe = getStripeClient();
   const paymentIntentId = order.stripe_payment_intent_id;
   const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
 
@@ -73,22 +101,30 @@ const syncPendingStripeBeforeCashRegisterArchive = async (order) => {
     const charge = paymentIntent.latest_charge
       ? await stripe.charges.retrieve(paymentIntent.latest_charge)
       : null;
-    await markPaymentSucceeded(paymentIntent, charge);
+    const transition = await commitSucceededPayment(paymentIntent, charge);
+    if (!transition || (!transition.paid && !transition.alreadyPaid)) {
+      throw stripePaymentNotSettledError();
+    }
 
-    const refreshedOrders = await mFindOrderById(order.id, order.shopid);
-    return refreshedOrders[0] || order;
+    const refreshedOrders = await findOrderById(order.id, order.shopid);
+    const refreshedOrder = refreshedOrders[0];
+    if (!refreshedOrder || refreshedOrder.payment_status !== "paid") {
+      throw stripePaymentNotSettledError();
+    }
+    return refreshedOrder;
   }
 
   if (paymentIntent.status !== "canceled") {
     await stripe.paymentIntents.cancel(paymentIntentId);
   }
 
-  await markPaymentCanceled(paymentIntentId);
-  return {
-    ...order,
-    payment_status: "canceled",
-  };
+  await commitPayAtCounter(order.id, order.shopid);
+  const refreshedOrders = await findOrderById(order.id, order.shopid);
+  return refreshedOrders[0] || order;
 };
+
+const syncPendingStripeBeforeCashRegisterArchive = buildPendingStripeArchiveSync();
+exports.buildPendingStripeArchiveSync = buildPendingStripeArchiveSync;
 
 exports.allOrder = async (req, res) => {
   mAllOrder(req.shopid)
@@ -111,7 +147,7 @@ exports.ordersbyUserId = async (req, res) => {
 };
 exports.detailOrder = (req, res) => {
   const id = req.params.id;
-  mDetailOrder(id)
+  mDetailOrder(id, req.shopid)
     .then((response) => {
       if (response.length > 0) {
         success(res, "Détail de la commande récupéré.", null, response);
@@ -254,81 +290,94 @@ exports.addDetailOrder = (req, res) => {
       });
   }
 };
-exports.updateOrder = async (req, res) => {
-  const id = req.params.id;
-  let body = req.body;
-  body.finished = new Date().toISOString().slice(0, 19).replace("T", " ");
-  if (!req.body.operator || !req.body.status) {
-    custom(res, 400, "Requête invalide.", null, null);
-  } else {
-    let currentStatus = await mDetailOrder(id).then((response) => {
-      return response;
+const buildUpdateOrderController = ({
+  transitionOrderStatus: transitionStatus = transitionOrderStatus,
+  cancelPendingStripePayment: syncCanceledPayment = cancelPendingStripePayment,
+  markPaymentCanceled: settleCanceledPayment = markPaymentCanceled,
+} = {}) => async (req, res) => {
+  const orderId = Number(req.params.id);
+  const shopId = Number(req.shopid);
+  const operator = Number(req.id);
+  const nextStatus = Number(req.body.status);
+  if (!operator || !nextStatus) {
+    return custom(res, 400, "Requête invalide.", null, null);
+  }
+
+  let cancellationError;
+  try {
+    const { result } = await transitionStatus({
+      orderId,
+      shopId,
+      operator,
+      nextStatus,
+      ...(nextStatus === ORDER_STATUSES.CANCELED && {
+        beforeTransition: async ({ order, connection }) => {
+          try {
+            const paymentIntentId = await syncCanceledPayment(order);
+            if (paymentIntentId) {
+              await settleCanceledPayment(
+                paymentIntentId,
+                { connection, order },
+              );
+            }
+          } catch (error) {
+            cancellationError = error;
+            throw error;
+          }
+        },
+      }),
     });
-    if (!currentStatus.length) {
+    if (!result.affectedRows) {
       return custom(res, 404, "Commande introuvable.", null, null);
     }
-    const currentOrder = currentStatus[0];
-    const nextStatus = Number(body.status);
-    const canUpdateStatus =
-      (currentOrder.status == ORDER_STATUSES.PENDING &&
-        nextStatus === ORDER_STATUSES.PREPARING) ||
-      (currentOrder.status == ORDER_STATUSES.PREPARING &&
-        nextStatus === ORDER_STATUSES.FINISHED) ||
-      (currentOrder.status == ORDER_STATUSES.PENDING &&
-        nextStatus === ORDER_STATUSES.CANCELED) ||
-      (currentOrder.status == ORDER_STATUSES.PREPARING &&
-        nextStatus === ORDER_STATUSES.CANCELED);
-
-    if (canUpdateStatus) {
-      if (nextStatus === ORDER_STATUSES.CANCELED) {
-        try {
-          await cancelPendingStripePayment(currentOrder);
-        } catch (error) {
-          return failed(
-            res,
-            "Erreur lors de l'annulation du paiement Stripe.",
-            error.message,
-          );
-        }
-      }
-
-      mUpdateOrders(body, id)
-        .then((response) => {
-          if (response.affectedRows) {
-            success(res, "Commande mise à jour avec succès.", null, null);
-          } else {
-            custom(res, 404, "Commande introuvable.", null, null);
-          }
-        })
-        .catch((error) => {
-          failed(res, "Erreur serveur.", error.message);
-        });
-    } else {
-      custom(res, 422, "Changement de statut non autorisé pour cette commande.", null, null);
+    return success(res, "Commande mise à jour avec succès.", null, null);
+  } catch (error) {
+    if (error === cancellationError) {
+      return failed(
+        res,
+        "Erreur lors de l'annulation du paiement Stripe.",
+        error.message,
+      );
     }
+    if (error instanceof DomainError) {
+      return custom(res, error.status, error.message, null, { code: error.code });
+    }
+    return failed(res, "Erreur serveur.", error.message);
   }
 };
 
-exports.archiveOrder = async (req, res) => {
+exports.buildUpdateOrderController = buildUpdateOrderController;
+exports.updateOrder = buildUpdateOrderController();
+
+const buildArchiveOrderController = ({
+  findOrderById = mFindOrderById,
+  syncPendingStripeBeforeCashRegisterArchive: syncPendingStripe = (
+    syncPendingStripeBeforeCashRegisterArchive
+  ),
+  archiveOrder = mArchiveOrder,
+} = {}) => async (req, res) => {
   const id = req.params.id;
   const payment_method = req.body.payment_method;
   console.log("ON archive :", id);
 
   try {
-    const orders = await mFindOrderById(id, req.shopid);
+    const orders = await findOrderById(id, req.shopid);
     if (!orders.length) {
       return custom(res, 404, "Commande introuvable.", null, null);
     }
 
-    await syncPendingStripeBeforeCashRegisterArchive(orders[0]);
+    await syncPendingStripe(orders[0]);
 
-    const response = await mArchiveOrder(id, payment_method, req.shopid);
+    const response = await archiveOrder(id, payment_method, req.shopid);
     if (response.affectedRows) {
       return success(res, "Commande archivée avec succès.", null, null);
     }
 
     return custom(res, 404, "Commande introuvable.", null, null);
   } catch (error) {
+    if (error instanceof DomainError && error.code === "STRIPE_PAYMENT_NOT_SETTLED") {
+      return custom(res, error.status, error.message, null, { code: error.code });
+    }
     if (String(error.message || "").includes("Moyen de paiement requis")) {
       return custom(res, 422, error.message, null, null);
     }
@@ -336,6 +385,9 @@ exports.archiveOrder = async (req, res) => {
     return failed(res, "Erreur serveur.", error.message);
   }
 };
+
+exports.buildArchiveOrderController = buildArchiveOrderController;
+exports.archiveOrder = buildArchiveOrderController();
 
 exports.allArchivedOrders = async (req, res) => {
   console.log("Controler History");

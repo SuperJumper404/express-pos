@@ -1,475 +1,279 @@
-const conn = require("../config/db");
+const pool = require("../config/dbPool");
+const { withTransaction } = require("../helpers/withTransaction");
+const {
+  getProductCustomizationState,
+  getResolvedProductConfigurations,
+  replaceProductConfiguration,
+} = require("./m_customizations");
 
-const mDetailProduct = function (id) {
-  return new Promise((resolve, reject) => {
-    // 1. Récupérez toutes les informations du produit, ses personnalisations et ses choix.
-    conn.query(
-      `SELECT 
-      products.*, 
-  category.name AS category , category.id AS categoryid,
-  product_customization.id AS customization_id,
-  product_customization.name AS customization_name,
-  product_customization.description AS customization_description,
-  product_customization.limit_choice AS customization_limit,
-  product_customization.mandatory AS customization_mandatory,
-  product_choice.id AS choice_id,
-  product_choice.name AS choice_name,
-  product_choice.price AS choice_price 
-FROM products 
-LEFT JOIN category ON products.categoryId=category.id 
-LEFT JOIN product_customization ON products.id=product_customization.product_id 
-LEFT JOIN product_choice ON product_customization.id=product_choice.product_customization_id 
-WHERE products.id = ?
-`,
-      [id],
-      (err, result) => {
-        if (err) {
-          return reject(new Error(err));
-        }
-        // 2. Formatez le résultat selon la structure souhaitée
-        let formattedResult = {
-          id: result[0].id,
-          name: result[0].name,
-          shopid: result[0].shopid,
-          description: result[0].description,
-          category: result[0].category,
-          categoryid: result[0].categoryid,
-          price: result[0].price,
-          stock: result[0].stock,
-          image: result[0].image,
-          archived: result[0].archived,
-          is_hidden: result[0].is_hidden,
-          product_customization: [],
-        };
-
-        result.forEach((row) => {
-          if (row.choice_name) {
-            // Nous nous assurons qu'il y a un choix valide pour cette customisation
-            let existingCustomization =
-              formattedResult.product_customization.find(
-                (c) => c.name === row.customization_name,
-              );
-
-            if (!existingCustomization) {
-              let newCustomization = {
-                id: row.customization_id,
-                name: row.customization_name,
-                description: row.customization_description,
-                limit_choice: row.customization_limit,
-                items: [],
-                mandatory: row.customization_mandatory === 1 ? true : false,
-              };
-              formattedResult.product_customization.push(newCustomization);
-              existingCustomization = newCustomization;
-            }
-
-            existingCustomization.items.push({
-              id: row.choice_id,
-              name: row.choice_name,
-              price: row.choice_price,
-            });
-          }
-        });
-
-        // console.log(
-        //   "Formated Detail Product ",
-        //   JSON.stringify(formattedResult)
-        // );
-
-        // 3. Retournez le résultat formaté
-        resolve([formattedResult]);
-      },
-    );
-  });
+const queryRows = async (connection, sql, params) => {
+  const [rows] = await connection.query(sql, params);
+  return rows;
 };
-module.exports = {
-  mAddProduct: (data) => {
+
+const projectLegacyCustomizations = (steps) => (steps || []).map((step) => ({
+  name: step.name,
+  description: step.description,
+  limit_choice: step.maximum_choices,
+  mandatory: step.minimum_choices > 0,
+  items: (step.choices || [])
+    .filter((choice) => choice.active !== false && choice.available !== false)
+    .map((choice) => ({
+      id: choice.product_step_choice_id,
+      name: choice.name,
+      price: Number(choice.extra_price),
+    })),
+}));
+
+const minimumCommandablePrice = (price, steps, customizationAvailable) => {
+  if (!customizationAvailable) return null;
+  const minimumExtras = (steps || []).reduce((total, step) => {
+    if (step.active === false || step.minimum_choices <= 0) return total;
+    const availablePrices = (step.choices || [])
+      .filter((choice) => choice.active !== false && choice.available !== false)
+      .map((choice) => Number(choice.extra_price) || 0)
+      .sort((left, right) => left - right);
+    return total + availablePrices
+      .slice(0, step.minimum_choices)
+      .reduce((stepTotal, extraPrice) => stepTotal + extraPrice, 0);
+  }, 0);
+  return Number((Number(price) + minimumExtras).toFixed(2));
+};
+
+const productConfiguration = (configurations, productId) => (
+  configurations.get(productId) || configurations.get(String(productId)) || []
+);
+
+const removeConfigurationAssociations = async (connection, productId) => {
+  await queryRows(connection, `
+    DELETE FROM product_customization_step_choices
+    WHERE product_customization_step_id IN (
+      SELECT id FROM product_customization_steps WHERE product_id = ?
+    )
+  `, [productId]);
+  await queryRows(
+    connection,
+    "DELETE FROM product_customization_steps WHERE product_id = ?",
+    [productId],
+  );
+};
+
+const writeLegacyConfiguration = async ({
+  connection,
+  shopId,
+  productId,
+  customizations,
+}) => {
+  for (let stepIndex = 0; stepIndex < customizations.length; stepIndex += 1) {
+    const customization = customizations[stepIndex];
+    const items = Array.isArray(customization.items) ? customization.items : [];
+    const requestedMaximum = Number(customization.limit_choice);
+    const maximumChoices = Number.isInteger(requestedMaximum) && requestedMaximum > 0
+      ? requestedMaximum
+      : Math.max(items.length, 1);
+    const stepResult = await queryRows(connection, `
+      INSERT INTO customization_steps (
+        shop_id, name, description, active, created, updated
+      ) VALUES (?, ?, ?, 1, NOW(), NULL)
+    `, [shopId, customization.name, customization.description || null]);
+    const productStepResult = await queryRows(connection, `
+      INSERT INTO product_customization_steps (
+        product_id, step_id, position, minimum_choices, maximum_choices,
+        active, created, updated
+      ) VALUES (?, ?, ?, ?, ?, 1, NOW(), NULL)
+    `, [
+      productId,
+      stepResult.insertId,
+      stepIndex,
+      customization.mandatory ? 1 : 0,
+      maximumChoices,
+    ]);
+
+    for (let choiceIndex = 0; choiceIndex < items.length; choiceIndex += 1) {
+      const item = items[choiceIndex];
+      const choiceResult = await queryRows(connection, `
+        INSERT INTO customization_step_choices (
+          step_id, choice_type, name, image, linked_product_id,
+          default_position, active, created, updated
+        ) VALUES (?, 'simple', ?, NULL, NULL, ?, 1, NOW(), NULL)
+      `, [stepResult.insertId, item.name, choiceIndex]);
+      await queryRows(connection, `
+        INSERT INTO product_customization_step_choices (
+          product_customization_step_id, step_choice_id, extra_price,
+          position, active
+        ) VALUES (?, ?, ?, ?, 1)
+      `, [
+        productStepResult.insertId,
+        choiceResult.insertId,
+        Number(item.price) || 0,
+        choiceIndex,
+      ]);
+    }
+  }
+};
+
+const buildProductModule = ({
+  connection = pool,
+  withTransaction: runInTransaction = withTransaction,
+  getResolvedProductConfigurations: resolveConfigurations = getResolvedProductConfigurations,
+  getProductCustomizationState: resolveCustomizationState = getProductCustomizationState,
+  replaceProductConfiguration: replaceConfiguration = replaceProductConfiguration,
+} = {}) => {
+  const formatProducts = async (products, shopId) => {
+    const configurations = await resolveConfigurations({
+      shopId,
+      productIds: products.map(({ id }) => id),
+      connection,
+    });
+    return products.map((product) => {
+      const steps = productConfiguration(configurations, product.id);
+      const state = resolveCustomizationState(steps);
+      return {
+        ...product,
+        customization_steps: steps,
+        product_customization: projectLegacyCustomizations(steps),
+        customization_available: state.customization_available,
+        customization_blocking: {
+          product_step_id: state.product_step_id,
+          reason: state.reason,
+        },
+        blocking_product_step_id: state.product_step_id,
+        customization_unavailable_reason: state.reason,
+        minimum_commandable_price: minimumCommandablePrice(
+          product.price,
+          steps,
+          state.customization_available,
+        ),
+      };
+    });
+  };
+
+  const mAllProduct = async (shopId) => {
+    const products = await queryRows(connection, `
+      SELECT products.*, category.name AS category, category.id AS categoryid
+      FROM products
+      LEFT JOIN category ON products.categoryId = category.id
+      WHERE products.shopid = ?
+    `, [shopId]);
+    return formatProducts(products, shopId);
+  };
+
+  const mDetailProduct = async (id) => {
+    const products = await queryRows(connection, `
+      SELECT products.*, category.name AS category, category.id AS categoryid
+      FROM products
+      LEFT JOIN category ON products.categoryId = category.id
+      WHERE products.id = ?
+    `, [id]);
+    if (products.length === 0) return [];
+    return formatProducts(products, products[0].shopid);
+  };
+
+  const mAddProduct = (data) => runInTransaction(async (transactionConnection) => {
     const productData = { ...data };
-    delete productData.product_customization; // remove the product_customization as it's not a field in products table
-    console.log("Add Product DAta", data);
-    return new Promise((resolve, reject) => {
-      conn.query("INSERT INTO products SET ?", productData, (err, result) => {
-        if (err) {
-          console.log("Erro AddProduct", err);
-          return reject(new Error(err));
-        }
-
-        // Si nous avons des customizations pour ce produit
-        if (
-          data.product_customization &&
-          data.product_customization.length > 0
-        ) {
-          console.log("We insert custom data ");
-          const productId = result.insertId; // l'ID du produit récemment inséré
-
-          // Utilisez une fonction auto-invoquée pour gérer les insertions de manière asynchrone
-          (function insertCustomization(index) {
-            const customization = data.product_customization[index];
-            console.log("Customization", JSON.stringify(customization));
-            conn.query(
-              "INSERT INTO product_customization SET ?",
-              {
-                product_id: productId,
-                name: customization.name,
-                limit_choice: customization.limit_choice,
-                description: customization.description,
-                mandatory: customization.mandatory ? 1 : 0, // Si mandatory est un champ booléen
-              },
-              (err, result) => {
-                if (err) {
-                  console.log("Err", err);
-                  return reject(new Error(err));
-                }
-
-                const customizationId = result.insertId;
-
-                // Insérer les choix pour cette customisation
-                if (customization.items && customization.items.length > 0) {
-                  customization.items.forEach((item, itemIndex) => {
-                    console.log("Item Choice", item);
-                    conn.query(
-                      "INSERT INTO product_choice SET ?",
-                      {
-                        product_customization_id: customizationId,
-                        name: item.name,
-                        price: item.price,
-                      },
-                      (err) => {
-                        if (err) {
-                          return reject(new Error(err));
-                        }
-
-                        // Si c'est le dernier élément
-                        if (itemIndex === customization.items.length - 1) {
-                          // Si c'est la dernière customisation
-                          if (index === data.product_customization.length - 1) {
-                            resolve(true);
-                          } else {
-                            // Sinon, passez à la customisation suivante
-                            insertCustomization(index + 1);
-                          }
-                        }
-                      },
-                    );
-                  });
-                } else if (index === data.product_customization.length - 1) {
-                  resolve(true);
-                } else {
-                  insertCustomization(index + 1);
-                }
-              },
-            );
-          })(0); // Commencez par la première customisation
-        } else {
-          resolve(true);
-        }
+    delete productData.customization_config;
+    delete productData.product_customization;
+    const result = await queryRows(
+      transactionConnection,
+      "INSERT INTO products SET ?",
+      productData,
+    );
+    if (Object.prototype.hasOwnProperty.call(data, "customization_config")) {
+      await replaceConfiguration({
+        shopId: data.shopid,
+        productId: result.insertId,
+        steps: data.customization_config,
+        connection: transactionConnection,
       });
-    });
-  },
-  mDetailProduct,
-  //   mAddProduct: (data) => {
-  //   console.log("New to Product To Database",   data);
-  //   return new Promise((resolve, reject) => {
-  //     conn.query("INSERT INTO products SET ?", data, (err, result) => {
-  //       if (!err) {
-  //         resolve(result);
-  //       } else {
-  //         reject(new Error(err));
-  //       }
-  //     });
-  //   });
-  // },
-  // mAllProduct: (shopid) => {
-  //   return new Promise((resolve, reject) => {
-  //     conn.query(
-  //       `SELECT *, products.id AS id, products.name AS name, category.name AS category FROM products LEFT JOIN category ON products.categoryId=category.id WHERE products.shopid = ?`,
-  //       [shopid],
-  //       (err, result) => {
-  //         if (!err) {
+    } else if (Object.prototype.hasOwnProperty.call(data, "product_customization")) {
+      await writeLegacyConfiguration({
+        connection: transactionConnection,
+        shopId: data.shopid,
+        productId: result.insertId,
+        customizations: data.product_customization || [],
+      });
+    }
+    return result;
+  });
 
-  //           resolve(result);
-  //         } else {
-  //           reject(new Error(err));
-  //         }
-  //       }
-  //     );
-  //   });
-  // },
-
-  // mDetailProduct: (id) => {
-  //   return new Promise((resolve, reject) => {
-  //     conn.query(
-  //       `SELECT products.*, category.name AS category, product_customization.*, product_choice.*
-  //            FROM products
-  //            LEFT JOIN category ON products.categoryId=category.id
-  //            LEFT JOIN product_customization ON products.id=product_customization.product_id
-  //            LEFT JOIN product_choice ON product_customization.id=product_choice.product_customization_id
-  //            WHERE products.id = ?`,
-  //       [id],
-  //       (err, result) => {
-  //         if (err) {
-  //           return reject(new Error(err));
-  //         }
-  //         // Vous devrez peut-être reformater le résultat ici pour organiser les données correctement
-  //         resolve(result);
-  //       }
-  //     );
-  //   });
-  // },
-  mAllProduct: (shopid) => {
-    return new Promise((resolve, reject) => {
-      conn.query(
-        `SELECT id FROM products WHERE products.shopid = ?`,
-        [shopid],
-        (err, result) => {
-          if (!err) {
-            const promises = result.map((row) => mDetailProduct(row.id));
-
-            Promise.all(promises)
-              .then((allDetailedProducts) => {
-                // Aplatir le tableau de tableaux en un tableau simple
-                const flattenedArray = [].concat(...allDetailedProducts);
-                resolve(flattenedArray);
-              })
-              .catch((err) => {
-                reject(new Error(err));
-              });
-          } else {
-            reject(new Error(err));
-          }
-        },
-      );
-    });
-  },
-  // mDetailProduct: (id) => {
-  //   return new Promise((resolve, reject) => {
-  //     conn.query(
-  //       "SELECT *, products.id AS id, products.name AS name, products.description AS description,  category.name AS category FROM products LEFT JOIN category ON products.categoryId=category.id WHERE products.id = ?",
-  //       [id],
-  //       (err, result) => {
-  //         if (!err) {
-  //           resolve(result);
-  //         } else {
-  //           reject(new Error(err));
-  //         }
-  //       }
-  //     );
-  //   });
-  // },
-  // mUpdateProduct: (data, id) => {
-  //   console.log("DAta To Update ", data);
-  //   return new Promise((resolve, reject) => {
-  //     conn.query(
-  //       "UPDATE products SET ? WHERE id = ?",
-  //       [data, id],
-  //       (err, result) => {
-  //         if (!err) {
-  //           resolve(result);
-  //         } else {
-  //           reject(new Error(err));
-  //         }
-  //       }
-  //     );
-  //   });
-  // },
-  mUpdateProduct: (data, id) => {
-    console.log("Data", data);
-    return new Promise((resolve, reject) => {
-      // Extraire les informations du produit
-      const productData = { ...data };
-      delete productData.product_customization;
-
-      // Mettre à jour le produit principal
-      conn.query(
-        "UPDATE products SET ? WHERE id = ?",
-        [productData, id],
-        (err, result) => {
-          if (err) {
-            return reject(new Error(err));
-          }
-
-          // Gérer les customisations
-          const customizations = data.product_customization || [];
-          if (customizations.length === 0) {
-            return resolve(true);
-          }
-
-          let handledCustomizations = 0;
-          customizations.forEach((customization) => {
-            console.log("customization", customization);
-            // Extraire les choix de la customisation
-            const choices = customization.items || [];
-            delete customization.items;
-
-            // Si l'identifiant de customisation est présent, mettez à jour, sinon insérez.
-            const handleChoices = (customizationId) => {
-              if (choices.length === 0) {
-                handledCustomizations += 1;
-                if (handledCustomizations === customizations.length) {
-                  resolve(true);
-                }
-                return;
-              }
-
-              let handledChoices = 0;
-              choices.forEach((choice) => {
-                if (choice.id) {
-                  conn.query(
-                    "UPDATE product_choice SET ? WHERE id = ?",
-                    [choice, choice.id],
-                    (err) => {
-                      if (err) {
-                        console.log(err);
-                        return reject(new Error(err));
-                      }
-                      handledChoices += 1;
-                      if (handledChoices === choices.length) {
-                        handledCustomizations += 1;
-                        if (handledCustomizations === customizations.length) {
-                          resolve(true);
-                        }
-                      }
-                    },
-                  );
-                } else {
-                  choice.product_customization_id = customizationId;
-                  conn.query(
-                    "INSERT INTO product_choice SET ?",
-                    choice,
-                    (err) => {
-                      if (err) {
-                        console.log(err);
-
-                        return reject(new Error(err));
-                      }
-                      handledChoices += 1;
-                      if (handledChoices === choices.length) {
-                        handledCustomizations += 1;
-                        if (handledCustomizations === customizations.length) {
-                          resolve(true);
-                        }
-                      }
-                    },
-                  );
-                }
-              });
-            };
-
-            if (customization.id) {
-              conn.query(
-                "UPDATE product_customization SET ? WHERE id = ?",
-                [customization, customization.id],
-                (err) => {
-                  if (err) {
-                    console.log(err);
-                    return reject(new Error(err));
-                  }
-                  handleChoices(customization.id);
-                },
-              );
-            } else {
-              customization.product_id = id;
-              conn.query(
-                "INSERT INTO product_customization SET ?",
-                customization,
-                (err, result) => {
-                  if (err) {
-                    console.log(err);
-                    return reject(new Error(err));
-                  }
-                  handleChoices(result.insertId);
-                },
-              );
-            }
-          });
-        },
-      );
-    });
-  },
-  mDeleteProduct: (id) => {
-    return new Promise((resolve, reject) => {
-      conn.query(
-        "SELECT id FROM product_customization WHERE product_id = ? ",
+  const mUpdateProduct = (data, id) => runInTransaction(async (transactionConnection) => {
+    const productData = { ...data };
+    delete productData.customization_config;
+    delete productData.product_customization;
+    const result = await queryRows(
+      transactionConnection,
+      "UPDATE products SET ? WHERE id = ?",
+      [productData, id],
+    );
+    if (Object.prototype.hasOwnProperty.call(data, "customization_config")) {
+      const products = await queryRows(
+        transactionConnection,
+        "SELECT shopid FROM products WHERE id = ?",
         [id],
-        (err, result) => {
-          if (!err) {
-            console.log("Result delete product", result);
-            result.forEach((row) => {
-              conn.query(
-                "DELETE FROM product_choice WHERE product_customization_id = ? ",
-                row.id,
-                (err) => {
-                  if (err) {
-                    console.log(err);
-                    return reject(new Error(err));
-                  }
-                },
-              );
-            });
-            result.forEach((row) => {
-              conn.query(
-                "DELETE FROM product_customization WHERE id = ? ",
-                row.id,
-                (err) => {
-                  if (err) {
-                    console.log(err);
-                    return reject(new Error(err));
-                  }
-                },
-              );
-            });
-            conn.query(
-              "DELETE FROM products WHERE id = ?",
-              id,
-              (err, result) => {
-                if (err) {
-                  console.log(err);
-                  return reject(new Error(err));
-                } else resolve({ message: "Products deleted", result });
-              },
-            );
-            resolve(result);
-          } else {
-            console.log("Error", err);
-            reject(new Error(err));
-          }
-        },
       );
+      if (products.length > 0) {
+        await replaceConfiguration({
+          shopId: products[0].shopid,
+          productId: id,
+          steps: data.customization_config,
+          connection: transactionConnection,
+        });
+      }
+    } else if (Object.prototype.hasOwnProperty.call(data, "product_customization")) {
+      const products = await queryRows(
+        transactionConnection,
+        "SELECT shopid FROM products WHERE id = ?",
+        [id],
+      );
+      if (products.length > 0) {
+        await removeConfigurationAssociations(transactionConnection, id);
+        await writeLegacyConfiguration({
+          connection: transactionConnection,
+          shopId: products[0].shopid,
+          productId: id,
+          customizations: data.product_customization || [],
+        });
+      }
+    }
+    return result;
+  });
 
-      // conn.query("DELETE FROM products WHERE id = ?", [id], (err, result) => {
-      //   if (!err) {
-      //     resolve(result);
-      //   } else {
-      //     reject(new Error(err));
-      //   }
-      // });
-    });
-  },
-  mUsedProduct(id) {
-    return new Promise((resolve, reject) => {
-      conn.query(
-        "SELECT COUNT(*) AS cnt FROM archivesdetail WHERE productid = ?",
-        [id],
-        (err, result) => {
-          if (err) {
-            reject(new Error(err));
-          } else {
-            resolve(result);
-          }
-        },
-      );
-    });
-  },
-  mArchiveProduct(id) {
-    return new Promise((resolve, reject) => {
-      conn.query(
-        "UPDATE products SET archived = 1 WHERE id = ?",
-        [id],
-        (err, result) => {
-          if (err) return reject(err);
-          resolve(result); // result.affectedRows should be 1 if updated
-        },
-      );
-    });
-  },
+  const mReplaceProductCustomizationConfig = ({ shopId, productId, steps }) => (
+    replaceConfiguration({ shopId, productId, steps })
+  );
+
+  const mDeleteProduct = (id) => runInTransaction(async (transactionConnection) => {
+    await removeConfigurationAssociations(transactionConnection, id);
+    return queryRows(transactionConnection, "DELETE FROM products WHERE id = ?", [id]);
+  });
+
+  const mUsedProduct = async (id) => queryRows(
+    connection,
+    "SELECT COUNT(*) AS cnt FROM archivesdetail WHERE productid = ?",
+    [id],
+  );
+
+  const mArchiveProduct = async (id) => queryRows(
+    connection,
+    "UPDATE products SET archived = 1 WHERE id = ?",
+    [id],
+  );
+
+  return {
+    mAddProduct,
+    mAllProduct,
+    mArchiveProduct,
+    mDeleteProduct,
+    mDetailProduct,
+    mReplaceProductCustomizationConfig,
+    mUpdateProduct,
+    mUsedProduct,
+  };
+};
+
+module.exports = {
+  ...buildProductModule(),
+  buildProductModule,
+  minimumCommandablePrice,
+  projectLegacyCustomizations,
 };
