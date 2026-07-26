@@ -365,6 +365,21 @@ const makeStripeLifecycleHarness = ({
       order.status = ORDER_STATUSES.CANCELED;
       return { affectedRows: 1 };
     },
+    cancelOrphanedProvisionalOrder: async ({ orderId, shopId }) => {
+      const order = state.orders.find(
+        (row) => row.id === Number(orderId) && row.shopid === Number(shopId),
+      );
+      if (!order
+        || Number(order.status) !== ORDER_STATUSES.PENDING
+        || order.payment_status !== "requires_payment"
+        || order.payment_provider !== "stripe"
+        || order.stripe_payment_intent_id != null) {
+        return { affectedRows: 0 };
+      }
+      order.payment_status = "canceled";
+      order.status = ORDER_STATUSES.CANCELED;
+      return { affectedRows: 1 };
+    },
   };
   const checkout = buildCheckoutModule({
     repository: checkoutRepository,
@@ -849,6 +864,41 @@ const runStripeReservationContracts = async () => {
   assert.strictEqual(harness.getState().reservations[0].status, "released");
   assert.strictEqual(harness.getState().orders[0].payment_status, "canceled");
   assert.strictEqual(harness.getState().orders[0].status, ORDER_STATUSES.CANCELED);
+
+  harness = makeStripeLifecycleHarness({ paymentAttached: false });
+  const orphanCancellation = await harness.payments.cancelOrphanedProvisionalStripeOrder(42, 7);
+  assert.deepStrictEqual(orphanCancellation, { canceled: true });
+  assert.strictEqual(harness.getState().products.get(10), 10);
+  assert.strictEqual(harness.getState().reservations[0].status, "released");
+  assert.strictEqual(harness.getState().orders[0].payment_status, "canceled");
+  assert.strictEqual(harness.getState().orders[0].status, ORDER_STATUSES.CANCELED);
+
+  harness = makeStripeLifecycleHarness({ paymentAttached: false });
+  const orphanScan = {
+    order_id: 42,
+    shop_id: 7,
+    stripe_payment_intent_id: null,
+  };
+  harness.getState().orders[0].stripe_payment_intent_id = "pi_new";
+  harness.getState().payments.push({
+    order_id: 42,
+    shop_id: 7,
+    stripe_payment_intent_id: "pi_new",
+    status: "requires_payment_method",
+  });
+  const staleOrphanCancellation = await (
+    harness.payments.cancelOrphanedProvisionalStripeOrder(
+      orphanScan.order_id,
+      orphanScan.shop_id,
+    )
+  );
+  assert.deepStrictEqual(staleOrphanCancellation, { ignored: true, stale_scan: true });
+  assert.strictEqual(harness.getState().products.get(10), 8);
+  assert.strictEqual(harness.getState().reservations[0].status, "reserved");
+  assert.strictEqual(harness.getState().orders[0].payment_status, "requires_payment");
+  assert.strictEqual(harness.getState().orders[0].status, ORDER_STATUSES.PENDING);
+  assert.strictEqual(harness.getState().orders[0].stripe_payment_intent_id, "pi_new");
+  assert.strictEqual(harness.getState().payments[0].status, "requires_payment_method");
 
   harness = makeStripeLifecycleHarness();
   harness.getState().reservations.length = 0;
@@ -2019,8 +2069,8 @@ const runStripePaymentMaintenanceContracts = async () => {
       markPaymentCanceled: async (paymentIntentId) => {
         events.push(["mark-canceled", paymentIntentId]);
       },
-      cancelProvisionalStripeOrder: async (orderId, shopId) => {
-        events.push(["cancel-provisional", orderId, shopId]);
+      cancelOrphanedProvisionalStripeOrder: async (orderId, shopId) => {
+        events.push(["cancel-orphaned", orderId, shopId]);
       },
       releaseExpiredReservations: async () => {
         genericReleaseCount += 1;
@@ -2219,7 +2269,7 @@ const runStripePaymentMaintenanceContracts = async () => {
   await harness.runMaintenance();
   assert.deepStrictEqual(harness.events, [
     ["scan", "2026-07-24 12:00:00"],
-    ["cancel-provisional", 48, 8],
+    ["cancel-orphaned", 48, 8],
     ["release-generic"],
   ]);
   assert.deepStrictEqual(harness.errors, []);
@@ -2291,6 +2341,10 @@ const runExpiredStripePaymentQueryContract = async () => {
   assert.match(
     source,
     /updateOrderTerminal:[\s\S]*paymentIntentId[\s\S]*payment_status = 'requires_payment'[\s\S]*stripe_payment_intent_id = \?/,
+  );
+  assert.match(
+    source,
+    /cancelOrphanedProvisionalOrder:[\s\S]*status = \?[\s\S]*payment_status = 'requires_payment'[\s\S]*payment_provider = 'stripe'[\s\S]*stripe_payment_intent_id IS NULL/,
   );
 };
 

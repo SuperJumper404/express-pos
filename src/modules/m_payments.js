@@ -295,6 +295,21 @@ const sqlRepository = {
     [ORDER_STATUSES.CANCELED, timestamp, orderId, shopId],
   ),
 
+  cancelOrphanedProvisionalOrder: ({
+    orderId, shopId, timestamp, connection,
+  }) => queryResult(
+    connection,
+    `UPDATE orders
+     SET payment_status = 'canceled', status = ?, finished = ?
+     WHERE id = ?
+       AND shopid = ?
+       AND status = ?
+       AND payment_status = 'requires_payment'
+       AND payment_provider = 'stripe'
+       AND stripe_payment_intent_id IS NULL`,
+    [ORDER_STATUSES.CANCELED, timestamp, orderId, shopId, ORDER_STATUSES.PENDING],
+  ),
+
   updatePaymentRefunded: ({ orderId, refundId, timestamp, connection }) => queryResult(
     connection,
     `UPDATE payments
@@ -801,6 +816,43 @@ const buildPaymentModule = ({
     },
   );
 
+  const cancelOrphanedProvisionalStripeOrder = (orderId, shopId) => runInTransaction(
+    async (connection) => {
+      const order = await repository.lockOrder({ orderId, shopId, connection });
+      if (!order) return { missing: true };
+      if (Number(order.status) !== ORDER_STATUSES.PENDING
+        || order.payment_status !== "requires_payment"
+        || order.payment_provider !== "stripe") {
+        return { ignored: true };
+      }
+      if (order.stripe_payment_intent_id != null) {
+        return { ignored: true, stale_scan: true };
+      }
+
+      await settleReservations({
+        orderId: order.id,
+        status: "released",
+        connection,
+      });
+      const currentTimestamp = timestamp();
+      await repository.cancelPaymentsForOrder({
+        orderId: order.id,
+        timestamp: currentTimestamp,
+        connection,
+      });
+      const result = await repository.cancelOrphanedProvisionalOrder({
+        orderId: order.id,
+        shopId,
+        timestamp: currentTimestamp,
+        connection,
+      });
+      if (!result.affectedRows) {
+        throw new Error("Orphaned Stripe order changed during cancellation");
+      }
+      return { canceled: true };
+    },
+  );
+
   const markPaymentRefunded = (orderId, refundId) => runInTransaction(
     async (connection) => {
       const order = await repository.lockOrder({ orderId, connection });
@@ -818,6 +870,7 @@ const buildPaymentModule = ({
 
   return {
     attachPaymentIntentToOrder,
+    cancelOrphanedProvisionalStripeOrder,
     cancelProvisionalStripeOrder,
     createPaymentRecord,
     findExpiredStripePayments,

@@ -1,7 +1,7 @@
 const { getStripe } = require("../config/stripe");
 const { releaseExpiredReservations } = require("../modules/m_checkout");
 const {
-  cancelProvisionalStripeOrder,
+  cancelOrphanedProvisionalStripeOrder,
   findExpiredStripePayments,
   markPaymentCanceled,
   markPaymentSucceeded,
@@ -12,7 +12,7 @@ const buildStripePaymentMaintenance = ({
   getStripe: getStripeClient,
   markPaymentSucceeded: markSucceeded,
   markPaymentCanceled: markCanceled,
-  cancelProvisionalStripeOrder: cancelProvisional,
+  cancelOrphanedProvisionalStripeOrder: cancelOrphanedProvisional,
   releaseExpiredReservations: releaseExpired,
   logger = console,
   now = () => new Date(),
@@ -23,7 +23,7 @@ const buildStripePaymentMaintenance = ({
     let stripeStatus = null;
     try {
       if (!payment.stripe_payment_intent_id) {
-        await cancelProvisional(payment.order_id, payment.shop_id);
+        await cancelOrphanedProvisional(payment.order_id, payment.shop_id);
         continue;
       }
 
@@ -96,7 +96,7 @@ const buildNonOverlappingRunner = (task, logger = console) => {
 };
 
 const runStripePaymentMaintenance = buildStripePaymentMaintenance({
-  cancelProvisionalStripeOrder,
+  cancelOrphanedProvisionalStripeOrder,
   findExpiredStripePayments,
   getStripe,
   markPaymentSucceeded,
