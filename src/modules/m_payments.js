@@ -1085,8 +1085,19 @@ const buildPaymentModule = ({
       || !matchesRefundReferences(payment, refund)) {
       return { ignored: true };
     }
-    if (refund.amount != null
-      && Number(refund.amount) !== Number(payment.amount_cents)) {
+    const cumulativeRefunded = Number(refund.cumulative_amount_refunded);
+    const hasAuthoritativeCumulative = refund.cumulative_amount_refunded != null
+      && Number.isSafeInteger(cumulativeRefunded)
+      && cumulativeRefunded >= 0;
+    const cumulativeRefundComplete = hasAuthoritativeCumulative
+      && cumulativeRefunded >= Number(payment.amount_cents);
+    const individualRefundIsPartial = refund.amount != null
+      && Number(refund.amount) !== Number(payment.amount_cents);
+    if ((refund.status === "succeeded"
+      && hasAuthoritativeCumulative
+      && !cumulativeRefundComplete)
+      || (individualRefundIsPartial
+        && !(refund.status === "succeeded" && cumulativeRefundComplete))) {
       return { ignored: true, partial_refund: true };
     }
     const legacyUnknownState = payment.refund_status === "legacy_unknown"

@@ -633,6 +633,43 @@ const buildMarkQrTablePaymentAtCounter = ({
   }
 };
 
+const stripeObjectId = (value) => (
+  typeof value === "string" ? value : value && value.id
+);
+
+const enrichRefundWithCumulativeAmount = async (
+  stripe,
+  refund,
+  { paymentIntentId = null, chargeId: fallbackChargeId = null } = {},
+) => {
+  let chargeId = stripeObjectId(refund.charge) || fallbackChargeId;
+  if (!chargeId
+    && (refund.payment_intent || paymentIntentId)
+    && stripe.paymentIntents
+    && typeof stripe.paymentIntents.retrieve === "function") {
+    const paymentIntent = await stripe.paymentIntents.retrieve(
+      stripeObjectId(refund.payment_intent) || paymentIntentId,
+    );
+    chargeId = stripeObjectId(paymentIntent && paymentIntent.latest_charge);
+  }
+  if (!chargeId
+    || !stripe.charges
+    || typeof stripe.charges.retrieve !== "function") {
+    return refund;
+  }
+
+  const charge = await stripe.charges.retrieve(chargeId);
+  const cumulativeAmount = Number(charge && charge.amount_refunded);
+  if (!Number.isSafeInteger(cumulativeAmount) || cumulativeAmount < 0) {
+    return refund;
+  }
+  return {
+    ...refund,
+    charge: refund.charge || chargeId,
+    cumulative_amount_refunded: cumulativeAmount,
+  };
+};
+
 const buildStripeWebhookEventHandler = ({
   getStripe: getStripeClient = getStripe,
   markPaymentAttemptFailed: markAttemptFailed = markPaymentAttemptFailed,
@@ -665,8 +702,10 @@ const buildStripeWebhookEventHandler = ({
   return async (event) => {
     const paymentIntent = event.data.object;
     if (["refund.created", "refund.updated", "refund.failed"].includes(event.type)) {
-      const refund = await getStripeClient().refunds.retrieve(event.data.object.id);
-      return reconcileRefund(refund);
+      const stripe = getStripeClient();
+      const refund = await stripe.refunds.retrieve(event.data.object.id);
+      const authoritativeRefund = await enrichRefundWithCumulativeAmount(stripe, refund);
+      return reconcileRefund(authoritativeRefund);
     }
     if (event.type === "payment_intent.succeeded") {
       return markSucceededWithCharge(paymentIntent);
@@ -808,6 +847,11 @@ const buildRefundPaidOrderController = ({
         idempotencyKey: `refund-order-${req.shopid}-${orderId}`,
       });
     }
+
+    refund = await enrichRefundWithCumulativeAmount(stripe, refund, {
+      paymentIntentId: payment.stripe_payment_intent_id,
+      chargeId: payment.stripe_charge_id || null,
+    });
 
     const persistence = await persistRefundState({
       orderId,

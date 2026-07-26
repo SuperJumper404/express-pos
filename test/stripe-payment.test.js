@@ -672,7 +672,7 @@ const runStripeWebhookReconciliationContract = async () => {
         retrieve: async (id) => ({ ...currentPaymentIntent, id }),
       },
       charges: {
-        retrieve: async (id) => ({ id }),
+        retrieve: async (id) => ({ id, amount_refunded: 2300 }),
       },
       refunds: {
         retrieve: async (id) => {
@@ -694,7 +694,12 @@ const runStripeWebhookReconciliationContract = async () => {
       actions.push(["canceled", paymentIntentId]);
     },
     reconcileStripeRefund: async (refund) => {
-      actions.push(["refund", refund.id, refund.status]);
+      actions.push([
+        "refund",
+        refund.id,
+        refund.status,
+        refund.cumulative_amount_refunded,
+      ]);
     },
   });
 
@@ -740,14 +745,19 @@ const runStripeWebhookReconciliationContract = async () => {
   assert.deepStrictEqual(actions, [["canceled", "pi_42"]]);
 
   actions.length = 0;
-  currentRefund = { id: "re_42", status: "succeeded" };
+  currentRefund = {
+    id: "re_42",
+    status: "succeeded",
+    amount: 1100,
+    charge: "ch_42",
+  };
   await handler({
     type: "refund.created",
     data: { object: { id: "re_42", status: "pending" } },
   });
   assert.deepStrictEqual(actions, [
     ["retrieve-refund", "re_42"],
-    ["refund", "re_42", "succeeded"],
+    ["refund", "re_42", "succeeded", 2300],
   ]);
 
   actions.length = 0;
@@ -758,7 +768,7 @@ const runStripeWebhookReconciliationContract = async () => {
   });
   assert.deepStrictEqual(actions, [
     ["retrieve-refund", "re_42"],
-    ["refund", "re_42", "pending"],
+    ["refund", "re_42", "pending", undefined],
   ]);
 };
 
@@ -938,15 +948,16 @@ const runPendingRefundLifecycleContract = async () => {
 
 const runPartialRefundDoesNotClaimAssociationContract = async () => {
   const harness = makeRefundLifecycleHarness();
-  const partialPending = await harness.payments.reconcileStripeRefund({
-    id: "re_partial_pending",
-    status: "pending",
+  const partialSucceeded = await harness.payments.reconcileStripeRefund({
+    id: "re_partial_succeeded",
+    status: "succeeded",
     amount: 1200,
+    cumulative_amount_refunded: 1200,
     payment_intent: "pi_42",
     charge: "ch_42",
     metadata: { order_id: "42", shop_id: "7" },
   });
-  assert.deepStrictEqual(partialPending, {
+  assert.deepStrictEqual(partialSucceeded, {
     ignored: true,
     partial_refund: true,
   });
@@ -955,16 +966,17 @@ const runPartialRefundDoesNotClaimAssociationContract = async () => {
   assert.strictEqual(harness.state.payment.status, "succeeded");
   assert.strictEqual(harness.state.order.payment_status, "paid");
 
-  const fullSucceeded = await harness.payments.reconcileStripeRefund({
-    id: "re_full_after_partial",
+  const remainingSucceeded = await harness.payments.reconcileStripeRefund({
+    id: "re_remaining_after_partial",
     status: "succeeded",
-    amount: 2300,
+    amount: 1100,
+    cumulative_amount_refunded: 2300,
     payment_intent: "pi_42",
     charge: "ch_42",
     metadata: { order_id: "42", shop_id: "7" },
   });
-  assert.deepStrictEqual(fullSucceeded, { status: "succeeded" });
-  assert.strictEqual(harness.state.payment.stripe_refund_id, "re_full_after_partial");
+  assert.deepStrictEqual(remainingSucceeded, { status: "succeeded" });
+  assert.strictEqual(harness.state.payment.stripe_refund_id, "re_remaining_after_partial");
   assert.strictEqual(harness.state.payment.refund_status, "succeeded");
   assert.strictEqual(harness.state.payment.status, "refunded");
   assert.strictEqual(harness.state.order.payment_status, "refunded");
@@ -2779,6 +2791,60 @@ const runRefundControllerContract = async () => {
     refundId: "re_42",
     refundStatus: "pending",
   });
+
+  const cumulativeCalls = [];
+  const cumulativeController = buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => [{
+      id: 42,
+      shopid: 7,
+      payment_status: "paid",
+      payment_record_status: "succeeded",
+      stripe_payment_intent_id: "pi_42",
+      stripe_refund_id: null,
+    }],
+    getStripe: () => ({
+      refunds: {
+        create: async (params) => {
+          cumulativeCalls.push(["create", params]);
+          return {
+            id: "re_remaining",
+            status: "succeeded",
+            amount: 1100,
+            payment_intent: "pi_42",
+            charge: "ch_42",
+            metadata: { order_id: "42", shop_id: "7" },
+          };
+        },
+      },
+      charges: {
+        retrieve: async (chargeId) => {
+          cumulativeCalls.push(["charge", chargeId]);
+          return { id: chargeId, amount_refunded: 2300 };
+        },
+      },
+    }),
+    recordRefundState: async (input) => {
+      cumulativeCalls.push(["record", input]);
+      return { status: "succeeded" };
+    },
+  });
+  const cumulativeResponse = makeResponse();
+  await cumulativeController(
+    { params: { id: "42" }, shopid: 7 },
+    cumulativeResponse,
+  );
+  assert.strictEqual(cumulativeCalls[0][0], "create");
+  assert.strictEqual(
+    Object.prototype.hasOwnProperty.call(cumulativeCalls[0][1], "amount"),
+    false,
+    "Stripe chooses the remaining refundable amount",
+  );
+  assert.deepStrictEqual(cumulativeCalls[1], ["charge", "ch_42"]);
+  assert.strictEqual(
+    cumulativeCalls[2][1].refund.cumulative_amount_refunded,
+    2300,
+  );
+  assert.strictEqual(cumulativeResponse.payload.data.refundStatus, "succeeded");
 
   const replayCalls = [];
   const replayController = buildRefundPaidOrderController({
