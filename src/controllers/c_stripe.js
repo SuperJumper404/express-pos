@@ -916,7 +916,13 @@ const buildRefundPaidOrderController = ({
     let refundId = refund.id;
     let refundStatus;
     let alreadyRefunded = false;
-    if (persistence && persistence.status) {
+    let partialRefund = false;
+    if (persistence
+      && persistence.partial_refund
+      && ["pending", "requires_action", "failed", "canceled"].includes(refund.status)) {
+      refundStatus = refund.status;
+      partialRefund = true;
+    } else if (persistence && persistence.status) {
       refundStatus = persistence.status;
       alreadyRefunded = Boolean(persistence.idempotent_replay);
     } else if (persistence && (persistence.ignored || persistence.missing)) {
@@ -959,6 +965,7 @@ const buildRefundPaidOrderController = ({
     }
     const data = { refundId, refundStatus };
     if (alreadyRefunded) data.already_refunded = true;
+    if (partialRefund) data.partial_refund = true;
     if (persistence && persistence.business_status_unchanged) {
       data.business_status_unchanged = true;
       data.orderStatus = persistence.order_status;

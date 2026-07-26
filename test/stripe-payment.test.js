@@ -3015,6 +3015,70 @@ const runRefundControllerContract = async () => {
   );
   assert.strictEqual(cumulativeResponse.payload.data.refundStatus, "succeeded");
 
+  for (const nonFinalStatus of [
+    "pending",
+    "requires_action",
+    "failed",
+    "canceled",
+  ]) {
+    const nonFinalHarness = makeRefundLifecycleHarness();
+    const nonFinalController = buildRefundPaidOrderController({
+      getPaidOrderForRefund: async () => [{
+        ...nonFinalHarness.state.order,
+        payment_record_status: nonFinalHarness.state.payment.status,
+        stripe_charge_id: nonFinalHarness.state.payment.stripe_charge_id,
+        stripe_refund_id: nonFinalHarness.state.payment.stripe_refund_id,
+        refund_status: nonFinalHarness.state.payment.refund_status,
+        amount_cents: nonFinalHarness.state.payment.amount_cents,
+      }],
+      getStripe: () => ({
+        refunds: {
+          create: async () => ({
+            id: `re_remaining_${nonFinalStatus}`,
+            status: nonFinalStatus,
+            amount: 1100,
+            payment_intent: "pi_42",
+            charge: "ch_42",
+            metadata: { order_id: "42", shop_id: "7" },
+          }),
+          list: async () => ({
+            data: [{
+              id: "re_partial_succeeded",
+              status: "succeeded",
+              amount: 1200,
+            }, {
+              id: `re_remaining_${nonFinalStatus}`,
+              status: nonFinalStatus,
+              amount: 1100,
+            }],
+            has_more: false,
+          }),
+        },
+      }),
+      recordRefundState: nonFinalHarness.payments.recordRefundState,
+    });
+    const nonFinalResponse = makeResponse();
+    await nonFinalController(
+      { params: { id: "42" }, shopid: 7 },
+      nonFinalResponse,
+    );
+    assert.strictEqual(nonFinalResponse.statusCode, 200, nonFinalStatus);
+    assert.strictEqual(
+      nonFinalResponse.payload.message,
+      "Demande de remboursement enregistree.",
+      nonFinalStatus,
+    );
+    assert.deepStrictEqual(nonFinalResponse.payload.data, {
+      refundId: `re_remaining_${nonFinalStatus}`,
+      refundStatus: nonFinalStatus,
+      partial_refund: true,
+    });
+    assert.strictEqual(nonFinalHarness.state.payment.stripe_refund_id, null);
+    assert.strictEqual(nonFinalHarness.state.payment.refund_status, null);
+    assert.strictEqual(nonFinalHarness.state.payment.status, "succeeded");
+    assert.strictEqual(nonFinalHarness.state.order.payment_status, "paid");
+  }
+
   const replayCalls = [];
   const replayController = buildRefundPaidOrderController({
     getPaidOrderForRefund: async () => [{
