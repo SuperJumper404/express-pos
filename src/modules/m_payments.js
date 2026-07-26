@@ -145,9 +145,16 @@ const sqlRepository = {
   getPaidOrderForRefund: ({ orderId, shopId, connection }) => queryResult(
     connection,
     `SELECT orders.*, payments.stripe_payment_intent_id,
+            payments.stripe_charge_id,
+            payments.stripe_refund_id,
+            payments.refund_status,
+            payments.refund_failure_reason,
             payments.status AS payment_record_status
      FROM orders
-     JOIN payments ON payments.order_id = orders.id
+     JOIN payments
+       ON payments.order_id = orders.id
+      AND payments.stripe_payment_intent_id = orders.stripe_payment_intent_id
+      AND payments.status IN ('succeeded', 'refunded')
      WHERE orders.id = ?
        AND orders.shopid = ?
        AND orders.payment_status = 'paid'
@@ -170,6 +177,41 @@ const sqlRepository = {
      LIMIT 1`,
     [orderId, shopId],
   ),
+
+  findPaymentForOrderRefund: ({
+    orderId, shopId, paymentIntentId, connection,
+  }) => queryResult(
+    connection,
+    `SELECT * FROM payments
+     WHERE order_id = ?
+       AND shop_id = ?
+       AND stripe_payment_intent_id = ?
+       AND status IN ('succeeded', 'refunded')
+     LIMIT 1${connection ? " FOR UPDATE" : ""}`,
+    [orderId, shopId, paymentIntentId],
+  ).then((rows) => rows[0] || null),
+
+  findPaymentsForRefund: ({ refund, connection }) => {
+    const chargeId = typeof refund.charge === "string"
+      ? refund.charge
+      : refund.charge && refund.charge.id;
+    return queryResult(
+      connection,
+      `SELECT * FROM payments
+       WHERE (? IS NOT NULL AND stripe_refund_id = ?)
+          OR (? IS NOT NULL AND stripe_payment_intent_id = ?)
+          OR (? IS NOT NULL AND stripe_charge_id = ?)
+       ${connection ? "FOR UPDATE" : ""}`,
+      [
+        refund.id || null,
+        refund.id || null,
+        refund.payment_intent || null,
+        refund.payment_intent || null,
+        chargeId || null,
+        chargeId || null,
+      ],
+    );
+  },
 
   findExpiredStripePayments: ({ now, connection }) => queryResult(
     connection,
@@ -310,23 +352,54 @@ const sqlRepository = {
     [ORDER_STATUSES.CANCELED, timestamp, orderId, shopId, ORDER_STATUSES.PENDING],
   ),
 
-  updatePaymentRefunded: ({ orderId, refundId, timestamp, connection }) => queryResult(
+  updatePaymentRefundState: ({
+    paymentId,
+    orderId,
+    shopId,
+    paymentIntentId,
+    refundId,
+    refundStatus,
+    failureReason,
+    paymentStatus,
+    refundedAt,
+    timestamp,
+    connection,
+  }) => queryResult(
     connection,
     `UPDATE payments
-     SET status = 'refunded',
+     SET stripe_refund_id = ?,
+         refund_status = ?,
+         refund_failure_reason = ?,
+         status = ?,
          refunded_at = ?,
-         updated = ?,
-         stripe_charge_id = COALESCE(stripe_charge_id, ?)
-     WHERE order_id = ?`,
-    [timestamp, timestamp, refundId, orderId],
+         updated = ?
+     WHERE id = ?
+       AND order_id = ?
+       AND shop_id = ?
+       AND stripe_payment_intent_id = ?`,
+    [
+      refundId,
+      refundStatus,
+      failureReason,
+      paymentStatus,
+      refundedAt,
+      timestamp,
+      paymentId,
+      orderId,
+      shopId,
+      paymentIntentId,
+    ],
   ),
 
-  updateOrderRefunded: ({ orderId, connection }) => queryResult(
+  updateOrderRefunded: ({ orderId, shopId, connection }) => queryResult(
     connection,
     `UPDATE orders
      SET payment_status = 'refunded', status = ?
-     WHERE id = ?`,
-    [ORDER_STATUSES.CANCELED, orderId],
+     WHERE id = ?
+       AND shopid = ?
+       AND payment_status = 'paid'
+       AND payment_provider = 'stripe'`,
+    [ORDER_STATUSES.CANCELED, orderId, shopId],
   ),
 };
 
@@ -853,20 +926,152 @@ const buildPaymentModule = ({
     },
   );
 
-  const markPaymentRefunded = (orderId, refundId) => runInTransaction(
-    async (connection) => {
-      const order = await repository.lockOrder({ orderId, connection });
-      if (!order) return { missing: true };
+  const refundChargeId = (refund) => (
+    typeof refund.charge === "string"
+      ? refund.charge
+      : refund.charge && refund.charge.id
+  );
+  const validRefundMetadata = (payment, refund) => {
+    const metadata = refund.metadata || {};
+    const matchesNumber = (key, expected) => {
+      if (metadata[key] == null || metadata[key] === "") return true;
+      return /^\d+$/.test(String(metadata[key]))
+        && Number(metadata[key]) === Number(expected);
+    };
+    return matchesNumber("order_id", payment.order_id)
+      && matchesNumber("shop_id", payment.shop_id);
+  };
+  const matchesRefundReferences = (payment, refund) => {
+    const chargeId = refundChargeId(refund);
+    if (payment.stripe_refund_id
+      && refund.id
+      && payment.stripe_refund_id !== refund.id) return false;
+    if (refund.payment_intent
+      && payment.stripe_payment_intent_id !== refund.payment_intent) return false;
+    if (chargeId && payment.stripe_charge_id !== chargeId) return false;
+    return validRefundMetadata(payment, refund);
+  };
+  const selectRefundPayment = (payments, refund) => {
+    const matches = payments.filter((payment) => matchesRefundReferences(payment, refund));
+    return matches.length === 1 ? matches[0] : null;
+  };
+
+  const applyRefundState = async ({
+    order, payment, refund, connection,
+  }) => {
+    if (!payment
+      || Number(payment.order_id) !== Number(order.id)
+      || Number(payment.shop_id) !== Number(order.shopid)
+      || order.payment_provider !== "stripe"
+      || order.stripe_payment_intent_id !== payment.stripe_payment_intent_id
+      || !matchesRefundReferences(payment, refund)) {
+      return { ignored: true };
+    }
+    if (payment.status === "refunded"
+      && payment.refund_status === "succeeded"
+      && payment.stripe_refund_id === refund.id
+      && order.payment_status === "refunded") {
+      return { status: "succeeded", idempotent_replay: true };
+    }
+    if (payment.refund_status === "succeeded" && refund.status !== "succeeded") {
+      return { ignored: true };
+    }
+    if (["failed", "canceled"].includes(payment.refund_status)
+      && ["pending", "requires_action"].includes(refund.status)) {
+      return { ignored: true };
+    }
+    if (payment.status !== "succeeded" || order.payment_status !== "paid") {
+      return { ignored: true };
+    }
+    if (refund.status === "succeeded") {
       const currentTimestamp = timestamp();
-      await repository.updatePaymentRefunded({
-        orderId,
-        refundId,
+      const updatedPayment = await repository.updatePaymentRefundState({
+        paymentId: payment.id,
+        orderId: payment.order_id,
+        shopId: payment.shop_id,
+        paymentIntentId: payment.stripe_payment_intent_id,
+        refundId: refund.id,
+        refundStatus: "succeeded",
+        failureReason: null,
+        paymentStatus: "refunded",
+        refundedAt: currentTimestamp,
         timestamp: currentTimestamp,
         connection,
       });
-      return repository.updateOrderRefunded({ orderId, connection });
-    },
-  );
+      if (!updatedPayment.affectedRows) {
+        throw new Error("Refund payment transition failed");
+      }
+      const updatedOrder = await repository.updateOrderRefunded({
+        orderId: order.id,
+        shopId: order.shopid,
+        connection,
+      });
+      if (!updatedOrder.affectedRows) {
+        throw new Error("Refund order transition failed");
+      }
+      return { status: "succeeded" };
+    }
+    if (!["pending", "requires_action", "failed", "canceled"].includes(refund.status)) {
+      return { ignored: true };
+    }
+    const failureReason = ["failed", "canceled"].includes(refund.status)
+      ? refund.failure_reason || null
+      : null;
+    const updatedPayment = await repository.updatePaymentRefundState({
+      paymentId: payment.id,
+      orderId: payment.order_id,
+      shopId: payment.shop_id,
+      paymentIntentId: payment.stripe_payment_intent_id,
+      refundId: refund.id,
+      refundStatus: refund.status,
+      failureReason,
+      paymentStatus: "succeeded",
+      refundedAt: null,
+      timestamp: timestamp(),
+      connection,
+    });
+    if (!updatedPayment.affectedRows) {
+      throw new Error("Refund payment transition failed");
+    }
+    return { status: refund.status };
+  };
+
+  const recordRefundState = ({
+    orderId, shopId, refund,
+  }) => runInTransaction(async (connection) => {
+    const order = await repository.lockOrder({ orderId, shopId, connection });
+    if (!order) return { missing: true };
+    const payment = await repository.findPaymentForOrderRefund({
+      orderId,
+      shopId,
+      paymentIntentId: order.stripe_payment_intent_id,
+      connection,
+    });
+    return applyRefundState({ order, payment, refund, connection });
+  });
+
+  const reconcileStripeRefund = async (refund) => {
+    const references = await repository.findPaymentsForRefund({ refund });
+    if (!references.length) return { missing: true };
+    const reference = selectRefundPayment(references, refund);
+    if (!reference) return { ignored: true };
+
+    return runInTransaction(async (connection) => {
+      const order = await repository.lockOrder({
+        orderId: reference.order_id,
+        shopId: reference.shop_id,
+        connection,
+      });
+      if (!order) return { missing: true };
+      const lockedReferences = await repository.findPaymentsForRefund({
+        refund,
+        connection,
+      });
+      const payment = selectRefundPayment(lockedReferences, refund);
+      if (!payment) return { ignored: true };
+      return applyRefundState({ order, payment, refund, connection });
+    });
+  };
 
   return {
     attachPaymentIntentToOrder,
@@ -880,11 +1085,12 @@ const buildPaymentModule = ({
     markPaymentAttemptFailed,
     markPaymentCanceled,
     markPaymentProcessing,
-    markPaymentRefunded,
     markPaymentSucceeded,
     markStripeOrderPayAtCounter,
     persistPaymentIntentForOrder,
     persistReplacementPaymentIntent,
+    recordRefundState,
+    reconcileStripeRefund,
     recoverCanceledEditPayment,
     rotatePaymentReplacementAttempt,
     stagePaymentReplacement,
