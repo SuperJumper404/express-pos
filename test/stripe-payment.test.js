@@ -936,6 +936,40 @@ const runPendingRefundLifecycleContract = async () => {
   ]);
 };
 
+const runPartialRefundDoesNotClaimAssociationContract = async () => {
+  const harness = makeRefundLifecycleHarness();
+  const partialPending = await harness.payments.reconcileStripeRefund({
+    id: "re_partial_pending",
+    status: "pending",
+    amount: 1200,
+    payment_intent: "pi_42",
+    charge: "ch_42",
+    metadata: { order_id: "42", shop_id: "7" },
+  });
+  assert.deepStrictEqual(partialPending, {
+    ignored: true,
+    partial_refund: true,
+  });
+  assert.strictEqual(harness.state.payment.stripe_refund_id, null);
+  assert.strictEqual(harness.state.payment.refund_status, null);
+  assert.strictEqual(harness.state.payment.status, "succeeded");
+  assert.strictEqual(harness.state.order.payment_status, "paid");
+
+  const fullSucceeded = await harness.payments.reconcileStripeRefund({
+    id: "re_full_after_partial",
+    status: "succeeded",
+    amount: 2300,
+    payment_intent: "pi_42",
+    charge: "ch_42",
+    metadata: { order_id: "42", shop_id: "7" },
+  });
+  assert.deepStrictEqual(fullSucceeded, { status: "succeeded" });
+  assert.strictEqual(harness.state.payment.stripe_refund_id, "re_full_after_partial");
+  assert.strictEqual(harness.state.payment.refund_status, "succeeded");
+  assert.strictEqual(harness.state.payment.status, "refunded");
+  assert.strictEqual(harness.state.order.payment_status, "refunded");
+};
+
 const runSucceededRefundLifecycleContract = async () => {
   const harness = makeRefundLifecycleHarness();
   const refund = {
@@ -3588,6 +3622,7 @@ runStripePaymentMaintenanceContracts()
   .then(runStripeWebhookReconciliationContract)
   .then(runCanceledPaymentUsesSuppliedOrderLockContract)
   .then(runPendingRefundLifecycleContract)
+  .then(runPartialRefundDoesNotClaimAssociationContract)
   .then(runSucceededRefundLifecycleContract)
   .then(runFailedRefundLifecycleContract)
   .then(runRefundWebhookLookupContract)

@@ -1085,7 +1085,7 @@ const buildPaymentModule = ({
       || !matchesRefundReferences(payment, refund)) {
       return { ignored: true };
     }
-    if (refund.status === "succeeded"
+    if (refund.amount != null
       && Number(refund.amount) !== Number(payment.amount_cents)) {
       return { ignored: true, partial_refund: true };
     }
