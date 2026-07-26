@@ -1,6 +1,7 @@
 const { getStripe } = require("../config/stripe");
 const { releaseExpiredReservations } = require("../modules/m_checkout");
 const {
+  cancelProvisionalStripeOrder,
   findExpiredStripePayments,
   markPaymentCanceled,
   markPaymentSucceeded,
@@ -11,6 +12,7 @@ const buildStripePaymentMaintenance = ({
   getStripe: getStripeClient,
   markPaymentSucceeded: markSucceeded,
   markPaymentCanceled: markCanceled,
+  cancelProvisionalStripeOrder: cancelProvisional,
   releaseExpiredReservations: releaseExpired,
   logger = console,
   now = () => new Date(),
@@ -20,6 +22,11 @@ const buildStripePaymentMaintenance = ({
   for (const payment of expiredPayments) {
     let stripeStatus = null;
     try {
+      if (!payment.stripe_payment_intent_id) {
+        await cancelProvisional(payment.order_id, payment.shop_id);
+        continue;
+      }
+
       const stripe = getStripeClient();
       const paymentIntent = await stripe.paymentIntents.retrieve(
         payment.stripe_payment_intent_id,
@@ -71,7 +78,25 @@ const buildStripePaymentMaintenance = ({
   return releaseExpired();
 };
 
+const buildNonOverlappingRunner = (task, logger = console) => {
+  let running = false;
+  return async () => {
+    if (running) {
+      logger.info("Stripe payment maintenance tick skipped; process-local run in progress");
+      return { skipped: true };
+    }
+
+    running = true;
+    try {
+      return await task();
+    } finally {
+      running = false;
+    }
+  };
+};
+
 const runStripePaymentMaintenance = buildStripePaymentMaintenance({
+  cancelProvisionalStripeOrder,
   findExpiredStripePayments,
   getStripe,
   markPaymentSucceeded,
@@ -80,6 +105,7 @@ const runStripePaymentMaintenance = buildStripePaymentMaintenance({
 });
 
 module.exports = {
+  buildNonOverlappingRunner,
   buildStripePaymentMaintenance,
   runStripePaymentMaintenance,
 };

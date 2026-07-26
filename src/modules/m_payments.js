@@ -6,6 +6,13 @@ const { resolveStripePaymentMethod } = require("../helpers/stripePaymentMethod")
 const { withTransaction } = require("../helpers/withTransaction");
 
 const formatDate = (value) => value.toISOString().slice(0, 19).replace("T", " ");
+const SQL_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+const normalizeSqlTimestamp = (value) => {
+  if (typeof value === "string" && SQL_TIMESTAMP_PATTERN.test(value)) return value;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) throw new Error("Invalid payment timestamp");
+  return formatDate(date);
+};
 
 const queryResult = async (connection, sql, values = []) => {
   const [result] = await (connection || pool).query(sql, values);
@@ -168,9 +175,12 @@ const sqlRepository = {
     connection,
     `SELECT DISTINCT orders.id AS order_id,
             orders.shopid AS shop_id,
-            payments.stripe_payment_intent_id
+            COALESCE(
+              payments.stripe_payment_intent_id,
+              orders.stripe_payment_intent_id
+            ) AS stripe_payment_intent_id
      FROM orders
-     JOIN payments
+     LEFT JOIN payments
        ON payments.order_id = orders.id
       AND payments.stripe_payment_intent_id = orders.stripe_payment_intent_id
      JOIN order_stock_reservations reservations
@@ -207,15 +217,18 @@ const sqlRepository = {
   ),
 
   updateOrderSucceeded: ({
-    orderId, shopId, paymentMethod, timestamp, connection,
+    orderId, shopId, paymentIntentId, paymentMethod, timestamp, connection,
   }) => queryResult(
     connection,
     `UPDATE orders
      SET payment_status = 'paid',
          payment = ?,
          finished = ?
-     WHERE id = ? AND shopid = ? AND payment_status = 'requires_payment'`,
-    [paymentMethod, timestamp, orderId, shopId],
+     WHERE id = ?
+       AND shopid = ?
+       AND payment_status = 'requires_payment'
+       AND stripe_payment_intent_id = ?`,
+    [paymentMethod, timestamp, orderId, shopId, paymentIntentId],
   ),
 
   updatePaymentTerminal: ({ paymentIntentId, status, timestamp, connection }) => queryResult(
@@ -226,12 +239,17 @@ const sqlRepository = {
     [status, timestamp, paymentIntentId],
   ),
 
-  updateOrderTerminal: ({ orderId, shopId, status, connection }) => queryResult(
+  updateOrderTerminal: ({
+    orderId, shopId, paymentIntentId, status, connection,
+  }) => queryResult(
     connection,
     `UPDATE orders
      SET payment_status = ?
-     WHERE id = ? AND shopid = ? AND payment_status = 'requires_payment'`,
-    [status, orderId, shopId],
+     WHERE id = ?
+       AND shopid = ?
+       AND payment_status = 'requires_payment'
+       AND stripe_payment_intent_id = ?`,
+    [status, orderId, shopId, paymentIntentId],
   ),
 
   updatePaymentAtCounter: ({ orderId, timestamp, connection }) => queryResult(
@@ -403,7 +421,7 @@ const buildPaymentModule = ({
   );
 
   const findExpiredStripePayments = (currentTimestamp = timestamp()) => (
-    repository.findExpiredStripePayments({ now: currentTimestamp })
+    repository.findExpiredStripePayments({ now: normalizeSqlTimestamp(currentTimestamp) })
   );
 
   const getStripeOrderForCancellation = (orderId, shopId) => (
@@ -432,6 +450,9 @@ const buildPaymentModule = ({
         || Number(payment.shop_id) !== Number(order.shopid)) {
         throw new Error("Paiement introuvable");
       }
+      if (order.stripe_payment_intent_id !== paymentIntentId) {
+        return { ignored: true, stale_intent: true };
+      }
       if (order.payment_status === "paid") return { alreadyPaid: true };
       if (order.payment_status !== "requires_payment") return { ignored: true };
 
@@ -459,6 +480,7 @@ const buildPaymentModule = ({
       await repository.updateOrderSucceeded({
         orderId: order.id,
         shopId: payment.shop_id,
+        paymentIntentId,
         paymentMethod,
         timestamp: currentTimestamp,
         connection,
@@ -527,6 +549,9 @@ const buildPaymentModule = ({
       || Number(order.shopid) !== Number(payment.shop_id)) {
       return { missing: true };
     }
+    if (order.stripe_payment_intent_id !== paymentIntentId) {
+      return { ignored: true, stale_intent: true };
+    }
     if (order.payment_status !== "requires_payment") return { ignored: true };
 
     try {
@@ -550,6 +575,7 @@ const buildPaymentModule = ({
     await repository.updateOrderTerminal({
       orderId: order.id,
       shopId: payment.shop_id,
+      paymentIntentId,
       status,
       connection,
     });

@@ -34,6 +34,7 @@ const {
 } = require("../src/controllers/c_orders");
 const { buildOrderArchiveModule } = require("../src/modules/m_orders");
 const {
+  buildNonOverlappingRunner,
   buildStripePaymentMaintenance,
 } = require("../src/services/stripePaymentMaintenance");
 
@@ -405,6 +406,7 @@ const runPaymentEditRaceContract = async () => {
       status: ORDER_STATUSES.PENDING,
       payment_status: "requires_payment",
       payment_provider: "stripe",
+      stripe_payment_intent_id: "pi_42",
     },
     payment: {
       order_id: 42,
@@ -527,6 +529,7 @@ const runSucceededPaymentShopScopeContract = async () => {
           status: ORDER_STATUSES.PENDING,
           payment_status: "requires_payment",
           payment_provider: "stripe",
+          stripe_payment_intent_id: "pi_42",
         };
       },
       updatePaymentSucceeded: async () => ({ affectedRows: 1 }),
@@ -554,6 +557,7 @@ const runSucceededPaymentShopScopeContract = async () => {
   assert.deepStrictEqual(received.updateOrderSucceeded, {
     orderId: 42,
     shopId: 7,
+    paymentIntentId: "pi_42",
     paymentMethod: "Carte",
     timestamp: "2026-07-24 12:00:00",
     connection,
@@ -664,6 +668,14 @@ const runStripeWebhookReconciliationContract = async () => {
   ], "a stale processing webhook must use Stripe's current retryable state");
 
   actions.length = 0;
+  currentPaymentIntent = { id: "pi_42", status: "processing" };
+  await handler({
+    type: "payment_intent.processing",
+    data: { object: { id: "pi_42", status: "processing" } },
+  });
+  assert.deepStrictEqual(actions, [["processing", "pi_42"]]);
+
+  actions.length = 0;
   currentPaymentIntent = {
     id: "pi_42",
     status: "succeeded",
@@ -694,6 +706,7 @@ const runCanceledPaymentUsesSuppliedOrderLockContract = async () => {
     status: ORDER_STATUSES.PENDING,
     payment_status: "requires_payment",
     payment_provider: "stripe",
+    stripe_payment_intent_id: "pi_42",
   };
   let startedTransactions = 0;
   let redundantOrderLocks = 0;
@@ -731,6 +744,7 @@ const runCanceledPaymentUsesSuppliedOrderLockContract = async () => {
   assert.deepStrictEqual(received.updateOrderTerminal, {
     orderId: 42,
     shopId: 7,
+    paymentIntentId: "pi_42",
     status: "canceled",
     connection,
   });
@@ -2005,6 +2019,9 @@ const runStripePaymentMaintenanceContracts = async () => {
       markPaymentCanceled: async (paymentIntentId) => {
         events.push(["mark-canceled", paymentIntentId]);
       },
+      cancelProvisionalStripeOrder: async (orderId, shopId) => {
+        events.push(["cancel-provisional", orderId, shopId]);
+      },
       releaseExpiredReservations: async () => {
         genericReleaseCount += 1;
         events.push(["release-generic"]);
@@ -2184,6 +2201,55 @@ const runStripePaymentMaintenanceContracts = async () => {
   );
   assert.strictEqual(harness.errors.length, 1);
   assert.strictEqual(harness.getGenericReleaseCount(), 1);
+
+  harness = buildHarness({
+    rows: [{
+      order_id: 48,
+      shop_id: 8,
+      stripe_payment_intent_id: null,
+    }],
+    retrieve: async () => {
+      throw new Error("Stripe must not be called for an orphan order");
+    },
+    cancel: async () => {
+      throw new Error("Stripe must not be called for an orphan order");
+    },
+    retrieveCharge: async () => null,
+  });
+  await harness.runMaintenance();
+  assert.deepStrictEqual(harness.events, [
+    ["scan", "2026-07-24 12:00:00"],
+    ["cancel-provisional", 48, 8],
+    ["release-generic"],
+  ]);
+  assert.deepStrictEqual(harness.errors, []);
+};
+
+const runNonOverlappingRunnerContract = async () => {
+  const taskResolvers = [];
+  let taskCalls = 0;
+  const logs = [];
+  const run = buildNonOverlappingRunner(
+    async () => {
+      taskCalls += 1;
+      return new Promise((resolve) => taskResolvers.push(resolve));
+    },
+    { info: (...args) => logs.push(args) },
+  );
+
+  const firstTick = run();
+  const overlappingTick = await run();
+  assert.strictEqual(taskCalls, 1);
+  assert.deepStrictEqual(overlappingTick, { skipped: true });
+  assert.strictEqual(logs.length, 1);
+
+  taskResolvers.shift()("first complete");
+  assert.strictEqual(await firstTick, "first complete");
+
+  const nextTick = run();
+  assert.strictEqual(taskCalls, 2);
+  taskResolvers.shift()("second complete");
+  assert.strictEqual(await nextTick, "second complete");
 };
 
 const runExpiredStripePaymentQueryContract = async () => {
@@ -2207,6 +2273,8 @@ const runExpiredStripePaymentQueryContract = async () => {
   assert.deepStrictEqual(calls[0], { now: "2026-07-24 12:00:00" });
   await payments.findExpiredStripePayments("2026-07-24 13:00:00");
   assert.deepStrictEqual(calls[1], { now: "2026-07-24 13:00:00" });
+  await payments.findExpiredStripePayments(new Date("2026-07-24T12:00:00.000Z"));
+  assert.deepStrictEqual(calls[2], { now: "2026-07-24 12:00:00" });
 
   const source = require("fs").readFileSync(
     require.resolve("../src/modules/m_payments"),
@@ -2214,12 +2282,93 @@ const runExpiredStripePaymentQueryContract = async () => {
   );
   assert.match(
     source,
-    /SELECT DISTINCT orders\.id AS order_id,[\s\S]*orders\.shopid AS shop_id,[\s\S]*payments\.stripe_payment_intent_id[\s\S]*JOIN order_stock_reservations reservations[\s\S]*payment_provider = 'stripe'[\s\S]*payment_status = 'requires_payment'[\s\S]*reservations\.status = 'reserved'[\s\S]*reservations\.expires_at <= \?[\s\S]*ORDER BY orders\.id/,
+    /SELECT DISTINCT orders\.id AS order_id,[\s\S]*orders\.shopid AS shop_id,[\s\S]*COALESCE\(\s*payments\.stripe_payment_intent_id,\s*orders\.stripe_payment_intent_id\s*\)[\s\S]*LEFT JOIN payments[\s\S]*JOIN order_stock_reservations reservations[\s\S]*payment_provider = 'stripe'[\s\S]*payment_status = 'requires_payment'[\s\S]*reservations\.status = 'reserved'[\s\S]*reservations\.expires_at <= \?[\s\S]*ORDER BY orders\.id/,
+  );
+  assert.match(
+    source,
+    /updateOrderSucceeded:[\s\S]*paymentIntentId[\s\S]*payment_status = 'requires_payment'[\s\S]*stripe_payment_intent_id = \?/,
+  );
+  assert.match(
+    source,
+    /updateOrderTerminal:[\s\S]*paymentIntentId[\s\S]*payment_status = 'requires_payment'[\s\S]*stripe_payment_intent_id = \?/,
+  );
+};
+
+const runStaleExpiredStripeIntentContract = async () => {
+  const prepareReplacementHarness = () => {
+    const harness = makeStripeLifecycleHarness();
+    harness.getState().orders[0].stripe_payment_intent_id = "pi_new";
+    harness.getState().payments[0].stripe_payment_intent_id = "pi_old";
+    harness.getState().payments.push({
+      order_id: 42,
+      shop_id: 7,
+      stripe_payment_intent_id: "pi_new",
+      status: "requires_payment_method",
+    });
+    return harness;
+  };
+  const assertReplacementUntouched = (harness) => {
+    assert.strictEqual(harness.getState().orders[0].payment_status, "requires_payment");
+    assert.strictEqual(harness.getState().orders[0].stripe_payment_intent_id, "pi_new");
+    assert.strictEqual(harness.getState().reservations[0].status, "reserved");
+    assert.strictEqual(harness.getState().products.get(10), 8);
+    assert.strictEqual(harness.getState().movements.length, 0);
+    assert.strictEqual(
+      harness.getState().payments.find(
+        (payment) => payment.stripe_payment_intent_id === "pi_new",
+      ).status,
+      "requires_payment_method",
+    );
+  };
+  const runScan = async (harness, stripeStatus) => buildStripePaymentMaintenance({
+    findExpiredStripePayments: async () => [{
+      order_id: 42,
+      shop_id: 7,
+      stripe_payment_intent_id: "pi_old",
+    }],
+    getStripe: () => ({
+      paymentIntents: {
+        retrieve: async () => ({
+          id: "pi_old",
+          status: stripeStatus,
+          latest_charge: null,
+          payment_method_types: ["card"],
+        }),
+      },
+      charges: { retrieve: async () => null },
+    }),
+    markPaymentSucceeded: harness.payments.markPaymentSucceeded,
+    markPaymentCanceled: harness.payments.markPaymentCanceled,
+    releaseExpiredReservations: async () => 0,
+    logger: { error: () => {}, info: () => {} },
+    now: () => "2026-07-24 12:00:00",
+  })();
+
+  let harness = prepareReplacementHarness();
+  await runScan(harness, "canceled");
+  assertReplacementUntouched(harness);
+  assert.strictEqual(
+    harness.getState().payments.find(
+      (payment) => payment.stripe_payment_intent_id === "pi_old",
+    ).status,
+    "requires_payment",
+  );
+
+  harness = prepareReplacementHarness();
+  await runScan(harness, "succeeded");
+  assertReplacementUntouched(harness);
+  assert.strictEqual(
+    harness.getState().payments.find(
+      (payment) => payment.stripe_payment_intent_id === "pi_old",
+    ).status,
+    "requires_payment",
   );
 };
 
 runStripePaymentMaintenanceContracts()
+  .then(runNonOverlappingRunnerContract)
   .then(runExpiredStripePaymentQueryContract)
+  .then(runStaleExpiredStripeIntentContract)
   .then(runSucceededPaymentShopScopeContract)
   .then(runPendingPaymentShopScopeContract)
   .then(runStripeWebhookReconciliationContract)

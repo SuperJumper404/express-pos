@@ -2414,11 +2414,15 @@ const runCheckoutApiSurfaceContracts = async () => {
   );
   assert.match(
     serverSource,
-    /const \{\s*runStripePaymentMaintenance,\s*\} = require\("\.\/src\/services\/stripePaymentMaintenance"\);/,
+    /const \{\s*buildNonOverlappingRunner,\s*runStripePaymentMaintenance,\s*\} = require\("\.\/src\/services\/stripePaymentMaintenance"\);/,
   );
   assert.match(
     serverSource,
-    /setInterval\([\s\S]*runStripePaymentMaintenance\(\)[\s\S]*60 \* 1000/,
+    /const runScheduledStripePaymentMaintenance = buildNonOverlappingRunner\(\s*runStripePaymentMaintenance,\s*console,\s*\);/,
+  );
+  assert.match(
+    serverSource,
+    /setInterval\([\s\S]*runScheduledStripePaymentMaintenance\(\)[\s\S]*60 \* 1000/,
   );
   assert.ok(!serverSource.includes('require("./src/modules/m_checkout")'));
   assert.match(serverSource, /\.unref\(\)/);
