@@ -164,6 +164,26 @@ const sqlRepository = {
     [orderId, shopId],
   ),
 
+  findExpiredStripePayments: ({ now, connection }) => queryResult(
+    connection,
+    `SELECT DISTINCT orders.id AS order_id,
+            orders.shopid AS shop_id,
+            payments.stripe_payment_intent_id
+     FROM orders
+     JOIN payments
+       ON payments.order_id = orders.id
+      AND payments.stripe_payment_intent_id = orders.stripe_payment_intent_id
+     JOIN order_stock_reservations reservations
+       ON reservations.order_id = orders.id
+     WHERE orders.payment_provider = 'stripe'
+       AND orders.payment_status = 'requires_payment'
+       AND reservations.status = 'reserved'
+       AND reservations.expires_at IS NOT NULL
+       AND reservations.expires_at <= ?
+     ORDER BY orders.id`,
+    [now],
+  ),
+
   updatePaymentSucceeded: ({
     paymentIntentId, chargeId, paymentMethod, timestamp, connection,
   }) => queryResult(
@@ -380,6 +400,10 @@ const buildPaymentModule = ({
 
   const getPendingStripeOrderForCounter = (orderId, shopId) => (
     repository.getPendingStripeOrderForCounter({ orderId, shopId })
+  );
+
+  const findExpiredStripePayments = (currentTimestamp = timestamp()) => (
+    repository.findExpiredStripePayments({ now: currentTimestamp })
   );
 
   const getStripeOrderForCancellation = (orderId, shopId) => (
@@ -770,6 +794,7 @@ const buildPaymentModule = ({
     attachPaymentIntentToOrder,
     cancelProvisionalStripeOrder,
     createPaymentRecord,
+    findExpiredStripePayments,
     getPaidOrderForRefund,
     getPendingStripeOrderForCounter,
     getStripeOrderForCancellation,

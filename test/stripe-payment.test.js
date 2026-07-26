@@ -33,6 +33,9 @@ const {
   buildPendingStripeArchiveSync,
 } = require("../src/controllers/c_orders");
 const { buildOrderArchiveModule } = require("../src/modules/m_orders");
+const {
+  buildStripePaymentMaintenance,
+} = require("../src/services/stripePaymentMaintenance");
 
 assert.strictEqual(toStripeAmount(12.34), 1234);
 assert.strictEqual(toStripeAmount("12.30"), 1230);
@@ -1962,7 +1965,262 @@ const runReplacementPaymentContracts = async () => {
   );
 };
 
-runSucceededPaymentShopScopeContract()
+const runStripePaymentMaintenanceContracts = async () => {
+  const buildHarness = ({
+    rows,
+    retrieve,
+    cancel,
+    retrieveCharge,
+  }) => {
+    const events = [];
+    const errors = [];
+    let genericReleaseCount = 0;
+    const stripe = {
+      paymentIntents: {
+        retrieve: async (paymentIntentId) => {
+          events.push(["retrieve", paymentIntentId]);
+          return retrieve(paymentIntentId);
+        },
+        cancel: async (paymentIntentId) => {
+          events.push(["cancel", paymentIntentId]);
+          return cancel(paymentIntentId);
+        },
+      },
+      charges: {
+        retrieve: async (chargeId) => {
+          events.push(["retrieve-charge", chargeId]);
+          return retrieveCharge(chargeId);
+        },
+      },
+    };
+    const runMaintenance = buildStripePaymentMaintenance({
+      findExpiredStripePayments: async (now) => {
+        events.push(["scan", now]);
+        return rows;
+      },
+      getStripe: () => stripe,
+      markPaymentSucceeded: async (paymentIntent, charge) => {
+        events.push(["mark-succeeded", paymentIntent.id, charge && charge.id]);
+      },
+      markPaymentCanceled: async (paymentIntentId) => {
+        events.push(["mark-canceled", paymentIntentId]);
+      },
+      releaseExpiredReservations: async () => {
+        genericReleaseCount += 1;
+        events.push(["release-generic"]);
+      },
+      logger: {
+        info: (...args) => events.push(["info", ...args]),
+        error: (...args) => errors.push(args),
+      },
+      now: () => "2026-07-24 12:00:00",
+    });
+    return {
+      errors,
+      events,
+      getGenericReleaseCount: () => genericReleaseCount,
+      runMaintenance,
+    };
+  };
+
+  let harness = buildHarness({
+    rows: [{
+      order_id: 41,
+      shop_id: 7,
+      stripe_payment_intent_id: "pi_cancel",
+    }],
+    retrieve: async (paymentIntentId) => ({
+      id: paymentIntentId,
+      status: "requires_payment_method",
+      latest_charge: null,
+    }),
+    cancel: async (paymentIntentId) => ({
+      id: paymentIntentId,
+      status: "canceled",
+    }),
+    retrieveCharge: async () => {
+      throw new Error("unexpected charge retrieval");
+    },
+  });
+  await harness.runMaintenance();
+  assert.deepStrictEqual(harness.events, [
+    ["scan", "2026-07-24 12:00:00"],
+    ["retrieve", "pi_cancel"],
+    ["cancel", "pi_cancel"],
+    ["mark-canceled", "pi_cancel"],
+    ["release-generic"],
+  ]);
+  assert.strictEqual(harness.getGenericReleaseCount(), 1);
+
+  harness = buildHarness({
+    rows: [{
+      order_id: 42,
+      shop_id: 7,
+      stripe_payment_intent_id: "pi_succeeded",
+    }],
+    retrieve: async (paymentIntentId) => ({
+      id: paymentIntentId,
+      status: "succeeded",
+      latest_charge: "ch_succeeded",
+    }),
+    cancel: async () => {
+      throw new Error("succeeded payments must never be canceled");
+    },
+    retrieveCharge: async (chargeId) => ({
+      id: chargeId,
+      payment_method_details: { type: "card" },
+    }),
+  });
+  await harness.runMaintenance();
+  assert.deepStrictEqual(harness.events, [
+    ["scan", "2026-07-24 12:00:00"],
+    ["retrieve", "pi_succeeded"],
+    ["retrieve-charge", "ch_succeeded"],
+    ["mark-succeeded", "pi_succeeded", "ch_succeeded"],
+    ["release-generic"],
+  ]);
+
+  harness = buildHarness({
+    rows: [{
+      order_id: 43,
+      shop_id: 7,
+      stripe_payment_intent_id: "pi_processing",
+    }],
+    retrieve: async (paymentIntentId) => ({
+      id: paymentIntentId,
+      status: "processing",
+      latest_charge: null,
+    }),
+    cancel: async () => {
+      throw new Error("processing payments must never be canceled");
+    },
+    retrieveCharge: async () => {
+      throw new Error("processing payments have no charge");
+    },
+  });
+  await harness.runMaintenance();
+  assert.strictEqual(
+    harness.events.some(([event]) => ["cancel", "mark-canceled", "mark-succeeded"].includes(event)),
+    false,
+  );
+  assert.strictEqual(harness.events.at(-1)[0], "release-generic");
+  assert.strictEqual(harness.getGenericReleaseCount(), 1);
+
+  harness = buildHarness({
+    rows: [
+      {
+        order_id: 44,
+        shop_id: 7,
+        stripe_payment_intent_id: "pi_retrieve_error",
+      },
+      {
+        order_id: 45,
+        shop_id: 7,
+        stripe_payment_intent_id: "pi_cancel_error",
+      },
+      {
+        order_id: 46,
+        shop_id: 8,
+        stripe_payment_intent_id: "pi_already_canceled",
+      },
+    ],
+    retrieve: async (paymentIntentId) => {
+      if (paymentIntentId === "pi_retrieve_error") {
+        const error = new Error("Stripe unavailable");
+        error.secret = "sk_test_must_not_be_logged";
+        throw error;
+      }
+      return {
+        id: paymentIntentId,
+        status: paymentIntentId === "pi_already_canceled"
+          ? "canceled"
+          : "requires_confirmation",
+        latest_charge: null,
+      };
+    },
+    cancel: async (paymentIntentId) => {
+      if (paymentIntentId === "pi_cancel_error") {
+        const error = new Error("Cancellation unavailable");
+        error.secret = "sk_test_must_not_be_logged";
+        throw error;
+      }
+      return { id: paymentIntentId, status: "canceled" };
+    },
+    retrieveCharge: async () => null,
+  });
+  await harness.runMaintenance();
+  assert.deepStrictEqual(
+    harness.events.filter(([event]) => event === "mark-canceled"),
+    [["mark-canceled", "pi_already_canceled"]],
+    "orders after failed Stripe calls are still processed independently",
+  );
+  assert.strictEqual(harness.errors.length, 2);
+  assert.ok(harness.errors.every((args) => !JSON.stringify(args).includes("sk_test")));
+  assert.ok(harness.errors.every((args) => JSON.stringify(args).includes("order_id")));
+  assert.strictEqual(harness.getGenericReleaseCount(), 1);
+
+  harness = buildHarness({
+    rows: [{
+      order_id: 47,
+      shop_id: 8,
+      stripe_payment_intent_id: "pi_bad_cancel_response",
+    }],
+    retrieve: async (paymentIntentId) => ({
+      id: paymentIntentId,
+      status: "requires_action",
+      latest_charge: null,
+    }),
+    cancel: async (paymentIntentId) => ({
+      id: paymentIntentId,
+      status: "requires_action",
+    }),
+    retrieveCharge: async () => null,
+  });
+  await harness.runMaintenance();
+  assert.strictEqual(
+    harness.events.some(([event]) => event === "mark-canceled"),
+    false,
+    "local stock remains reserved until Stripe confirms cancellation",
+  );
+  assert.strictEqual(harness.errors.length, 1);
+  assert.strictEqual(harness.getGenericReleaseCount(), 1);
+};
+
+const runExpiredStripePaymentQueryContract = async () => {
+  const calls = [];
+  const rows = [{
+    order_id: 42,
+    shop_id: 7,
+    stripe_payment_intent_id: "pi_42",
+  }];
+  const payments = buildPaymentModule({
+    repository: {
+      findExpiredStripePayments: async (options) => {
+        calls.push(options);
+        return rows;
+      },
+    },
+    now: () => new Date("2026-07-24T12:00:00.000Z"),
+  });
+
+  assert.deepStrictEqual(await payments.findExpiredStripePayments(), rows);
+  assert.deepStrictEqual(calls[0], { now: "2026-07-24 12:00:00" });
+  await payments.findExpiredStripePayments("2026-07-24 13:00:00");
+  assert.deepStrictEqual(calls[1], { now: "2026-07-24 13:00:00" });
+
+  const source = require("fs").readFileSync(
+    require.resolve("../src/modules/m_payments"),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /SELECT DISTINCT orders\.id AS order_id,[\s\S]*orders\.shopid AS shop_id,[\s\S]*payments\.stripe_payment_intent_id[\s\S]*JOIN order_stock_reservations reservations[\s\S]*payment_provider = 'stripe'[\s\S]*payment_status = 'requires_payment'[\s\S]*reservations\.status = 'reserved'[\s\S]*reservations\.expires_at <= \?[\s\S]*ORDER BY orders\.id/,
+  );
+};
+
+runStripePaymentMaintenanceContracts()
+  .then(runExpiredStripePaymentQueryContract)
+  .then(runSucceededPaymentShopScopeContract)
   .then(runPendingPaymentShopScopeContract)
   .then(runStripeWebhookReconciliationContract)
   .then(runCanceledPaymentUsesSuppliedOrderLockContract)
