@@ -954,7 +954,6 @@ const runSucceededRefundLifecycleContract = async () => {
       payment_intent: "pi_42",
       amount: 2300,
       charge: "ch_backfilled",
-      amount: 2300,
     }),
     { status: "succeeded", legacy_backfill: true },
   );
