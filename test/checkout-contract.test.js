@@ -2392,6 +2392,11 @@ const makeArchiveHarness = ({ failAfterActiveDeletion = false } = {}) => {
       customerID: 12,
       payment_status: "paid",
       payment_provider: "stripe",
+      stripe_payment_intent_id: "pi_archive_42",
+      stripe_replacement_attempt_token: "replacement-attempt-current",
+      client_order_token: "client-order-token",
+      client_order_payload_hash: "client-order-payload-hash",
+      is_takeaway: 1,
       subtotal: 23,
       created: "2026-07-24 12:00:00",
     }],
@@ -2578,6 +2583,35 @@ const runArchiveSnapshotContracts = async () => {
   assert.strictEqual(harness.getState().details.length, 0);
   assert.strictEqual(harness.getState().activeSnapshots.length, 0);
   assert.strictEqual(harness.getState().archiveDetails.length, 2);
+  assert.deepStrictEqual(
+    harness.getState().archives.map((archive) => ({
+      token: archive.token,
+      is_takeaway: archive.is_takeaway,
+      payment_status: archive.payment_status,
+      stripe_payment_intent_id: archive.stripe_payment_intent_id,
+      hasReplacementAttemptToken: Object.prototype.hasOwnProperty.call(
+        archive,
+        "stripe_replacement_attempt_token",
+      ),
+      hasClientOrderToken: Object.prototype.hasOwnProperty.call(
+        archive,
+        "client_order_token",
+      ),
+      hasClientPayloadHash: Object.prototype.hasOwnProperty.call(
+        archive,
+        "client_order_payload_hash",
+      ),
+    })),
+    [{
+      token: "archive-token-42",
+      is_takeaway: 1,
+      payment_status: "paid",
+      stripe_payment_intent_id: "pi_archive_42",
+      hasReplacementAttemptToken: false,
+      hasClientOrderToken: false,
+      hasClientPayloadHash: false,
+    }],
+  );
   assert.deepStrictEqual(
     harness.getState().archiveSnapshots.map((row) => ({
       archivesdetail_id: row.archivesdetail_id,
