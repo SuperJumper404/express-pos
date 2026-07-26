@@ -157,7 +157,10 @@ const sqlRepository = {
       AND payments.status IN ('succeeded', 'refunded')
      WHERE orders.id = ?
        AND orders.shopid = ?
-       AND orders.payment_status = 'paid'
+       AND (
+         (orders.payment_status = 'paid' AND payments.status = 'succeeded')
+         OR (orders.payment_status = 'refunded' AND payments.status = 'refunded')
+       )
      LIMIT 1`,
     [orderId, shopId],
   ),
@@ -931,18 +934,30 @@ const buildPaymentModule = ({
       ? refund.charge
       : refund.charge && refund.charge.id
   );
+  const matchesLegacyTerminalReference = (payment, refund) => {
+    const chargeId = refundChargeId(refund);
+    return !payment.stripe_refund_id
+      && payment.status === "refunded"
+      && (
+        (refund.payment_intent
+          && refund.payment_intent === payment.stripe_payment_intent_id)
+        || (chargeId && chargeId === payment.stripe_charge_id)
+      );
+  };
   const validRefundMetadata = (
     payment,
     refund,
-    { requireForNewAssociation = false } = {},
+    { requireForNewAssociation = false, order = null } = {},
   ) => {
     const metadata = refund.metadata || {};
     const alreadyAssociated = Boolean(
       refund.id && payment.stripe_refund_id === refund.id,
     );
+    const legacyTerminal = matchesLegacyTerminalReference(payment, refund)
+      && (!order || order.payment_status === "refunded");
     const matchesNumber = (key, expected) => {
       if (metadata[key] == null || metadata[key] === "") {
-        return alreadyAssociated || !requireForNewAssociation;
+        return alreadyAssociated || legacyTerminal || !requireForNewAssociation;
       }
       return /^\d+$/.test(String(metadata[key]))
         && Number(metadata[key]) === Number(expected);
@@ -960,11 +975,11 @@ const buildPaymentModule = ({
     if (chargeId && payment.stripe_charge_id !== chargeId) return false;
     return validRefundMetadata(payment, refund, metadataOptions);
   };
-  const selectRefundPayment = (payments, refund) => {
+  const selectRefundPayment = (payments, refund, order = null) => {
     const matches = payments.filter((payment) => matchesRefundReferences(
       payment,
       refund,
-      { requireForNewAssociation: true },
+      { requireForNewAssociation: true, order },
     ));
     return matches.length === 1 ? matches[0] : null;
   };
@@ -979,6 +994,27 @@ const buildPaymentModule = ({
       || order.stripe_payment_intent_id !== payment.stripe_payment_intent_id
       || !matchesRefundReferences(payment, refund)) {
       return { ignored: true };
+    }
+    const legacyTerminal = matchesLegacyTerminalReference(payment, refund)
+      && order.payment_status === "refunded";
+    if (legacyTerminal && refund.status === "succeeded") {
+      const updatedPayment = await repository.updatePaymentRefundState({
+        paymentId: payment.id,
+        orderId: payment.order_id,
+        shopId: payment.shop_id,
+        paymentIntentId: payment.stripe_payment_intent_id,
+        refundId: refund.id,
+        refundStatus: "succeeded",
+        failureReason: null,
+        paymentStatus: "refunded",
+        refundedAt: payment.refunded_at,
+        timestamp: timestamp(),
+        connection,
+      });
+      if (!updatedPayment.affectedRows) {
+        throw new Error("Legacy refund backfill failed");
+      }
+      return { status: "succeeded", legacy_backfill: true };
     }
     if (payment.status === "refunded"
       && payment.refund_status === "succeeded"
@@ -1080,7 +1116,7 @@ const buildPaymentModule = ({
         refund,
         connection,
       });
-      const payment = selectRefundPayment(lockedReferences, refund);
+      const payment = selectRefundPayment(lockedReferences, refund, order);
       if (!payment) return { ignored: true };
       return applyRefundState({ order, payment, refund, connection });
     });

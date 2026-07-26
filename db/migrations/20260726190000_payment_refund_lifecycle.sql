@@ -6,6 +6,12 @@ ALTER TABLE `payments`
   ADD COLUMN `refund_failure_reason` varchar(191) DEFAULT NULL AFTER `refund_status`,
   ADD UNIQUE KEY `stripe_refund_id` (`stripe_refund_id`);
 
+UPDATE `payments`
+SET `refund_status` = 'succeeded'
+WHERE `status` = 'refunded'
+  AND `refunded_at` IS NOT NULL
+  AND `refund_status` IS NULL;
+
 -- migrate:down
 
 ALTER TABLE `payments`

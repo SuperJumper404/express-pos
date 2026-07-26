@@ -647,6 +647,7 @@ const runStripeWebhookReconciliationContract = async () => {
     id: "pi_42",
     status: "requires_payment_method",
   };
+  let currentRefund = { id: "re_42", status: "pending" };
   const handler = buildStripeWebhookEventHandler({
     getStripe: () => ({
       paymentIntents: {
@@ -654,6 +655,12 @@ const runStripeWebhookReconciliationContract = async () => {
       },
       charges: {
         retrieve: async (id) => ({ id }),
+      },
+      refunds: {
+        retrieve: async (id) => {
+          actions.push(["retrieve-refund", id]);
+          return { ...currentRefund, id };
+        },
       },
     }),
     markPaymentAttemptFailed: async (paymentIntent) => {
@@ -715,16 +722,25 @@ const runStripeWebhookReconciliationContract = async () => {
   assert.deepStrictEqual(actions, [["canceled", "pi_42"]]);
 
   actions.length = 0;
-  for (const type of ["refund.created", "refund.updated", "refund.failed"]) {
-    await handler({
-      type,
-      data: { object: { id: `re_${type}`, status: "pending" } },
-    });
-  }
+  currentRefund = { id: "re_42", status: "succeeded" };
+  await handler({
+    type: "refund.created",
+    data: { object: { id: "re_42", status: "pending" } },
+  });
   assert.deepStrictEqual(actions, [
-    ["refund", "re_refund.created", "pending"],
-    ["refund", "re_refund.updated", "pending"],
-    ["refund", "re_refund.failed", "pending"],
+    ["retrieve-refund", "re_42"],
+    ["refund", "re_42", "succeeded"],
+  ]);
+
+  actions.length = 0;
+  currentRefund = { id: "re_42", status: "pending" };
+  await handler({
+    type: "refund.failed",
+    data: { object: { id: "re_42", status: "failed" } },
+  });
+  assert.deepStrictEqual(actions, [
+    ["retrieve-refund", "re_42"],
+    ["refund", "re_42", "pending"],
   ]);
 };
 
@@ -1033,6 +1049,52 @@ const runRefundWebhookLookupContract = async () => {
     assert.strictEqual(harness.state.order.payment_status, "paid");
     assert.strictEqual(harness.state.order.status, 3);
     assert.deepStrictEqual(harness.events, []);
+  }
+
+  harness = makeRefundLifecycleHarness();
+  harness.state.order.payment_status = "refunded";
+  harness.state.order.status = ORDER_STATUSES.CANCELED;
+  Object.assign(harness.state.payment, {
+    status: "refunded",
+    refund_status: "succeeded",
+    refunded_at: "2026-07-25 10:00:00",
+    stripe_refund_id: null,
+  });
+  assert.deepStrictEqual(
+    await harness.payments.reconcileStripeRefund({
+      id: "re_legacy",
+      status: "succeeded",
+      payment_intent: "pi_42",
+    }),
+    { status: "succeeded", legacy_backfill: true },
+  );
+  assert.strictEqual(harness.state.payment.stripe_refund_id, "re_legacy");
+  assert.strictEqual(harness.state.payment.refund_status, "succeeded");
+  assert.strictEqual(harness.state.payment.refunded_at, "2026-07-25 10:00:00");
+  assert.strictEqual(harness.state.order.payment_status, "refunded");
+
+  for (const mismatchedReference of [
+    { payment_intent: "pi_wrong", charge: "ch_42" },
+    { payment_intent: "pi_42", charge: "ch_wrong" },
+  ]) {
+    harness = makeRefundLifecycleHarness();
+    harness.state.order.payment_status = "refunded";
+    harness.state.order.status = ORDER_STATUSES.CANCELED;
+    Object.assign(harness.state.payment, {
+      status: "refunded",
+      refund_status: "succeeded",
+      refunded_at: "2026-07-25 10:00:00",
+      stripe_refund_id: null,
+    });
+    assert.deepStrictEqual(
+      await harness.payments.reconcileStripeRefund({
+        id: "re_legacy",
+        status: "succeeded",
+        ...mismatchedReference,
+      }),
+      { ignored: true },
+    );
+    assert.strictEqual(harness.state.payment.stripe_refund_id, null);
   }
 
   harness = makeRefundLifecycleHarness();
@@ -2337,6 +2399,8 @@ const runRefundControllerContract = async () => {
     getPaidOrderForRefund: async () => [{
       id: 42,
       shopid: 7,
+      payment_status: "paid",
+      payment_record_status: "succeeded",
       stripe_payment_intent_id: "pi_42",
       stripe_refund_id: null,
     }],
@@ -2373,7 +2437,7 @@ const runRefundControllerContract = async () => {
   assert.deepStrictEqual(calls[1], [
     "record",
     {
-      orderId: "42",
+      orderId: 42,
       shopId: 7,
       refund: { id: "re_42", status: "pending" },
     },
@@ -2390,6 +2454,8 @@ const runRefundControllerContract = async () => {
     getPaidOrderForRefund: async () => [{
       id: 42,
       shopid: 7,
+      payment_status: "paid",
+      payment_record_status: "succeeded",
       stripe_payment_intent_id: "pi_42",
       stripe_refund_id: "re_existing",
       refund_status: "pending",
@@ -2419,7 +2485,7 @@ const runRefundControllerContract = async () => {
   assert.deepStrictEqual(replayCalls, [
     ["retrieve", "re_existing"],
     ["record", {
-      orderId: "42",
+      orderId: 42,
       shopId: 7,
       refund: {
         id: "re_existing",
@@ -2435,6 +2501,8 @@ const runRefundControllerContract = async () => {
     getPaidOrderForRefund: async () => [{
       id: 42,
       shopid: 7,
+      payment_status: "paid",
+      payment_record_status: "succeeded",
       stripe_payment_intent_id: "pi_42",
       stripe_refund_id: null,
     }],
@@ -2455,6 +2523,122 @@ const runRefundControllerContract = async () => {
   );
   assert.strictEqual(webhookFirstResponse.payload.message, "Commande remboursee.");
   assert.strictEqual(webhookFirstResponse.payload.data.refundStatus, "succeeded");
+
+  for (const invalidId of ["42.0", "042", "-42", "0", "not-an-id"]) {
+    let lookups = 0;
+    const invalidResponse = makeResponse();
+    await buildRefundPaidOrderController({
+      getPaidOrderForRefund: async () => {
+        lookups += 1;
+        return [];
+      },
+      getStripe: () => {
+        throw new Error("Stripe must not be called");
+      },
+    })({ params: { id: invalidId }, shopid: 7 }, invalidResponse);
+    assert.strictEqual(invalidResponse.statusCode, 400);
+    assert.strictEqual(lookups, 0);
+  }
+
+  let stripeCalls = 0;
+  const legacyRefundedResponse = makeResponse();
+  await buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => [{
+      id: 42,
+      shopid: 7,
+      payment_status: "refunded",
+      payment_record_status: "refunded",
+      stripe_payment_intent_id: "pi_42",
+      stripe_refund_id: null,
+      refund_status: "succeeded",
+    }],
+    getStripe: () => {
+      stripeCalls += 1;
+      throw new Error("Stripe must not be called for a legacy terminal refund");
+    },
+  })({ params: { id: "42" }, shopid: 7 }, legacyRefundedResponse);
+  assert.strictEqual(stripeCalls, 0);
+  assert.strictEqual(legacyRefundedResponse.statusCode, 200);
+  assert.deepStrictEqual(legacyRefundedResponse.payload.data, {
+    refundId: null,
+    refundStatus: "succeeded",
+    already_refunded: true,
+  });
+
+  const succeededReplayCalls = [];
+  const succeededReplayResponse = makeResponse();
+  await buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => [{
+      id: 42,
+      shopid: 7,
+      payment_status: "refunded",
+      payment_record_status: "refunded",
+      stripe_payment_intent_id: "pi_42",
+      stripe_refund_id: "re_succeeded",
+      refund_status: "succeeded",
+    }],
+    getStripe: () => ({
+      refunds: {
+        create: async () => {
+          throw new Error("must never recreate an already-succeeded refund");
+        },
+        retrieve: async (refundId) => {
+          succeededReplayCalls.push(["retrieve", refundId]);
+          return { id: refundId, status: "succeeded", payment_intent: "pi_42" };
+        },
+      },
+    }),
+    recordRefundState: async (input) => {
+      succeededReplayCalls.push(["record", input.orderId, input.refund.id]);
+      return { status: "succeeded", idempotent_replay: true };
+    },
+  })({ params: { id: "42" }, shopid: 7 }, succeededReplayResponse);
+  assert.deepStrictEqual(succeededReplayCalls, [
+    ["retrieve", "re_succeeded"],
+    ["record", 42, "re_succeeded"],
+  ]);
+  assert.deepStrictEqual(succeededReplayResponse.payload.data, {
+    refundId: "re_succeeded",
+    refundStatus: "succeeded",
+    already_refunded: true,
+  });
+
+  let stateRead = 0;
+  const failedRaceResponse = makeResponse();
+  await buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => {
+      stateRead += 1;
+      if (stateRead === 1) {
+        return [{
+          id: 42,
+          shopid: 7,
+          payment_status: "paid",
+          payment_record_status: "succeeded",
+          stripe_payment_intent_id: "pi_42",
+          stripe_refund_id: null,
+        }];
+      }
+      return [{
+        id: 42,
+        shopid: 7,
+        payment_status: "paid",
+        payment_record_status: "succeeded",
+        stripe_payment_intent_id: "pi_42",
+        stripe_refund_id: "re_42",
+        refund_status: "failed",
+        refund_failure_reason: "expired_or_canceled_card",
+      }];
+    },
+    getStripe: () => ({
+      refunds: {
+        create: async () => ({ id: "re_42", status: "pending" }),
+      },
+    }),
+    recordRefundState: async () => ({ ignored: true }),
+  })({ params: { id: "42" }, shopid: 7 }, failedRaceResponse);
+  assert.strictEqual(stateRead, 2);
+  assert.strictEqual(failedRaceResponse.payload.data.refundStatus, "failed");
+  assert.notStrictEqual(failedRaceResponse.payload.message, "Commande remboursee.");
 
   const failureController = buildRefundPaidOrderController({
     getPaidOrderForRefund: async () => [{
@@ -2489,6 +2673,10 @@ const runRefundMigrationContract = async () => {
   assert.match(up, /ADD COLUMN `refund_status` varchar\(32\) DEFAULT NULL/);
   assert.match(up, /ADD COLUMN `refund_failure_reason` varchar\(191\) DEFAULT NULL/);
   assert.match(up, /ADD UNIQUE KEY `stripe_refund_id` \(`stripe_refund_id`\)/);
+  assert.match(
+    up,
+    /UPDATE `payments`[\s\S]*SET `refund_status` = 'succeeded'[\s\S]*WHERE `status` = 'refunded'[\s\S]*AND `refunded_at` IS NOT NULL/,
+  );
   assert.match(down, /DROP INDEX `stripe_refund_id`/);
   assert.match(down, /DROP COLUMN `refund_failure_reason`/);
   assert.match(down, /DROP COLUMN `refund_status`/);
@@ -2510,6 +2698,10 @@ const runRefundMigrationContract = async () => {
   assert.match(
     paymentSource,
     /getPaidOrderForRefund:[\s\S]*payments\.stripe_payment_intent_id = orders\.stripe_payment_intent_id[\s\S]*payments\.status IN \('succeeded', 'refunded'\)/,
+  );
+  assert.match(
+    paymentSource,
+    /\(orders\.payment_status = 'paid' AND payments\.status = 'succeeded'\)[\s\S]*OR \(orders\.payment_status = 'refunded' AND payments\.status = 'refunded'\)/,
   );
   assert.match(
     paymentSource,

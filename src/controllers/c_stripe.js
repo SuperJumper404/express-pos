@@ -643,7 +643,8 @@ const buildStripeWebhookEventHandler = ({
   return async (event) => {
     const paymentIntent = event.data.object;
     if (["refund.created", "refund.updated", "refund.failed"].includes(event.type)) {
-      return reconcileRefund(event.data.object);
+      const refund = await getStripeClient().refunds.retrieve(event.data.object.id);
+      return reconcileRefund(refund);
     }
     if (event.type === "payment_intent.succeeded") {
       return markSucceededWithCharge(paymentIntent);
@@ -685,7 +686,17 @@ const buildRefundPaidOrderController = ({
   recordRefundState: persistRefundState = recordRefundState,
 } = {}) => async (req, res) => {
   try {
-    const orderId = req.params.id;
+    const rawOrderId = req.params && req.params.id;
+    if (typeof rawOrderId !== "string"
+      || !/^[1-9]\d*$/.test(rawOrderId)
+      || !Number.isSafeInteger(Number(rawOrderId))
+      || String(Number(rawOrderId)) !== rawOrderId) {
+      return custom(res, 400, "Identifiant de commande invalide.", null, {
+        code: "STRIPE_REFUND_ORDER_INVALID",
+        field: "order_id",
+      });
+    }
+    const orderId = Number(rawOrderId);
     const rows = await findPaidOrder(orderId, req.shopid);
 
     if (!rows.length) {
@@ -693,6 +704,16 @@ const buildRefundPaidOrderController = ({
     }
 
     const payment = rows[0];
+    const coherentRefunded = payment.payment_status === "refunded"
+      && payment.payment_record_status === "refunded";
+    if (coherentRefunded && !payment.stripe_refund_id) {
+      return success(res, "Commande deja remboursee.", null, {
+        refundId: null,
+        refundStatus: "succeeded",
+        already_refunded: true,
+      });
+    }
+
     const stripe = getStripeClient();
     let refund;
     if (payment.stripe_refund_id) {
@@ -730,16 +751,45 @@ const buildRefundPaidOrderController = ({
       shopId: req.shopid,
       refund,
     });
-    const refundStatus = persistence && persistence.status
-      ? persistence.status
-      : refund.status;
+    let refundId = refund.id;
+    let refundStatus;
+    let alreadyRefunded = false;
+    if (persistence && persistence.status) {
+      refundStatus = persistence.status;
+      alreadyRefunded = Boolean(persistence.idempotent_replay);
+    } else if (persistence && (persistence.ignored || persistence.missing)) {
+      const currentRows = await findPaidOrder(orderId, req.shopid);
+      const current = currentRows[0];
+      if (!current) {
+        return custom(res, 409, "Etat du remboursement incoherent.", null, {
+          code: "STRIPE_REFUND_STATE_CONFLICT",
+        });
+      }
+      if (current.payment_status === "refunded"
+        && current.payment_record_status === "refunded") {
+        refundId = current.stripe_refund_id || null;
+        refundStatus = "succeeded";
+        alreadyRefunded = true;
+      } else if (current.stripe_refund_id === refund.id && current.refund_status) {
+        refundId = current.stripe_refund_id;
+        refundStatus = current.refund_status;
+      } else {
+        return custom(res, 409, "Etat du remboursement incoherent.", null, {
+          code: "STRIPE_REFUND_STATE_CONFLICT",
+        });
+      }
+    } else {
+      refundStatus = refund.status;
+    }
+    const data = { refundId, refundStatus };
+    if (alreadyRefunded) data.already_refunded = true;
     success(
       res,
       refundStatus === "succeeded"
         ? "Commande remboursee."
         : "Demande de remboursement enregistree.",
       null,
-      { refundId: refund.id, refundStatus },
+      data,
     );
   } catch (error) {
     failed(res, "Erreur lors du remboursement Stripe.");
