@@ -140,6 +140,32 @@ const groupBy = (rows, key) => rows.reduce((groups, row) => {
   return groups;
 }, new Map());
 
+const ARCHIVE_ORDER_FIELDS = [
+  "shopid",
+  "ordernumber",
+  "customer",
+  "phone",
+  "customerID",
+  "operator",
+  "subtotal",
+  "payment",
+  "status",
+  "created",
+  "finished",
+  "remark",
+  "is_takeaway",
+];
+
+const pickArchiveOrderFields = (order = {}) => ARCHIVE_ORDER_FIELDS.reduce(
+  (archive, field) => {
+    if (Object.prototype.hasOwnProperty.call(order, field)) {
+      archive[field] = order[field];
+    }
+    return archive;
+  },
+  {},
+);
+
 const mapSnapshotCustomization = (row) => ({
   product_customization_step_id: row.product_customization_step_id,
   step_name: row.step_name,
@@ -216,10 +242,11 @@ const buildOrderArchiveModule = ({
         order,
         paymentMethod,
       });
-      const archive = { ...order, ...archivePaymentFields, token: createToken() };
-      delete archive.id;
-      delete archive.client_order_token;
-      delete archive.client_order_payload_hash;
+      const archive = {
+        ...pickArchiveOrderFields(order),
+        ...archivePaymentFields,
+        token: createToken(),
+      };
       const archiveResult = await repository.insertArchive({ archive, connection });
       const archiveOrderId = archiveResult.insertId;
 
