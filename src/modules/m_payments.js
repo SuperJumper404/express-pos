@@ -142,6 +142,16 @@ const sqlRepository = {
     ).then((rows) => rows[0] || null);
   },
 
+  lockOrderReservations: ({ orderId, connection }) => queryResult(
+    connection,
+    `SELECT id, order_id, status
+     FROM order_stock_reservations
+     WHERE order_id = ?
+     ORDER BY id
+     FOR UPDATE`,
+    [orderId],
+  ),
+
   getPaidOrderForRefund: ({ orderId, shopId, connection }) => queryResult(
     connection,
     `SELECT orders.*, payments.stripe_payment_intent_id,
@@ -173,7 +183,9 @@ const sqlRepository = {
             orders.payment_status,
             payments.stripe_payment_intent_id
      FROM orders
-     JOIN payments ON payments.order_id = orders.id
+     JOIN payments
+       ON payments.order_id = orders.id
+      AND payments.stripe_payment_intent_id = orders.stripe_payment_intent_id
      WHERE orders.id = ?
        AND orders.shopid = ?
        AND orders.payment_status = 'requires_payment'
@@ -298,15 +310,20 @@ const sqlRepository = {
     [status, orderId, shopId, paymentIntentId],
   ),
 
-  updatePaymentAtCounter: ({ orderId, timestamp, connection }) => queryResult(
+  updatePaymentAtCounter: ({
+    orderId, paymentIntentId, timestamp, connection,
+  }) => queryResult(
     connection,
     `UPDATE payments
      SET status = 'canceled', updated = ?
-     WHERE order_id = ?`,
-    [timestamp, orderId],
+     WHERE order_id = ?
+       AND stripe_payment_intent_id = ?`,
+    [timestamp, orderId, paymentIntentId],
   ),
 
-  updateOrderAtCounter: ({ orderId, shopId, timestamp, connection }) => queryResult(
+  updateOrderAtCounter: ({
+    orderId, shopId, paymentIntentId, timestamp, connection,
+  }) => queryResult(
     connection,
     `UPDATE orders
      SET status = 1,
@@ -318,27 +335,35 @@ const sqlRepository = {
      WHERE id = ?
        AND shopid = ?
        AND payment_status = 'requires_payment'
-       AND payment_provider = 'stripe'`,
-    [timestamp, orderId, shopId],
+       AND payment_provider = 'stripe'
+       AND stripe_payment_intent_id = ?`,
+    [timestamp, orderId, shopId, paymentIntentId],
   ),
 
-  cancelPaymentsForOrder: ({ orderId, timestamp, connection }) => queryResult(
+  cancelPaymentsForOrder: ({
+    orderId, paymentIntentId, timestamp, connection,
+  }) => queryResult(
     connection,
     `UPDATE payments
      SET status = 'canceled', updated = ?
-     WHERE order_id = ? AND status <> 'succeeded'`,
-    [timestamp, orderId],
+     WHERE order_id = ?
+       AND stripe_payment_intent_id <=> ?
+       AND status <> 'succeeded'`,
+    [timestamp, orderId, paymentIntentId],
   ),
 
-  cancelProvisionalOrder: ({ orderId, shopId, timestamp, connection }) => queryResult(
+  cancelProvisionalOrder: ({
+    orderId, shopId, paymentIntentId, timestamp, connection,
+  }) => queryResult(
     connection,
     `UPDATE orders
      SET payment_status = 'canceled', status = ?, finished = ?
      WHERE id = ?
        AND shopid = ?
        AND payment_status = 'requires_payment'
-       AND payment_provider = 'stripe'`,
-    [ORDER_STATUSES.CANCELED, timestamp, orderId, shopId],
+       AND payment_provider = 'stripe'
+       AND stripe_payment_intent_id <=> ?`,
+    [ORDER_STATUSES.CANCELED, timestamp, orderId, shopId, paymentIntentId],
   ),
 
   cancelOrphanedProvisionalOrder: ({
@@ -790,6 +815,14 @@ const buildPaymentModule = ({
         paymentIntentId: data.stripe_payment_intent_id,
         connection,
       });
+      const reservations = await repository.lockOrderReservations({
+        orderId: data.orderId,
+        connection,
+      });
+      if (!reservations.length
+        || reservations.some((reservation) => reservation.status !== "reserved")) {
+        return { attached: false, reservations_unavailable: true };
+      }
       if (order.payment_status === "requires_payment"
         && order.payment_provider === "stripe"
         && order.stripe_payment_intent_id === data.stripe_payment_intent_id
@@ -855,7 +888,11 @@ const buildPaymentModule = ({
     markPaymentTerminal(paymentIntentId, "canceled", options)
   );
 
-  const markStripeOrderPayAtCounter = (orderId, shopId) => runInTransaction(
+  const markStripeOrderPayAtCounter = (
+    orderId,
+    shopId,
+    paymentIntentId,
+  ) => runInTransaction(
     async (connection) => {
       const order = await repository.lockOrder({ orderId, shopId, connection });
       if (!order) throw new Error("Commande introuvable");
@@ -864,6 +901,9 @@ const buildPaymentModule = ({
       }
       if (order.payment_status !== "requires_payment" || order.payment_provider !== "stripe") {
         throw new Error("Commande Stripe en attente introuvable");
+      }
+      if (order.stripe_payment_intent_id !== paymentIntentId) {
+        return { ignored: true, stale_intent: true };
       }
 
       await settleReservations({
@@ -875,12 +915,14 @@ const buildPaymentModule = ({
       const currentTimestamp = timestamp();
       await repository.updatePaymentAtCounter({
         orderId: order.id,
+        paymentIntentId,
         timestamp: currentTimestamp,
         connection,
       });
       const result = await repository.updateOrderAtCounter({
         orderId: order.id,
         shopId,
+        paymentIntentId,
         timestamp: currentTimestamp,
         connection,
       });
@@ -889,12 +931,19 @@ const buildPaymentModule = ({
     },
   );
 
-  const cancelProvisionalStripeOrder = (orderId, shopId) => runInTransaction(
+  const cancelProvisionalStripeOrder = (
+    orderId,
+    shopId,
+    paymentIntentId,
+  ) => runInTransaction(
     async (connection) => {
       const order = await repository.lockOrder({ orderId, shopId, connection });
       if (!order) return { missing: true };
       if (order.payment_status !== "requires_payment" || order.payment_provider !== "stripe") {
         return { ignored: true };
+      }
+      if (order.stripe_payment_intent_id !== paymentIntentId) {
+        return { ignored: true, stale_intent: true };
       }
 
       await settleReservations({
@@ -905,12 +954,14 @@ const buildPaymentModule = ({
       const currentTimestamp = timestamp();
       await repository.cancelPaymentsForOrder({
         orderId: order.id,
+        paymentIntentId,
         timestamp: currentTimestamp,
         connection,
       });
       await repository.cancelProvisionalOrder({
         orderId: order.id,
         shopId,
+        paymentIntentId,
         timestamp: currentTimestamp,
         connection,
       });
@@ -939,6 +990,7 @@ const buildPaymentModule = ({
       const currentTimestamp = timestamp();
       await repository.cancelPaymentsForOrder({
         orderId: order.id,
+        paymentIntentId: null,
         timestamp: currentTimestamp,
         connection,
       });
@@ -1032,6 +1084,10 @@ const buildPaymentModule = ({
       || order.stripe_payment_intent_id !== payment.stripe_payment_intent_id
       || !matchesRefundReferences(payment, refund)) {
       return { ignored: true };
+    }
+    if (refund.status === "succeeded"
+      && Number(refund.amount) !== Number(payment.amount_cents)) {
+      return { ignored: true, partial_refund: true };
     }
     const legacyUnknownState = payment.refund_status === "legacy_unknown"
       || (

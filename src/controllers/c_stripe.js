@@ -263,7 +263,11 @@ const buildQrTablePaymentIntentController = ({
       }
       if (externalCancellationConfirmed) {
         try {
-          await cancelProvisional(provisionalOrderId, req.shopid);
+          await cancelProvisional(
+            provisionalOrderId,
+            req.shopid,
+            paymentIntent ? paymentIntent.id : null,
+          );
         } catch (cleanupError) {
           logger.error("Provisional Stripe order cleanup failed", cleanupError);
         }
@@ -522,7 +526,11 @@ const buildCancelQrTablePaymentIntentController = ({
   }
 
   try {
-    const cancellation = await cancelProvisional(orderId, req.shopid);
+    const cancellation = await cancelProvisional(
+      orderId,
+      req.shopid,
+      order.stripe_payment_intent_id,
+    );
     if (cancellation && cancellation.missing) {
       return custom(res, 404, "Commande Stripe introuvable.", null, {
         code: "STRIPE_ORDER_NOT_FOUND",
@@ -551,10 +559,15 @@ const buildCancelQrTablePaymentIntentController = ({
 exports.buildCancelQrTablePaymentIntentController = buildCancelQrTablePaymentIntentController;
 exports.cancelQrTablePaymentIntent = buildCancelQrTablePaymentIntentController();
 
-exports.markQrTablePaymentAtCounter = async (req, res) => {
+const buildMarkQrTablePaymentAtCounter = ({
+  getShopInfo = mGetShopInfo,
+  getPendingStripeOrderForCounter: findPendingOrder = getPendingStripeOrderForCounter,
+  getStripe: getStripeClient = getStripe,
+  markStripeOrderPayAtCounter: markPayAtCounter = markStripeOrderPayAtCounter,
+} = {}) => async (req, res) => {
   try {
     const orderId = req.params.orderId;
-    const rows = await mGetShopInfo(req.shopid);
+    const rows = await getShopInfo(req.shopid);
     const shop = rows[0];
 
     if (!shop) {
@@ -571,7 +584,7 @@ exports.markQrTablePaymentAtCounter = async (req, res) => {
       );
     }
 
-    const pendingOrders = await getPendingStripeOrderForCounter(
+    const pendingOrders = await findPendingOrder(
       orderId,
       req.shopid,
     );
@@ -579,7 +592,7 @@ exports.markQrTablePaymentAtCounter = async (req, res) => {
       return custom(res, 404, "Commande Stripe en attente introuvable.", null, null);
     }
 
-    const stripe = getStripe();
+    const stripe = getStripeClient();
     const paymentIntentId = pendingOrders[0].stripe_payment_intent_id;
     const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
 
@@ -597,7 +610,16 @@ exports.markQrTablePaymentAtCounter = async (req, res) => {
       await stripe.paymentIntents.cancel(paymentIntentId);
     }
 
-    await markStripeOrderPayAtCounter(orderId, req.shopid);
+    const transition = await markPayAtCounter(orderId, req.shopid, paymentIntentId);
+    if (!transition || transition.ignored) {
+      return custom(
+        res,
+        409,
+        "Le paiement Stripe ne peut pas etre modifie pour cette commande.",
+        null,
+        { code: "STRIPE_PAYMENT_NOT_SETTLED" },
+      );
+    }
 
     success(res, "Commande envoyee. Paiement au comptoir a la fin.", null, {
       orderId,
@@ -854,6 +876,9 @@ const buildRefundPaidOrderController = ({
     failed(res, "Erreur lors du remboursement Stripe.");
   }
 };
+
+exports.buildMarkQrTablePaymentAtCounter = buildMarkQrTablePaymentAtCounter;
+exports.markQrTablePaymentAtCounter = buildMarkQrTablePaymentAtCounter();
 
 exports.buildRefundPaidOrderController = buildRefundPaidOrderController;
 exports.refundPaidOrder = buildRefundPaidOrderController();

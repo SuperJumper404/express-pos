@@ -118,7 +118,10 @@ const buildPendingStripeArchiveSync = ({
     await stripe.paymentIntents.cancel(paymentIntentId);
   }
 
-  await commitPayAtCounter(order.id, order.shopid);
+  const transition = await commitPayAtCounter(order.id, order.shopid, paymentIntentId);
+  if (!transition || transition.ignored) {
+    throw stripePaymentNotSettledError();
+  }
   const refreshedOrders = await findOrderById(order.id, order.shopid);
   return refreshedOrders[0] || order;
 };
