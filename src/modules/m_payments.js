@@ -1057,7 +1057,7 @@ const buildPaymentModule = ({
       && refund.id
       && payment.stripe_refund_id !== refund.id
       && ["failed", "canceled"].includes(payment.refund_status)
-      && ["pending", "requires_action", "failed", "canceled", "succeeded"].includes(refund.status)
+      && ["pending", "requires_action", "succeeded"].includes(refund.status)
       && /^[1-9]\d*$/.test(String(rawGeneration || ""))
       && Number.isSafeInteger(generation)
       && refund.payment_intent === payment.stripe_payment_intent_id

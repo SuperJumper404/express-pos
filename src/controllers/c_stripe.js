@@ -1034,6 +1034,11 @@ const buildRefundPaidOrderController = ({
       } else if (current.stripe_refund_id === refund.id && current.refund_status) {
         refundId = current.stripe_refund_id;
         refundStatus = current.refund_status;
+      } else if (current.stripe_refund_id !== refund.id
+        && ["failed", "canceled"].includes(current.refund_status)
+        && ["failed", "canceled"].includes(refund.status)) {
+        refundId = refund.id;
+        refundStatus = refund.status;
       } else {
         return custom(res, 409, "Etat du remboursement incoherent.", null, {
           code: "STRIPE_REFUND_STATE_CONFLICT",

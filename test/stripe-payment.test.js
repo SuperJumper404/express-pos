@@ -1367,6 +1367,64 @@ const runFailedRefundLifecycleContract = async () => {
     assert.strictEqual(harness.state.payment.status, "refunded");
     assert.strictEqual(harness.state.order.payment_status, "refunded");
   }
+
+  for (const delayedStatus of ["failed", "canceled"]) {
+    const harness = makeRefundLifecycleHarness();
+    await harness.payments.recordRefundState({
+      orderId: 42,
+      shopId: 7,
+      refund: {
+        id: "re_current_generation_2",
+        status: "pending",
+        amount: 2300,
+        payment_intent: "pi_42",
+        charge: "ch_42",
+        metadata: {
+          order_id: "42",
+          shop_id: "7",
+          refund_attempt_generation: "2",
+        },
+      },
+    });
+    await harness.payments.recordRefundState({
+      orderId: 42,
+      shopId: 7,
+      refund: {
+        id: "re_current_generation_2",
+        status: "failed",
+        amount: 2300,
+        payment_intent: "pi_42",
+        charge: "ch_42",
+        failure_reason: "current_failure",
+        metadata: {
+          order_id: "42",
+          shop_id: "7",
+          refund_attempt_generation: "2",
+        },
+      },
+    });
+
+    assert.deepStrictEqual(
+      await harness.payments.reconcileStripeRefund({
+        id: "re_delayed_generation_1",
+        status: delayedStatus,
+        amount: 2300,
+        payment_intent: "pi_42",
+        charge: "ch_42",
+        failure_reason: "delayed_failure",
+        metadata: {
+          order_id: "42",
+          shop_id: "7",
+          refund_attempt_generation: "1",
+        },
+      }),
+      { ignored: true },
+      `${delayedStatus} from an older different ID must not replace the audit association`,
+    );
+    assert.strictEqual(harness.state.payment.stripe_refund_id, "re_current_generation_2");
+    assert.strictEqual(harness.state.payment.refund_status, "failed");
+    assert.strictEqual(harness.state.payment.refund_failure_reason, "current_failure");
+  }
 };
 
 const runRefundWebhookLookupContract = async () => {
@@ -3219,6 +3277,125 @@ const runRefundControllerContract = async () => {
     assert.deepStrictEqual(associatedCreates[0][1], {
       idempotencyKey: "refund-order-7-42-g1",
     });
+  }
+
+  for (const immediateStatus of ["failed", "canceled"]) {
+    const immediateHarness = makeRefundLifecycleHarness();
+    const generationZero = {
+      id: `re_immediate_${immediateStatus}_generation_0`,
+      status: "pending",
+      amount: 2300,
+      payment_intent: "pi_42",
+      charge: "ch_42",
+      metadata: {
+        order_id: "42",
+        shop_id: "7",
+        refund_attempt_generation: "0",
+      },
+    };
+    await immediateHarness.payments.recordRefundState({
+      orderId: 42,
+      shopId: 7,
+      refund: generationZero,
+    });
+    await immediateHarness.payments.recordRefundState({
+      orderId: 42,
+      shopId: 7,
+      refund: {
+        ...generationZero,
+        status: "failed",
+        failure_reason: "original_failure",
+      },
+    });
+
+    const immediateRows = [{
+      ...generationZero,
+      status: "failed",
+      failure_reason: "original_failure",
+    }];
+    const immediateCreates = [];
+    const immediateController = buildRefundPaidOrderController({
+      getPaidOrderForRefund: async () => [{
+        ...immediateHarness.state.order,
+        payment_record_status: immediateHarness.state.payment.status,
+        stripe_charge_id: immediateHarness.state.payment.stripe_charge_id,
+        stripe_refund_id: immediateHarness.state.payment.stripe_refund_id,
+        refund_status: immediateHarness.state.payment.refund_status,
+        refund_failure_reason: immediateHarness.state.payment.refund_failure_reason,
+        amount_cents: immediateHarness.state.payment.amount_cents,
+      }],
+      getStripe: () => ({
+        refunds: {
+          retrieve: async (refundId) => (
+            immediateRows.find((refund) => refund.id === refundId)
+          ),
+          list: async () => ({
+            data: immediateRows.map((refund) => ({ ...refund })),
+            has_more: false,
+          }),
+          create: async (params, options) => {
+            const generation = immediateCreates.length + 1;
+            const refund = {
+              id: `re_immediate_${immediateStatus}_generation_${generation}`,
+              status: generation === 1 ? immediateStatus : "pending",
+              amount: 2300,
+              payment_intent: "pi_42",
+              charge: "ch_42",
+              failure_reason: generation === 1 ? "immediate_failure" : null,
+              metadata: params.metadata,
+            };
+            immediateCreates.push([params, options]);
+            immediateRows.push(refund);
+            return refund;
+          },
+        },
+      }),
+      recordRefundState: immediateHarness.payments.recordRefundState,
+    });
+
+    const terminalResponse = makeResponse();
+    await immediateController(
+      { params: { id: "42" }, shopid: 7 },
+      terminalResponse,
+    );
+    assert.strictEqual(terminalResponse.statusCode, 200, immediateStatus);
+    assert.strictEqual(
+      terminalResponse.payload.data.refundId,
+      `re_immediate_${immediateStatus}_generation_1`,
+    );
+    assert.strictEqual(terminalResponse.payload.data.refundStatus, immediateStatus);
+    assert.strictEqual(
+      immediateHarness.state.payment.stripe_refund_id,
+      `re_immediate_${immediateStatus}_generation_0`,
+      "an immediately-terminal retry does not replace the prior audit association",
+    );
+    assert.strictEqual(immediateHarness.state.payment.refund_status, "failed");
+    assert.strictEqual(
+      immediateHarness.state.payment.refund_failure_reason,
+      "original_failure",
+    );
+
+    for (let replay = 0; replay < 2; replay += 1) {
+      const nextResponse = makeResponse();
+      await immediateController(
+        { params: { id: "42" }, shopid: 7 },
+        nextResponse,
+      );
+      assert.strictEqual(nextResponse.statusCode, 200, `${immediateStatus}:${replay}`);
+      assert.strictEqual(
+        nextResponse.payload.data.refundId,
+        `re_immediate_${immediateStatus}_generation_2`,
+      );
+      assert.strictEqual(nextResponse.payload.data.refundStatus, "pending");
+    }
+    assert.strictEqual(immediateCreates.length, 2, immediateStatus);
+    assert.deepStrictEqual(
+      immediateCreates.map((call) => call[1].idempotencyKey),
+      [
+        "refund-order-7-42-g1",
+        "refund-order-7-42-g2",
+      ],
+    );
   }
 
   let associatedRequiresActionCreates = 0;
