@@ -706,7 +706,21 @@ const buildRefundPaidOrderController = ({
     const payment = rows[0];
     const coherentRefunded = payment.payment_status === "refunded"
       && payment.payment_record_status === "refunded";
-    if (coherentRefunded && !payment.stripe_refund_id) {
+    const legacyUnknown = coherentRefunded
+      && payment.refund_status === "legacy_unknown";
+    const manualReview = () => custom(
+      res,
+      409,
+      "Remboursement historique a verifier manuellement.",
+      null,
+      {
+        code: "STRIPE_REFUND_LEGACY_UNKNOWN",
+        refundId: payment.stripe_refund_id || null,
+        refundStatus: "legacy_unknown",
+        manual_review_required: true,
+      },
+    );
+    if (coherentRefunded && !legacyUnknown && !payment.stripe_refund_id) {
       return success(res, "Commande deja remboursee.", null, {
         refundId: null,
         refundStatus: "succeeded",
@@ -731,6 +745,38 @@ const buildRefundPaidOrderController = ({
             shop_id: String(req.shopid),
           },
         };
+      }
+    } else if (legacyUnknown) {
+      if (!payment.stripe_payment_intent_id) return manualReview();
+      const listed = await stripe.refunds.list({
+        payment_intent: payment.stripe_payment_intent_id,
+        limit: 10,
+      });
+      const refunds = Array.isArray(listed && listed.data) ? listed.data : [];
+      const paymentIntentId = (candidate) => (
+        typeof candidate.payment_intent === "string"
+          ? candidate.payment_intent
+          : candidate.payment_intent && candidate.payment_intent.id
+      );
+      const fullCandidates = refunds.filter((candidate) => {
+        const metadata = candidate.metadata || {};
+        const hasMetadata = metadata.order_id != null || metadata.shop_id != null;
+        const metadataMatches = String(metadata.order_id || "") === String(orderId)
+          && String(metadata.shop_id || "") === String(req.shopid);
+        return paymentIntentId(candidate) === payment.stripe_payment_intent_id
+          && Number(candidate.amount) === Number(payment.amount_cents)
+          && (!hasMetadata || metadataMatches);
+      });
+      const metadataCandidates = fullCandidates.filter((candidate) => {
+        const metadata = candidate.metadata || {};
+        return metadata.order_id != null && metadata.shop_id != null;
+      });
+      if (metadataCandidates.length === 1) {
+        [refund] = metadataCandidates;
+      } else if (metadataCandidates.length === 0 && fullCandidates.length === 1) {
+        [refund] = fullCandidates;
+      } else {
+        return manualReview();
       }
     } else {
       refund = await stripe.refunds.create({
@@ -765,6 +811,20 @@ const buildRefundPaidOrderController = ({
           code: "STRIPE_REFUND_STATE_CONFLICT",
         });
       }
+      if (current.refund_status === "legacy_unknown") {
+        return custom(
+          res,
+          409,
+          "Remboursement historique a verifier manuellement.",
+          null,
+          {
+            code: "STRIPE_REFUND_LEGACY_UNKNOWN",
+            refundId: current.stripe_refund_id || null,
+            refundStatus: "legacy_unknown",
+            manual_review_required: true,
+          },
+        );
+      }
       if (current.payment_status === "refunded"
         && current.payment_record_status === "refunded") {
         refundId = current.stripe_refund_id || null;
@@ -783,6 +843,10 @@ const buildRefundPaidOrderController = ({
     }
     const data = { refundId, refundStatus };
     if (alreadyRefunded) data.already_refunded = true;
+    if (persistence && persistence.business_status_unchanged) {
+      data.business_status_unchanged = true;
+      data.orderStatus = persistence.order_status;
+    }
     success(
       res,
       refundStatus === "succeeded"

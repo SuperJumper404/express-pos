@@ -869,6 +869,11 @@ const makeRefundLifecycleHarness = () => {
       events.push("update-order");
       return { affectedRows: 1 };
     },
+    updateOrderRefundNonFinal: async () => {
+      state.order.payment_status = "paid";
+      events.push("update-order-non-final");
+      return { affectedRows: 1 };
+    },
   };
   const payments = buildPaymentModule({
     repository,
@@ -1056,7 +1061,7 @@ const runRefundWebhookLookupContract = async () => {
   harness.state.order.status = ORDER_STATUSES.CANCELED;
   Object.assign(harness.state.payment, {
     status: "refunded",
-    refund_status: "succeeded",
+    refund_status: "legacy_unknown",
     refunded_at: "2026-07-25 10:00:00",
     stripe_refund_id: null,
   });
@@ -1073,6 +1078,52 @@ const runRefundWebhookLookupContract = async () => {
   assert.strictEqual(harness.state.payment.refunded_at, "2026-07-25 10:00:00");
   assert.strictEqual(harness.state.order.payment_status, "refunded");
 
+  for (const [currentStatus, failureReason] of [
+    ["pending", null],
+    ["failed", "expired_or_canceled_card"],
+  ]) {
+    harness = makeRefundLifecycleHarness();
+    harness.state.order.payment_status = "refunded";
+    harness.state.order.status = ORDER_STATUSES.CANCELED;
+    Object.assign(harness.state.payment, {
+      status: "refunded",
+      refund_status: "legacy_unknown",
+      refunded_at: "2026-07-25 10:00:00",
+      stripe_refund_id: currentStatus === "failed" ? "re_legacy" : null,
+    });
+    assert.deepStrictEqual(
+      await harness.payments.reconcileStripeRefund({
+        id: "re_legacy",
+        status: currentStatus,
+        payment_intent: "pi_42",
+        failure_reason: failureReason,
+      }),
+      {
+        status: currentStatus,
+        business_status_unchanged: true,
+        order_status: ORDER_STATUSES.CANCELED,
+      },
+    );
+    assert.strictEqual(harness.state.payment.status, "succeeded");
+    assert.strictEqual(harness.state.payment.refund_status, currentStatus);
+    assert.strictEqual(harness.state.payment.refund_failure_reason, failureReason);
+    assert.strictEqual(harness.state.payment.refunded_at, null);
+    assert.strictEqual(harness.state.order.payment_status, "paid");
+    assert.strictEqual(harness.state.order.status, ORDER_STATUSES.CANCELED);
+
+    assert.deepStrictEqual(
+      await harness.payments.reconcileStripeRefund({
+        id: "re_legacy",
+        status: "succeeded",
+        payment_intent: "pi_42",
+      }),
+      { status: "succeeded" },
+    );
+    assert.strictEqual(harness.state.payment.status, "refunded");
+    assert.strictEqual(harness.state.order.payment_status, "refunded");
+    assert.strictEqual(harness.state.order.status, ORDER_STATUSES.CANCELED);
+  }
+
   for (const mismatchedReference of [
     { payment_intent: "pi_wrong", charge: "ch_42" },
     { payment_intent: "pi_42", charge: "ch_wrong" },
@@ -1082,7 +1133,7 @@ const runRefundWebhookLookupContract = async () => {
     harness.state.order.status = ORDER_STATUSES.CANCELED;
     Object.assign(harness.state.payment, {
       status: "refunded",
-      refund_status: "succeeded",
+      refund_status: "legacy_unknown",
       refunded_at: "2026-07-25 10:00:00",
       stripe_refund_id: null,
     });
@@ -2565,6 +2616,131 @@ const runRefundControllerContract = async () => {
     already_refunded: true,
   });
 
+  const legacyRow = {
+    id: 42,
+    shopid: 7,
+    payment_status: "refunded",
+    payment_record_status: "refunded",
+    stripe_payment_intent_id: "pi_42",
+    stripe_charge_id: null,
+    amount_cents: 2300,
+    stripe_refund_id: null,
+    refund_status: "legacy_unknown",
+  };
+  const legacyIdResponse = makeResponse();
+  let legacyIdCreates = 0;
+  await buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => [{
+      ...legacyRow,
+      stripe_refund_id: "re_legacy",
+    }],
+    getStripe: () => ({
+      refunds: {
+        create: async () => { legacyIdCreates += 1; },
+        retrieve: async () => ({
+          id: "re_legacy",
+          status: "pending",
+          amount: 2300,
+          payment_intent: "pi_42",
+        }),
+      },
+    }),
+    recordRefundState: async ({ refund }) => ({
+      status: refund.status,
+      business_status_unchanged: true,
+      order_status: ORDER_STATUSES.CANCELED,
+    }),
+  })({ params: { id: "42" }, shopid: 7 }, legacyIdResponse);
+  assert.strictEqual(legacyIdCreates, 0);
+  assert.strictEqual(legacyIdResponse.payload.data.refundStatus, "pending");
+  assert.strictEqual(legacyIdResponse.payload.data.business_status_unchanged, true);
+
+  for (const currentStatus of ["failed", "succeeded"]) {
+    const currentResponse = makeResponse();
+    await buildRefundPaidOrderController({
+      getPaidOrderForRefund: async () => [{
+        ...legacyRow,
+        stripe_refund_id: "re_legacy",
+      }],
+      getStripe: () => ({
+        refunds: {
+          create: async () => {
+            throw new Error("legacy_unknown must never create a refund");
+          },
+          retrieve: async () => ({
+            id: "re_legacy",
+            status: currentStatus,
+            amount: 2300,
+            payment_intent: "pi_42",
+          }),
+        },
+      }),
+      recordRefundState: async ({ refund }) => ({ status: refund.status }),
+    })({ params: { id: "42" }, shopid: 7 }, currentResponse);
+    assert.strictEqual(currentResponse.payload.data.refundStatus, currentStatus);
+  }
+
+  const legacyListCalls = [];
+  const legacyListResponse = makeResponse();
+  await buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => [legacyRow],
+    getStripe: () => ({
+      refunds: {
+        create: async () => {
+          throw new Error("legacy_unknown must never create a refund");
+        },
+        list: async (params) => {
+          legacyListCalls.push(params);
+          return {
+            data: [{
+              id: "re_listed",
+              status: "failed",
+              failure_reason: "declined",
+              amount: 2300,
+              payment_intent: "pi_42",
+              metadata: {},
+            }],
+          };
+        },
+      },
+    }),
+    recordRefundState: async ({ refund }) => ({
+      status: refund.status,
+      business_status_unchanged: true,
+      order_status: ORDER_STATUSES.CANCELED,
+    }),
+  })({ params: { id: "42" }, shopid: 7 }, legacyListResponse);
+  assert.deepStrictEqual(legacyListCalls, [{
+    payment_intent: "pi_42",
+    limit: 10,
+  }]);
+  assert.strictEqual(legacyListResponse.payload.data.refundId, "re_listed");
+  assert.strictEqual(legacyListResponse.payload.data.refundStatus, "failed");
+
+  for (const refunds of [
+    [],
+    [
+      { id: "re_1", status: "pending", amount: 2300, payment_intent: "pi_42" },
+      { id: "re_2", status: "pending", amount: 2300, payment_intent: "pi_42" },
+    ],
+  ]) {
+    const ambiguousResponse = makeResponse();
+    await buildRefundPaidOrderController({
+      getPaidOrderForRefund: async () => [legacyRow],
+      getStripe: () => ({
+        refunds: {
+          create: async () => {
+            throw new Error("legacy_unknown must never create a refund");
+          },
+          list: async () => ({ data: refunds }),
+        },
+      }),
+    })({ params: { id: "42" }, shopid: 7 }, ambiguousResponse);
+    assert.strictEqual(ambiguousResponse.statusCode, 409);
+    assert.strictEqual(ambiguousResponse.payload.data.refundStatus, "legacy_unknown");
+    assert.strictEqual(ambiguousResponse.payload.data.manual_review_required, true);
+  }
+
   const succeededReplayCalls = [];
   const succeededReplayResponse = makeResponse();
   await buildRefundPaidOrderController({
@@ -2675,15 +2851,32 @@ const runRefundMigrationContract = async () => {
   assert.match(up, /ADD UNIQUE KEY `stripe_refund_id` \(`stripe_refund_id`\)/);
   assert.match(
     up,
-    /UPDATE `payments`[\s\S]*SET `refund_status` = 'succeeded'[\s\S]*WHERE `status` = 'refunded'[\s\S]*AND `refunded_at` IS NOT NULL/,
+    /UPDATE `payments`[\s\S]*SET `refund_status` = 'legacy_unknown'[\s\S]*WHERE `status` = 'refunded'[\s\S]*AND `refunded_at` IS NOT NULL/,
+  );
+  assert.doesNotMatch(up, /SET `refund_status` = 'succeeded'/);
+  assert.match(
+    up,
+    /SET `stripe_refund_id` = `stripe_charge_id`,[\s\S]*`stripe_charge_id` = NULL[\s\S]*`stripe_charge_id` LIKE 're/,
+  );
+  assert.ok(
+    up.indexOf("ADD UNIQUE KEY `stripe_refund_id`")
+      > up.indexOf("SET `stripe_refund_id` = `stripe_charge_id`"),
   );
   assert.match(down, /DROP INDEX `stripe_refund_id`/);
   assert.match(down, /DROP COLUMN `refund_failure_reason`/);
   assert.match(down, /DROP COLUMN `refund_status`/);
   assert.match(down, /DROP COLUMN `stripe_refund_id`/);
+  assert.match(
+    down,
+    /SET `stripe_charge_id` = `stripe_refund_id`[\s\S]*`refund_status` = 'legacy_unknown'/,
+  );
   assert.ok(
     down.indexOf("DROP INDEX `stripe_refund_id`")
       < down.indexOf("DROP COLUMN `stripe_refund_id`"),
+  );
+  assert.ok(
+    down.indexOf("DROP INDEX `stripe_refund_id`")
+      < down.indexOf("SET `stripe_charge_id` = `stripe_refund_id`"),
   );
 
   const paymentSource = fs.readFileSync(

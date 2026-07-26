@@ -149,6 +149,7 @@ const sqlRepository = {
             payments.stripe_refund_id,
             payments.refund_status,
             payments.refund_failure_reason,
+            payments.amount_cents,
             payments.status AS payment_record_status
      FROM orders
      JOIN payments
@@ -403,6 +404,17 @@ const sqlRepository = {
        AND payment_status = 'paid'
        AND payment_provider = 'stripe'`,
     [ORDER_STATUSES.CANCELED, orderId, shopId],
+  ),
+
+  updateOrderRefundNonFinal: ({ orderId, shopId, connection }) => queryResult(
+    connection,
+    `UPDATE orders
+     SET payment_status = 'paid'
+     WHERE id = ?
+       AND shopid = ?
+       AND payment_status = 'refunded'
+       AND payment_provider = 'stripe'`,
+    [orderId, shopId],
   ),
 };
 
@@ -936,13 +948,16 @@ const buildPaymentModule = ({
   );
   const matchesLegacyTerminalReference = (payment, refund) => {
     const chargeId = refundChargeId(refund);
-    return !payment.stripe_refund_id
-      && payment.status === "refunded"
+    const refundIdMatches = payment.stripe_refund_id
+      && refund.id === payment.stripe_refund_id;
+    const externalReferenceMatches = !payment.stripe_refund_id
       && (
         (refund.payment_intent
           && refund.payment_intent === payment.stripe_payment_intent_id)
         || (chargeId && chargeId === payment.stripe_charge_id)
       );
+    return (payment.status === "refunded" || payment.refund_status === "legacy_unknown")
+      && (refundIdMatches || externalReferenceMatches);
   };
   const validRefundMetadata = (
     payment,
@@ -995,7 +1010,14 @@ const buildPaymentModule = ({
       || !matchesRefundReferences(payment, refund)) {
       return { ignored: true };
     }
-    const legacyTerminal = matchesLegacyTerminalReference(payment, refund)
+    const legacyUnknownState = payment.refund_status === "legacy_unknown"
+      || (
+        !payment.refund_status
+        && !payment.stripe_refund_id
+        && payment.status === "refunded"
+      );
+    const legacyTerminal = legacyUnknownState
+      && matchesLegacyTerminalReference(payment, refund)
       && order.payment_status === "refunded";
     if (legacyTerminal && refund.status === "succeeded") {
       const updatedPayment = await repository.updatePaymentRefundState({
@@ -1015,6 +1037,40 @@ const buildPaymentModule = ({
         throw new Error("Legacy refund backfill failed");
       }
       return { status: "succeeded", legacy_backfill: true };
+    }
+    if (legacyTerminal
+      && ["pending", "requires_action", "failed", "canceled"].includes(refund.status)) {
+      const updatedPayment = await repository.updatePaymentRefundState({
+        paymentId: payment.id,
+        orderId: payment.order_id,
+        shopId: payment.shop_id,
+        paymentIntentId: payment.stripe_payment_intent_id,
+        refundId: refund.id,
+        refundStatus: refund.status,
+        failureReason: ["failed", "canceled"].includes(refund.status)
+          ? refund.failure_reason || null
+          : null,
+        paymentStatus: "succeeded",
+        refundedAt: null,
+        timestamp: timestamp(),
+        connection,
+      });
+      if (!updatedPayment.affectedRows) {
+        throw new Error("Legacy refund payment correction failed");
+      }
+      const updatedOrder = await repository.updateOrderRefundNonFinal({
+        orderId: order.id,
+        shopId: order.shopid,
+        connection,
+      });
+      if (!updatedOrder.affectedRows) {
+        throw new Error("Legacy refund order correction failed");
+      }
+      return {
+        status: refund.status,
+        business_status_unchanged: true,
+        order_status: order.status,
+      };
     }
     if (payment.status === "refunded"
       && payment.refund_status === "succeeded"
