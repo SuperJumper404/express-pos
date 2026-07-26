@@ -750,34 +750,29 @@ const buildRefundPaidOrderController = ({
       if (!payment.stripe_payment_intent_id) return manualReview();
       const listed = await stripe.refunds.list({
         payment_intent: payment.stripe_payment_intent_id,
-        limit: 10,
+        limit: 100,
       });
+      if (listed && listed.has_more) return manualReview();
       const refunds = Array.isArray(listed && listed.data) ? listed.data : [];
       const paymentIntentId = (candidate) => (
         typeof candidate.payment_intent === "string"
           ? candidate.payment_intent
           : candidate.payment_intent && candidate.payment_intent.id
       );
-      const fullCandidates = refunds.filter((candidate) => {
+      const fullCandidates = refunds.filter((candidate) => (
+        paymentIntentId(candidate) === payment.stripe_payment_intent_id
+        && Number(candidate.amount) === Number(payment.amount_cents)
+      ));
+      if (fullCandidates.length !== 1) return manualReview();
+      const [candidate] = fullCandidates;
+      {
         const metadata = candidate.metadata || {};
         const hasMetadata = metadata.order_id != null || metadata.shop_id != null;
         const metadataMatches = String(metadata.order_id || "") === String(orderId)
           && String(metadata.shop_id || "") === String(req.shopid);
-        return paymentIntentId(candidate) === payment.stripe_payment_intent_id
-          && Number(candidate.amount) === Number(payment.amount_cents)
-          && (!hasMetadata || metadataMatches);
-      });
-      const metadataCandidates = fullCandidates.filter((candidate) => {
-        const metadata = candidate.metadata || {};
-        return metadata.order_id != null && metadata.shop_id != null;
-      });
-      if (metadataCandidates.length === 1) {
-        [refund] = metadataCandidates;
-      } else if (metadataCandidates.length === 0 && fullCandidates.length === 1) {
-        [refund] = fullCandidates;
-      } else {
-        return manualReview();
+        if (hasMetadata && !metadataMatches) return manualReview();
       }
+      refund = candidate;
     } else {
       refund = await stripe.refunds.create({
         payment_intent: payment.stripe_payment_intent_id,

@@ -28,8 +28,7 @@ ALTER TABLE `payments`
 
 UPDATE `payments`
 SET `stripe_charge_id` = `stripe_refund_id`
-WHERE `refund_status` = 'legacy_unknown'
-  AND `stripe_charge_id` IS NULL
+WHERE `stripe_charge_id` IS NULL
   AND `stripe_refund_id` LIKE 're_%'
   AND LEFT(`stripe_refund_id`, 3) = 're_';
 

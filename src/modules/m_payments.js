@@ -416,6 +416,20 @@ const sqlRepository = {
        AND payment_provider = 'stripe'`,
     [orderId, shopId],
   ),
+
+  backfillRefundCharge: ({
+    paymentId, orderId, shopId, paymentIntentId, chargeId, connection,
+  }) => queryResult(
+    connection,
+    `UPDATE payments
+     SET stripe_charge_id = ?
+     WHERE id = ?
+       AND order_id = ?
+       AND shop_id = ?
+       AND stripe_payment_intent_id = ?
+       AND stripe_charge_id IS NULL`,
+    [chargeId, paymentId, orderId, shopId, paymentIntentId],
+  ),
 };
 
 const isReservationTransitionError = (error) => (
@@ -987,7 +1001,15 @@ const buildPaymentModule = ({
       && payment.stripe_refund_id !== refund.id) return false;
     if (refund.payment_intent
       && payment.stripe_payment_intent_id !== refund.payment_intent) return false;
-    if (chargeId && payment.stripe_charge_id !== chargeId) return false;
+    if (chargeId && payment.stripe_charge_id && payment.stripe_charge_id !== chargeId) {
+      return false;
+    }
+    if (chargeId && !payment.stripe_charge_id) {
+      const extractedLegacyRefundMatches = payment.refund_status === "legacy_unknown"
+        && payment.stripe_refund_id === refund.id
+        && refund.payment_intent === payment.stripe_payment_intent_id;
+      if (!extractedLegacyRefundMatches) return false;
+    }
     return validRefundMetadata(payment, refund, metadataOptions);
   };
   const selectRefundPayment = (payments, refund, order = null) => {
@@ -1019,6 +1041,20 @@ const buildPaymentModule = ({
     const legacyTerminal = legacyUnknownState
       && matchesLegacyTerminalReference(payment, refund)
       && order.payment_status === "refunded";
+    const legacyChargeId = refundChargeId(refund);
+    if (legacyTerminal && legacyChargeId && !payment.stripe_charge_id) {
+      const backfilledCharge = await repository.backfillRefundCharge({
+        paymentId: payment.id,
+        orderId: payment.order_id,
+        shopId: payment.shop_id,
+        paymentIntentId: payment.stripe_payment_intent_id,
+        chargeId: legacyChargeId,
+        connection,
+      });
+      if (!backfilledCharge.affectedRows) {
+        throw new Error("Legacy refund charge backfill failed");
+      }
+    }
     if (legacyTerminal && refund.status === "succeeded") {
       const updatedPayment = await repository.updatePaymentRefundState({
         paymentId: payment.id,

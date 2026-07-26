@@ -874,6 +874,12 @@ const makeRefundLifecycleHarness = () => {
       events.push("update-order-non-final");
       return { affectedRows: 1 };
     },
+    backfillRefundCharge: async ({ chargeId }) => {
+      if (state.payment.stripe_charge_id != null) return { affectedRows: 0 };
+      state.payment.stripe_charge_id = chargeId;
+      events.push("backfill-charge");
+      return { affectedRows: 1 };
+    },
   };
   const payments = buildPaymentModule({
     repository,
@@ -929,6 +935,47 @@ const runSucceededRefundLifecycleContract = async () => {
   assert.strictEqual(harness.state.payment.refund_failure_reason, null);
   assert.strictEqual(harness.state.payment.refunded_at, "2026-07-26 19:30:00");
   assert.strictEqual(harness.state.order.payment_status, "refunded");
+
+  let legacyChargeHarness = makeRefundLifecycleHarness();
+  legacyChargeHarness.state.order.payment_status = "refunded";
+  legacyChargeHarness.state.order.status = ORDER_STATUSES.CANCELED;
+  Object.assign(legacyChargeHarness.state.payment, {
+    status: "refunded",
+    refund_status: "legacy_unknown",
+    refunded_at: "2026-07-25 10:00:00",
+    stripe_refund_id: "re_extracted",
+    stripe_charge_id: null,
+  });
+  assert.deepStrictEqual(
+    await legacyChargeHarness.payments.reconcileStripeRefund({
+      id: "re_extracted",
+      status: "succeeded",
+      payment_intent: "pi_42",
+      charge: "ch_backfilled",
+    }),
+    { status: "succeeded", legacy_backfill: true },
+  );
+  assert.strictEqual(legacyChargeHarness.state.payment.stripe_charge_id, "ch_backfilled");
+
+  legacyChargeHarness = makeRefundLifecycleHarness();
+  legacyChargeHarness.state.order.payment_status = "refunded";
+  legacyChargeHarness.state.order.status = ORDER_STATUSES.CANCELED;
+  Object.assign(legacyChargeHarness.state.payment, {
+    status: "refunded",
+    refund_status: "legacy_unknown",
+    stripe_refund_id: "re_extracted",
+    stripe_charge_id: "ch_local",
+  });
+  assert.deepStrictEqual(
+    await legacyChargeHarness.payments.reconcileStripeRefund({
+      id: "re_extracted",
+      status: "succeeded",
+      payment_intent: "pi_42",
+      charge: "ch_other",
+    }),
+    { ignored: true },
+  );
+  assert.strictEqual(legacyChargeHarness.state.payment.stripe_charge_id, "ch_local");
   assert.strictEqual(harness.state.order.status, ORDER_STATUSES.CANCELED);
 
   const eventsAfterSuccess = harness.events.slice();
@@ -2712,7 +2759,7 @@ const runRefundControllerContract = async () => {
   })({ params: { id: "42" }, shopid: 7 }, legacyListResponse);
   assert.deepStrictEqual(legacyListCalls, [{
     payment_intent: "pi_42",
-    limit: 10,
+    limit: 100,
   }]);
   assert.strictEqual(legacyListResponse.payload.data.refundId, "re_listed");
   assert.strictEqual(legacyListResponse.payload.data.refundStatus, "failed");
@@ -2739,6 +2786,44 @@ const runRefundControllerContract = async () => {
     assert.strictEqual(ambiguousResponse.statusCode, 409);
     assert.strictEqual(ambiguousResponse.payload.data.refundStatus, "legacy_unknown");
     assert.strictEqual(ambiguousResponse.payload.data.manual_review_required, true);
+  }
+
+  for (const listed of [
+    {
+      has_more: true,
+      data: [{ id: "re_visible", status: "pending", amount: 2300, payment_intent: "pi_42" }],
+    },
+    {
+      has_more: false,
+      data: [
+        {
+          id: "re_exact",
+          status: "pending",
+          amount: 2300,
+          payment_intent: "pi_42",
+          metadata: { order_id: "42", shop_id: "7" },
+        },
+        { id: "re_other", status: "pending", amount: 2300, payment_intent: "pi_42" },
+      ],
+    },
+  ]) {
+    const responseWithUnsafeList = makeResponse();
+    await buildRefundPaidOrderController({
+      getPaidOrderForRefund: async () => [legacyRow],
+      getStripe: () => ({
+        refunds: {
+          create: async () => {
+            throw new Error("legacy_unknown must never create a refund");
+          },
+          list: async () => listed,
+        },
+      }),
+    })({ params: { id: "42" }, shopid: 7 }, responseWithUnsafeList);
+    assert.strictEqual(responseWithUnsafeList.statusCode, 409);
+    assert.strictEqual(
+      responseWithUnsafeList.payload.data.manual_review_required,
+      true,
+    );
   }
 
   const succeededReplayCalls = [];
@@ -2868,8 +2953,11 @@ const runRefundMigrationContract = async () => {
   assert.match(down, /DROP COLUMN `stripe_refund_id`/);
   assert.match(
     down,
-    /SET `stripe_charge_id` = `stripe_refund_id`[\s\S]*`refund_status` = 'legacy_unknown'/,
+    /SET `stripe_charge_id` = `stripe_refund_id`[\s\S]*`stripe_charge_id` IS NULL/,
   );
+  const downRestore = down.match(/UPDATE `payments`([\s\S]*?)ALTER TABLE `payments`/);
+  assert.ok(downRestore);
+  assert.doesNotMatch(downRestore[1], /refund_status/);
   assert.ok(
     down.indexOf("DROP INDEX `stripe_refund_id`")
       < down.indexOf("DROP COLUMN `stripe_refund_id`"),
