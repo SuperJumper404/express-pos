@@ -610,6 +610,52 @@ exports.markQrTablePaymentAtCounter = async (req, res) => {
   }
 };
 
+const buildStripeWebhookEventHandler = ({
+  getStripe: getStripeClient = getStripe,
+  markPaymentAttemptFailed: markAttemptFailed = markPaymentAttemptFailed,
+  markPaymentCanceled: markCanceled = markPaymentCanceled,
+  markPaymentProcessing: markProcessing = markPaymentProcessing,
+  markPaymentSucceeded: markSucceeded = markPaymentSucceeded,
+} = {}) => {
+  const markSucceededWithCharge = async (paymentIntent) => {
+    const charge = paymentIntent.latest_charge
+      ? await getStripeClient().charges.retrieve(paymentIntent.latest_charge)
+      : null;
+    return markSucceeded(paymentIntent, charge);
+  };
+
+  const reconcileCurrentPaymentIntent = async (paymentIntentId) => {
+    const paymentIntent = await getStripeClient().paymentIntents.retrieve(paymentIntentId);
+    if (paymentIntent.status === "succeeded") {
+      return markSucceededWithCharge(paymentIntent);
+    }
+    if (paymentIntent.status === "canceled") {
+      return markCanceled(paymentIntent.id);
+    }
+    if (paymentIntent.status === "processing") {
+      return markProcessing(paymentIntent.id);
+    }
+    return markAttemptFailed(paymentIntent);
+  };
+
+  return async (event) => {
+    const paymentIntent = event.data.object;
+    if (event.type === "payment_intent.succeeded") {
+      return markSucceededWithCharge(paymentIntent);
+    }
+    if (["payment_intent.payment_failed", "payment_intent.processing"].includes(event.type)) {
+      return reconcileCurrentPaymentIntent(paymentIntent.id);
+    }
+    if (event.type === "payment_intent.canceled") {
+      return markCanceled(paymentIntent.id);
+    }
+    return null;
+  };
+};
+
+exports.buildStripeWebhookEventHandler = buildStripeWebhookEventHandler;
+const handleStripeWebhookEvent = buildStripeWebhookEventHandler();
+
 exports.handleWebhook = async (req, res) => {
   try {
     const stripe = getStripe();
@@ -620,25 +666,7 @@ exports.handleWebhook = async (req, res) => {
       envSTRIPEWEBHOOKSECRET,
     );
 
-    if (event.type === "payment_intent.succeeded") {
-      const paymentIntent = event.data.object;
-      const charge = paymentIntent.latest_charge
-        ? await stripe.charges.retrieve(paymentIntent.latest_charge)
-        : null;
-      await markPaymentSucceeded(paymentIntent, charge);
-    }
-
-    if (event.type === "payment_intent.payment_failed") {
-      await markPaymentAttemptFailed(event.data.object);
-    }
-
-    if (event.type === "payment_intent.processing") {
-      await markPaymentProcessing(event.data.object.id);
-    }
-
-    if (event.type === "payment_intent.canceled") {
-      await markPaymentCanceled(event.data.object.id);
-    }
+    await handleStripeWebhookEvent(event);
 
     res.json({ received: true });
   } catch (error) {

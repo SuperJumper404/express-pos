@@ -24,7 +24,7 @@ const sqlRepository = {
        application_fee_amount = VALUES(application_fee_amount),
        currency = VALUES(currency),
        status = CASE
-         WHEN payments.status IN ('succeeded', 'canceled', 'failed', 'refunded')
+         WHEN payments.status IN ('succeeded', 'canceled', 'refunded')
            THEN payments.status
          ELSE VALUES(status)
        END`,

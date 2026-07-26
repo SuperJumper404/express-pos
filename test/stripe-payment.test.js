@@ -23,6 +23,7 @@ require.cache[callbackDbPath] = {
   exports: { query: () => { throw new Error("unexpected legacy DB query"); } },
 };
 const {
+  buildStripeWebhookEventHandler,
   buildCancelQrTablePaymentIntentController,
   buildQrTablePaymentIntentController,
   buildRegenerateOrderPaymentIntent,
@@ -615,6 +616,69 @@ const runPendingPaymentShopScopeContract = async () => {
     timestamp: "2026-07-24 12:00:00",
     connection,
   });
+};
+
+const runStripeWebhookReconciliationContract = async () => {
+  const actions = [];
+  let currentPaymentIntent = {
+    id: "pi_42",
+    status: "requires_payment_method",
+  };
+  const handler = buildStripeWebhookEventHandler({
+    getStripe: () => ({
+      paymentIntents: {
+        retrieve: async (id) => ({ ...currentPaymentIntent, id }),
+      },
+      charges: {
+        retrieve: async (id) => ({ id }),
+      },
+    }),
+    markPaymentAttemptFailed: async (paymentIntent) => {
+      actions.push(["failed", paymentIntent.status]);
+    },
+    markPaymentProcessing: async (paymentIntentId) => {
+      actions.push(["processing", paymentIntentId]);
+    },
+    markPaymentSucceeded: async (paymentIntent, charge) => {
+      actions.push(["succeeded", paymentIntent.id, charge && charge.id]);
+    },
+    markPaymentCanceled: async (paymentIntentId) => {
+      actions.push(["canceled", paymentIntentId]);
+    },
+  });
+
+  await handler({
+    type: "payment_intent.payment_failed",
+    data: { object: { id: "pi_42", status: "requires_payment_method" } },
+  });
+  await handler({
+    type: "payment_intent.processing",
+    data: { object: { id: "pi_42", status: "processing" } },
+  });
+  assert.deepStrictEqual(actions, [
+    ["failed", "requires_payment_method"],
+    ["failed", "requires_payment_method"],
+  ], "a stale processing webhook must use Stripe's current retryable state");
+
+  actions.length = 0;
+  currentPaymentIntent = {
+    id: "pi_42",
+    status: "succeeded",
+    latest_charge: "ch_42",
+  };
+  await handler({
+    type: "payment_intent.processing",
+    data: { object: { id: "pi_42", status: "processing" } },
+  });
+  assert.deepStrictEqual(actions, [["succeeded", "pi_42", "ch_42"]]);
+
+  actions.length = 0;
+  currentPaymentIntent = { id: "pi_42", status: "canceled" };
+  await handler({
+    type: "payment_intent.payment_failed",
+    data: { object: { id: "pi_42", status: "requires_payment_method" } },
+  });
+  assert.deepStrictEqual(actions, [["canceled", "pi_42"]]);
 };
 
 const runCanceledPaymentUsesSuppliedOrderLockContract = async () => {
@@ -1900,6 +1964,7 @@ const runReplacementPaymentContracts = async () => {
 
 runSucceededPaymentShopScopeContract()
   .then(runPendingPaymentShopScopeContract)
+  .then(runStripeWebhookReconciliationContract)
   .then(runCanceledPaymentUsesSuppliedOrderLockContract)
   .then(runRefundLockOrderContract)
   .then(runPaymentEditRaceContract)
