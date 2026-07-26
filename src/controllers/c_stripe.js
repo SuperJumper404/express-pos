@@ -893,6 +893,11 @@ const buildRefundPaidOrderController = ({
           },
         };
       }
+      if (!legacyUnknown
+        && refund
+        && ["failed", "canceled"].includes(refund.status)) {
+        refund = null;
+      }
     } else if (legacyUnknown) {
       if (!payment.stripe_payment_intent_id) return manualReview();
       const listed = await stripe.refunds.list({
@@ -920,7 +925,8 @@ const buildRefundPaidOrderController = ({
         if (hasMetadata && !metadataMatches) return manualReview();
       }
       refund = candidate;
-    } else {
+    }
+    if (!refund) {
       let chargeId = payment.stripe_charge_id || null;
       if (!chargeId) {
         const paymentIntent = await stripe.paymentIntents.retrieve(

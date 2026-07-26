@@ -1047,11 +1047,31 @@ const buildPaymentModule = ({
     return matchesNumber("order_id", payment.order_id)
       && matchesNumber("shop_id", payment.shop_id);
   };
+  const isTerminalRefundReplacement = (payment, refund) => {
+    const metadata = refund.metadata || {};
+    const rawGeneration = metadata.refund_attempt_generation;
+    const generation = Number(rawGeneration);
+    const chargeId = refundChargeId(refund);
+    return Boolean(
+      payment.stripe_refund_id
+      && refund.id
+      && payment.stripe_refund_id !== refund.id
+      && ["failed", "canceled"].includes(payment.refund_status)
+      && ["pending", "requires_action", "failed", "canceled", "succeeded"].includes(refund.status)
+      && /^[1-9]\d*$/.test(String(rawGeneration || ""))
+      && Number.isSafeInteger(generation)
+      && refund.payment_intent === payment.stripe_payment_intent_id
+      && chargeId
+      && chargeId === payment.stripe_charge_id
+      && validRefundMetadata(payment, refund, { requireForNewAssociation: true })
+    );
+  };
   const matchesRefundReferences = (payment, refund, metadataOptions) => {
     const chargeId = refundChargeId(refund);
     if (payment.stripe_refund_id
       && refund.id
-      && payment.stripe_refund_id !== refund.id) return false;
+      && payment.stripe_refund_id !== refund.id
+      && !isTerminalRefundReplacement(payment, refund)) return false;
     if (refund.payment_intent
       && payment.stripe_payment_intent_id !== refund.payment_intent) return false;
     if (chargeId && payment.stripe_charge_id && payment.stripe_charge_id !== chargeId) {
@@ -1186,7 +1206,8 @@ const buildPaymentModule = ({
       return { ignored: true };
     }
     if (["failed", "canceled"].includes(payment.refund_status)
-      && ["pending", "requires_action"].includes(refund.status)) {
+      && ["pending", "requires_action"].includes(refund.status)
+      && payment.stripe_refund_id === refund.id) {
       return { ignored: true };
     }
     if (payment.status !== "succeeded" || order.payment_status !== "paid") {

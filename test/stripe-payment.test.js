@@ -1307,6 +1307,65 @@ const runFailedRefundLifecycleContract = async () => {
     assert.strictEqual(harness.state.payment.refunded_at, null);
     assert.strictEqual(harness.state.order.payment_status, "paid");
     assert.strictEqual(harness.state.order.status, 3);
+
+    assert.deepStrictEqual(
+      await harness.payments.recordRefundState({
+        orderId: 42,
+        shopId: 7,
+        refund: {
+          id: "re_42",
+          status: "pending",
+          payment_intent: "pi_42",
+        },
+      }),
+      { ignored: true },
+      "a stale update for the terminal attempt must not erase its audit state",
+    );
+    assert.strictEqual(harness.state.payment.stripe_refund_id, "re_42");
+    assert.strictEqual(harness.state.payment.refund_status, status);
+    assert.strictEqual(harness.state.payment.refund_failure_reason, failureReason);
+
+    assert.deepStrictEqual(
+      await harness.payments.reconcileStripeRefund({
+        id: "re_unproven_retry",
+        status: "pending",
+        amount: 2300,
+        payment_intent: "pi_42",
+        charge: "ch_42",
+        metadata: {
+          order_id: "42",
+          shop_id: "7",
+        },
+      }),
+      { ignored: true },
+      "a different refund ID without a proven retry generation is ignored",
+    );
+    assert.strictEqual(harness.state.payment.stripe_refund_id, "re_42");
+    assert.strictEqual(harness.state.payment.refund_status, status);
+    assert.strictEqual(harness.state.payment.refund_failure_reason, failureReason);
+
+    assert.deepStrictEqual(
+      await harness.payments.reconcileStripeRefund({
+        id: "re_retry_generation_1",
+        status: "succeeded",
+        amount: 2300,
+        cumulative_succeeded_amount: 2300,
+        payment_intent: "pi_42",
+        charge: "ch_42",
+        metadata: {
+          order_id: "42",
+          shop_id: "7",
+          refund_attempt_generation: "1",
+        },
+      }),
+      { status: "succeeded" },
+      "the webhook for a proven retry generation can replace the terminal association",
+    );
+    assert.strictEqual(harness.state.payment.stripe_refund_id, "re_retry_generation_1");
+    assert.strictEqual(harness.state.payment.refund_status, "succeeded");
+    assert.strictEqual(harness.state.payment.refund_failure_reason, null);
+    assert.strictEqual(harness.state.payment.status, "refunded");
+    assert.strictEqual(harness.state.order.payment_status, "refunded");
   }
 };
 
@@ -3063,6 +3122,170 @@ const runRefundControllerContract = async () => {
   );
   assert.strictEqual(cumulativeResponse.payload.data.refundStatus, "succeeded");
 
+  for (const terminalStatus of ["failed", "canceled"]) {
+    const associatedHarness = makeRefundLifecycleHarness();
+    const associatedRefund = {
+      id: `re_full_${terminalStatus}_generation_0`,
+      status: "pending",
+      amount: 2300,
+      payment_intent: "pi_42",
+      charge: "ch_42",
+      metadata: {
+        order_id: "42",
+        shop_id: "7",
+        refund_attempt_generation: "0",
+      },
+    };
+    await associatedHarness.payments.recordRefundState({
+      orderId: 42,
+      shopId: 7,
+      refund: associatedRefund,
+    });
+    await associatedHarness.payments.recordRefundState({
+      orderId: 42,
+      shopId: 7,
+      refund: {
+        ...associatedRefund,
+        status: terminalStatus,
+        failure_reason: terminalStatus === "failed" ? "expired_or_canceled_card" : null,
+      },
+    });
+    assert.strictEqual(
+      associatedHarness.state.payment.stripe_refund_id,
+      associatedRefund.id,
+      `${terminalStatus} keeps the terminal attempt associated for audit`,
+    );
+
+    const associatedRows = [{
+      ...associatedRefund,
+      status: terminalStatus,
+      failure_reason: associatedHarness.state.payment.refund_failure_reason,
+    }];
+    const associatedCreates = [];
+    const associatedController = buildRefundPaidOrderController({
+      getPaidOrderForRefund: async () => [{
+        ...associatedHarness.state.order,
+        payment_record_status: associatedHarness.state.payment.status,
+        stripe_charge_id: associatedHarness.state.payment.stripe_charge_id,
+        stripe_refund_id: associatedHarness.state.payment.stripe_refund_id,
+        refund_status: associatedHarness.state.payment.refund_status,
+        refund_failure_reason: associatedHarness.state.payment.refund_failure_reason,
+        amount_cents: associatedHarness.state.payment.amount_cents,
+      }],
+      getStripe: () => ({
+        refunds: {
+          retrieve: async (refundId) => (
+            associatedRows.find((refund) => refund.id === refundId)
+          ),
+          list: async () => ({
+            data: associatedRows.map((refund) => ({ ...refund })),
+            has_more: false,
+          }),
+          create: async (params, options) => {
+            associatedCreates.push([params, options]);
+            const retry = {
+              id: `re_full_${terminalStatus}_generation_1`,
+              status: "pending",
+              amount: 2300,
+              payment_intent: "pi_42",
+              charge: "ch_42",
+              metadata: params.metadata,
+            };
+            associatedRows.push(retry);
+            return retry;
+          },
+        },
+      }),
+      recordRefundState: associatedHarness.payments.recordRefundState,
+    });
+    for (let replay = 0; replay < 2; replay += 1) {
+      const associatedResponse = makeResponse();
+      await associatedController(
+        { params: { id: "42" }, shopid: 7 },
+        associatedResponse,
+      );
+      assert.strictEqual(associatedResponse.statusCode, 200, `${terminalStatus}:${replay}`);
+      assert.strictEqual(
+        associatedResponse.payload.data.refundId,
+        `re_full_${terminalStatus}_generation_1`,
+      );
+      assert.strictEqual(associatedResponse.payload.data.refundStatus, "pending");
+    }
+    assert.strictEqual(associatedCreates.length, 1, terminalStatus);
+    assert.strictEqual(
+      associatedCreates[0][0].metadata.refund_attempt_generation,
+      "1",
+    );
+    assert.deepStrictEqual(associatedCreates[0][1], {
+      idempotencyKey: "refund-order-7-42-g1",
+    });
+  }
+
+  let associatedRequiresActionCreates = 0;
+  const associatedRequiresActionResponse = makeResponse();
+  await buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => [{
+      id: 42,
+      shopid: 7,
+      payment_status: "paid",
+      payment_record_status: "succeeded",
+      stripe_payment_intent_id: "pi_42",
+      stripe_charge_id: "ch_42",
+      amount_cents: 2300,
+      stripe_refund_id: "re_full_requires_action_generation_0",
+      refund_status: "requires_action",
+    }],
+    getStripe: () => ({
+      refunds: {
+        retrieve: async () => ({
+          id: "re_full_requires_action_generation_0",
+          status: "requires_action",
+          amount: 2300,
+          payment_intent: "pi_42",
+          charge: "ch_42",
+          metadata: {
+            order_id: "42",
+            shop_id: "7",
+            refund_attempt_generation: "0",
+          },
+        }),
+        list: async () => ({
+          data: [{
+            id: "re_full_requires_action_generation_0",
+            status: "requires_action",
+            amount: 2300,
+            payment_intent: "pi_42",
+            charge: "ch_42",
+            metadata: {
+              order_id: "42",
+              shop_id: "7",
+              refund_attempt_generation: "0",
+            },
+          }],
+          has_more: false,
+        }),
+        create: async () => {
+          associatedRequiresActionCreates += 1;
+          throw new Error("associated requires_action refund must be reused");
+        },
+      },
+    }),
+    recordRefundState: async ({ refund }) => ({ status: refund.status }),
+  })(
+    { params: { id: "42" }, shopid: 7 },
+    associatedRequiresActionResponse,
+  );
+  assert.strictEqual(associatedRequiresActionCreates, 0);
+  assert.strictEqual(associatedRequiresActionResponse.statusCode, 200);
+  assert.strictEqual(
+    associatedRequiresActionResponse.payload.data.refundId,
+    "re_full_requires_action_generation_0",
+  );
+  assert.strictEqual(
+    associatedRequiresActionResponse.payload.data.refundStatus,
+    "requires_action",
+  );
+
   for (const nonFinalStatus of [
     "pending",
     "requires_action",
@@ -3346,10 +3569,10 @@ const runRefundControllerContract = async () => {
     });
   }
 
-  const concurrentRows = [priorSucceeded, {
+  const concurrentRows = [{
     id: "re_failed_concurrent_generation_0",
     status: "failed",
-    amount: 1100,
+    amount: 2300,
     payment_intent: "pi_42",
     charge: "ch_42",
     metadata: {
@@ -3367,13 +3590,16 @@ const runRefundControllerContract = async () => {
   let concurrentProviderCreates = 0;
   const concurrentStripe = {
     refunds: {
+      retrieve: async (refundId) => (
+        concurrentRows.find((refund) => refund.id === refundId)
+      ),
       list: async () => {
         concurrentPreflightLists += 1;
         if (concurrentPreflightLists <= 2) {
           if (concurrentPreflightLists === 2) releaseConcurrentPreflight();
           await concurrentPreflightBarrier;
           return {
-            data: concurrentRows.slice(0, 2).map((refund) => ({ ...refund })),
+            data: concurrentRows.slice(0, 1).map((refund) => ({ ...refund })),
             has_more: false,
           };
         }
@@ -3390,7 +3616,7 @@ const runRefundControllerContract = async () => {
             const refund = {
               id: "re_concurrent_generation_1",
               status: "pending",
-              amount: 1100,
+              amount: 2300,
               payment_intent: "pi_42",
               charge: "ch_42",
               metadata: params.metadata,
@@ -3404,7 +3630,12 @@ const runRefundControllerContract = async () => {
     },
   };
   const concurrentController = buildRefundPaidOrderController({
-    getPaidOrderForRefund: async () => [attemptPayment],
+    getPaidOrderForRefund: async () => [{
+      ...attemptPayment,
+      stripe_refund_id: "re_failed_concurrent_generation_0",
+      refund_status: "failed",
+      refund_failure_reason: "expired_or_canceled_card",
+    }],
     getStripe: () => concurrentStripe,
     recordRefundState: async () => ({ ignored: true, partial_refund: true }),
   });
