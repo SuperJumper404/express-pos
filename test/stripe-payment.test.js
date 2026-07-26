@@ -3146,44 +3146,138 @@ const runRefundControllerContract = async () => {
     metadata: {},
   };
 
-  let pendingCreateCalls = 0;
-  const pendingRows = [priorSucceeded, {
-    id: "re_pending_generation_0",
-    status: "pending",
+  for (const activeStatus of ["pending", "requires_action"]) {
+    let activeCreateCalls = 0;
+    const activeMetadata = {
+      order_id: "42",
+      shop_id: "7",
+    };
+    if (activeStatus === "pending") {
+      activeMetadata.refund_attempt_generation = "0";
+    }
+    const activeRows = [priorSucceeded, {
+      id: `re_${activeStatus}_generation_0`,
+      status: activeStatus,
+      amount: 1100,
+      payment_intent: "pi_42",
+      charge: "ch_42",
+      metadata: activeMetadata,
+    }];
+    const activeRetryController = buildRefundPaidOrderController({
+      getPaidOrderForRefund: async () => [attemptPayment],
+      getStripe: () => ({
+        refunds: {
+          list: async () => ({
+            data: activeRows.map((refund) => ({ ...refund })),
+            has_more: false,
+          }),
+          create: async () => {
+            activeCreateCalls += 1;
+            throw new Error(`${activeStatus} attempt must be reused`);
+          },
+        },
+      }),
+      recordRefundState: async () => ({ ignored: true, partial_refund: true }),
+    });
+    const activeRetryResponse = makeResponse();
+    await activeRetryController(
+      { params: { id: "42" }, shopid: 7 },
+      activeRetryResponse,
+    );
+    assert.strictEqual(activeCreateCalls, 0, activeStatus);
+    assert.strictEqual(activeRetryResponse.statusCode, 200, activeStatus);
+    assert.strictEqual(
+      activeRetryResponse.payload.data.refundId,
+      `re_${activeStatus}_generation_0`,
+    );
+    assert.strictEqual(activeRetryResponse.payload.data.refundStatus, activeStatus);
+  }
+
+  const selectorRows = [priorSucceeded, {
+    id: "re_historical_generation_0",
+    status: "failed",
     amount: 1100,
     payment_intent: "pi_42",
     charge: "ch_42",
     metadata: {
       order_id: "42",
       shop_id: "7",
-      refund_attempt_generation: "0",
+    },
+  }, {
+    id: "re_wrong_order",
+    status: "pending",
+    amount: 1100,
+    payment_intent: "pi_42",
+    charge: "ch_42",
+    metadata: {
+      order_id: "99",
+      shop_id: "7",
+      refund_attempt_generation: "not-a-generation",
+    },
+  }, {
+    id: "re_wrong_shop",
+    status: "pending",
+    amount: 1100,
+    payment_intent: "pi_42",
+    charge: "ch_42",
+    metadata: {
+      order_id: "42",
+      shop_id: "99",
+      refund_attempt_generation: "98",
+    },
+  }, {
+    id: "re_wrong_payment",
+    status: "pending",
+    amount: 1100,
+    payment_intent: "pi_other",
+    charge: "ch_42",
+    metadata: {
+      order_id: "42",
+      shop_id: "7",
+      refund_attempt_generation: "97",
     },
   }];
-  const pendingRetryController = buildRefundPaidOrderController({
+  const selectorCreates = [];
+  const selectorController = buildRefundPaidOrderController({
     getPaidOrderForRefund: async () => [attemptPayment],
     getStripe: () => ({
       refunds: {
         list: async () => ({
-          data: pendingRows.map((refund) => ({ ...refund })),
+          data: selectorRows.map((refund) => ({ ...refund })),
           has_more: false,
         }),
-        create: async () => {
-          pendingCreateCalls += 1;
-          throw new Error("pending attempt must be reused");
+        create: async (params, options) => {
+          selectorCreates.push([params, options]);
+          const refund = {
+            id: "re_selector_generation_1",
+            status: "pending",
+            amount: 1100,
+            payment_intent: "pi_42",
+            charge: "ch_42",
+            metadata: params.metadata,
+          };
+          selectorRows.push(refund);
+          return refund;
         },
       },
     }),
     recordRefundState: async () => ({ ignored: true, partial_refund: true }),
   });
-  const pendingRetryResponse = makeResponse();
-  await pendingRetryController(
+  const selectorResponse = makeResponse();
+  await selectorController(
     { params: { id: "42" }, shopid: 7 },
-    pendingRetryResponse,
+    selectorResponse,
   );
-  assert.strictEqual(pendingCreateCalls, 0);
-  assert.strictEqual(pendingRetryResponse.statusCode, 200);
-  assert.strictEqual(pendingRetryResponse.payload.data.refundId, "re_pending_generation_0");
-  assert.strictEqual(pendingRetryResponse.payload.data.refundStatus, "pending");
+  assert.strictEqual(selectorResponse.statusCode, 200);
+  assert.strictEqual(selectorResponse.payload.data.refundId, "re_selector_generation_1");
+  assert.strictEqual(selectorCreates.length, 1);
+  assert.strictEqual(
+    selectorCreates[0][0].metadata.refund_attempt_generation,
+    "1",
+  );
+  assert.deepStrictEqual(selectorCreates[0][1], {
+    idempotencyKey: "refund-order-7-42-g1",
+  });
 
   for (const terminalStatus of ["failed", "canceled"]) {
     const rows = [priorSucceeded, {
@@ -3250,6 +3344,88 @@ const runRefundControllerContract = async () => {
     assert.deepStrictEqual(createCalls[0][1], {
       idempotencyKey: "refund-order-7-42-g1",
     });
+  }
+
+  const concurrentRows = [priorSucceeded, {
+    id: "re_failed_concurrent_generation_0",
+    status: "failed",
+    amount: 1100,
+    payment_intent: "pi_42",
+    charge: "ch_42",
+    metadata: {
+      order_id: "42",
+      shop_id: "7",
+      refund_attempt_generation: "0",
+    },
+  }];
+  let concurrentPreflightLists = 0;
+  let releaseConcurrentPreflight;
+  const concurrentPreflightBarrier = new Promise((resolve) => {
+    releaseConcurrentPreflight = resolve;
+  });
+  const concurrentCreatesByKey = new Map();
+  let concurrentProviderCreates = 0;
+  const concurrentStripe = {
+    refunds: {
+      list: async () => {
+        concurrentPreflightLists += 1;
+        if (concurrentPreflightLists <= 2) {
+          if (concurrentPreflightLists === 2) releaseConcurrentPreflight();
+          await concurrentPreflightBarrier;
+          return {
+            data: concurrentRows.slice(0, 2).map((refund) => ({ ...refund })),
+            has_more: false,
+          };
+        }
+        return {
+          data: concurrentRows.map((refund) => ({ ...refund })),
+          has_more: false,
+        };
+      },
+      create: async (params, options) => {
+        const { idempotencyKey } = options;
+        if (!concurrentCreatesByKey.has(idempotencyKey)) {
+          concurrentProviderCreates += 1;
+          concurrentCreatesByKey.set(idempotencyKey, Promise.resolve().then(() => {
+            const refund = {
+              id: "re_concurrent_generation_1",
+              status: "pending",
+              amount: 1100,
+              payment_intent: "pi_42",
+              charge: "ch_42",
+              metadata: params.metadata,
+            };
+            concurrentRows.push(refund);
+            return refund;
+          }));
+        }
+        return concurrentCreatesByKey.get(idempotencyKey);
+      },
+    },
+  };
+  const concurrentController = buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => [attemptPayment],
+    getStripe: () => concurrentStripe,
+    recordRefundState: async () => ({ ignored: true, partial_refund: true }),
+  });
+  const concurrentResponses = [makeResponse(), makeResponse()];
+  await Promise.all(concurrentResponses.map((concurrentResponse) => (
+    concurrentController(
+      { params: { id: "42" }, shopid: 7 },
+      concurrentResponse,
+    )
+  )));
+  assert.strictEqual(concurrentProviderCreates, 1);
+  assert.deepStrictEqual([...concurrentCreatesByKey.keys()], [
+    "refund-order-7-42-g1",
+  ]);
+  for (const concurrentResponse of concurrentResponses) {
+    assert.strictEqual(concurrentResponse.statusCode, 200);
+    assert.strictEqual(
+      concurrentResponse.payload.data.refundId,
+      "re_concurrent_generation_1",
+    );
+    assert.strictEqual(concurrentResponse.payload.data.refundStatus, "pending");
   }
 
   const replayCalls = [];
