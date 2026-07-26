@@ -25,13 +25,15 @@ const {
   getPaidOrderForRefund,
   getPendingStripeOrderForCounter,
   getStripeOrderForCancellation,
+  markPaymentAttemptFailed,
   markPaymentCanceled,
-  markPaymentFailed,
-  markPaymentRefunded,
+  markPaymentProcessing,
   markPaymentSucceeded,
   markStripeOrderPayAtCounter,
   persistPaymentIntentForOrder,
   persistReplacementPaymentIntent,
+  recordRefundState,
+  reconcileStripeRefund,
 } = require("../modules/m_payments");
 const {
   createCheckout,
@@ -261,7 +263,11 @@ const buildQrTablePaymentIntentController = ({
       }
       if (externalCancellationConfirmed) {
         try {
-          await cancelProvisional(provisionalOrderId, req.shopid);
+          await cancelProvisional(
+            provisionalOrderId,
+            req.shopid,
+            paymentIntent ? paymentIntent.id : null,
+          );
         } catch (cleanupError) {
           logger.error("Provisional Stripe order cleanup failed", cleanupError);
         }
@@ -520,7 +526,11 @@ const buildCancelQrTablePaymentIntentController = ({
   }
 
   try {
-    const cancellation = await cancelProvisional(orderId, req.shopid);
+    const cancellation = await cancelProvisional(
+      orderId,
+      req.shopid,
+      order.stripe_payment_intent_id,
+    );
     if (cancellation && cancellation.missing) {
       return custom(res, 404, "Commande Stripe introuvable.", null, {
         code: "STRIPE_ORDER_NOT_FOUND",
@@ -549,10 +559,15 @@ const buildCancelQrTablePaymentIntentController = ({
 exports.buildCancelQrTablePaymentIntentController = buildCancelQrTablePaymentIntentController;
 exports.cancelQrTablePaymentIntent = buildCancelQrTablePaymentIntentController();
 
-exports.markQrTablePaymentAtCounter = async (req, res) => {
+const buildMarkQrTablePaymentAtCounter = ({
+  getShopInfo = mGetShopInfo,
+  getPendingStripeOrderForCounter: findPendingOrder = getPendingStripeOrderForCounter,
+  getStripe: getStripeClient = getStripe,
+  markStripeOrderPayAtCounter: markPayAtCounter = markStripeOrderPayAtCounter,
+} = {}) => async (req, res) => {
   try {
     const orderId = req.params.orderId;
-    const rows = await mGetShopInfo(req.shopid);
+    const rows = await getShopInfo(req.shopid);
     const shop = rows[0];
 
     if (!shop) {
@@ -569,7 +584,7 @@ exports.markQrTablePaymentAtCounter = async (req, res) => {
       );
     }
 
-    const pendingOrders = await getPendingStripeOrderForCounter(
+    const pendingOrders = await findPendingOrder(
       orderId,
       req.shopid,
     );
@@ -577,7 +592,7 @@ exports.markQrTablePaymentAtCounter = async (req, res) => {
       return custom(res, 404, "Commande Stripe en attente introuvable.", null, null);
     }
 
-    const stripe = getStripe();
+    const stripe = getStripeClient();
     const paymentIntentId = pendingOrders[0].stripe_payment_intent_id;
     const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
 
@@ -595,7 +610,16 @@ exports.markQrTablePaymentAtCounter = async (req, res) => {
       await stripe.paymentIntents.cancel(paymentIntentId);
     }
 
-    await markStripeOrderPayAtCounter(orderId, req.shopid);
+    const transition = await markPayAtCounter(orderId, req.shopid, paymentIntentId);
+    if (!transition || transition.ignored) {
+      return custom(
+        res,
+        409,
+        "Le paiement Stripe ne peut pas etre modifie pour cette commande.",
+        null,
+        { code: "STRIPE_PAYMENT_NOT_SETTLED" },
+      );
+    }
 
     success(res, "Commande envoyee. Paiement au comptoir a la fin.", null, {
       orderId,
@@ -609,6 +633,182 @@ exports.markQrTablePaymentAtCounter = async (req, res) => {
   }
 };
 
+const stripeObjectId = (value) => (
+  typeof value === "string" ? value : value && value.id
+);
+
+const listStripeRefundsByCharge = async (
+  stripe,
+  chargeId,
+  expectedRefundId,
+) => {
+  if (!stripe.refunds || typeof stripe.refunds.list !== "function") {
+    throw new Error("Stripe refund listing is unavailable");
+  }
+  let startingAfter = null;
+  let total = 0;
+  const refunds = [];
+  const seenCursors = new Set();
+  const seenRefundIds = new Set();
+  const refundStatuses = new Set([
+    "pending",
+    "requires_action",
+    "succeeded",
+    "failed",
+    "canceled",
+  ]);
+  for (;;) {
+    const params = { charge: chargeId, limit: 100 };
+    if (startingAfter) params.starting_after = startingAfter;
+    const page = await stripe.refunds.list(params);
+    if (!page || !Array.isArray(page.data) || typeof page.has_more !== "boolean") {
+      throw new Error("Stripe refund pagination is malformed");
+    }
+    for (const candidate of page.data) {
+      const refundId = stripeObjectId(candidate);
+      if (!refundId
+        || seenRefundIds.has(refundId)
+        || !refundStatuses.has(candidate.status)) {
+        throw new Error("Stripe refund page contains invalid data");
+      }
+      seenRefundIds.add(refundId);
+      refunds.push(candidate);
+      if (candidate.status !== "succeeded") continue;
+      const amount = Number(candidate.amount);
+      if (!Number.isSafeInteger(amount) || amount < 0) {
+        throw new Error("Stripe refund amount is invalid");
+      }
+      total += amount;
+      if (!Number.isSafeInteger(total)) {
+        throw new Error("Stripe cumulative refund amount is invalid");
+      }
+    }
+    if (!page.has_more) {
+      if (expectedRefundId && !seenRefundIds.has(expectedRefundId)) {
+        throw new Error("Stripe refund list does not contain the current refund");
+      }
+      return {
+        refunds,
+        cumulativeSucceededAmount: total,
+      };
+    }
+    const lastRefund = page.data[page.data.length - 1];
+    const nextCursor = stripeObjectId(lastRefund);
+    if (!nextCursor || seenCursors.has(nextCursor)) {
+      throw new Error("Stripe refund pagination is incomplete");
+    }
+    seenCursors.add(nextCursor);
+    startingAfter = nextCursor;
+  }
+};
+
+const enrichRefundWithCumulativeAmount = async (
+  stripe,
+  refund,
+  { paymentIntentId = null, chargeId: fallbackChargeId = null } = {},
+) => {
+  let chargeId = stripeObjectId(refund.charge) || fallbackChargeId;
+  if (!chargeId
+    && (refund.payment_intent || paymentIntentId)
+    && stripe.paymentIntents
+    && typeof stripe.paymentIntents.retrieve === "function") {
+    const paymentIntent = await stripe.paymentIntents.retrieve(
+      stripeObjectId(refund.payment_intent) || paymentIntentId,
+    );
+    chargeId = stripeObjectId(paymentIntent && paymentIntent.latest_charge);
+  }
+  if (!chargeId) return refund;
+  const refundSnapshot = await listStripeRefundsByCharge(
+    stripe,
+    chargeId,
+    stripeObjectId(refund),
+  );
+  return {
+    ...refund,
+    charge: refund.charge || chargeId,
+    cumulative_succeeded_amount: refundSnapshot.cumulativeSucceededAmount,
+  };
+};
+
+const getRefundAttemptGeneration = (refund, orderId, shopId, paymentIntentId) => {
+  const metadata = refund.metadata || {};
+  if (String(metadata.order_id || "") !== String(orderId)
+    || String(metadata.shop_id || "") !== String(shopId)) {
+    return null;
+  }
+  const refundPaymentIntentId = stripeObjectId(refund.payment_intent);
+  if (refundPaymentIntentId && refundPaymentIntentId !== paymentIntentId) return null;
+  const rawGeneration = metadata.refund_attempt_generation;
+  if (rawGeneration == null || rawGeneration === "") return 0;
+  if (!/^\d+$/.test(String(rawGeneration))) {
+    throw new Error("Stripe refund attempt generation is invalid");
+  }
+  const generation = Number(rawGeneration);
+  if (!Number.isSafeInteger(generation)) {
+    throw new Error("Stripe refund attempt generation is invalid");
+  }
+  return generation;
+};
+
+const refundIdempotencyKey = (shopId, orderId, generation) => (
+  generation === 0
+    ? `refund-order-${shopId}-${orderId}`
+    : `refund-order-${shopId}-${orderId}-g${generation}`
+);
+
+const buildStripeWebhookEventHandler = ({
+  getStripe: getStripeClient = getStripe,
+  markPaymentAttemptFailed: markAttemptFailed = markPaymentAttemptFailed,
+  markPaymentCanceled: markCanceled = markPaymentCanceled,
+  markPaymentProcessing: markProcessing = markPaymentProcessing,
+  markPaymentSucceeded: markSucceeded = markPaymentSucceeded,
+  reconcileStripeRefund: reconcileRefund = reconcileStripeRefund,
+} = {}) => {
+  const markSucceededWithCharge = async (paymentIntent) => {
+    const charge = paymentIntent.latest_charge
+      ? await getStripeClient().charges.retrieve(paymentIntent.latest_charge)
+      : null;
+    return markSucceeded(paymentIntent, charge);
+  };
+
+  const reconcileCurrentPaymentIntent = async (paymentIntentId) => {
+    const paymentIntent = await getStripeClient().paymentIntents.retrieve(paymentIntentId);
+    if (paymentIntent.status === "succeeded") {
+      return markSucceededWithCharge(paymentIntent);
+    }
+    if (paymentIntent.status === "canceled") {
+      return markCanceled(paymentIntent.id);
+    }
+    if (paymentIntent.status === "processing") {
+      return markProcessing(paymentIntent.id);
+    }
+    return markAttemptFailed(paymentIntent);
+  };
+
+  return async (event) => {
+    const paymentIntent = event.data.object;
+    if (["refund.created", "refund.updated", "refund.failed"].includes(event.type)) {
+      const stripe = getStripeClient();
+      const refund = await stripe.refunds.retrieve(event.data.object.id);
+      const authoritativeRefund = await enrichRefundWithCumulativeAmount(stripe, refund);
+      return reconcileRefund(authoritativeRefund);
+    }
+    if (event.type === "payment_intent.succeeded") {
+      return markSucceededWithCharge(paymentIntent);
+    }
+    if (["payment_intent.payment_failed", "payment_intent.processing"].includes(event.type)) {
+      return reconcileCurrentPaymentIntent(paymentIntent.id);
+    }
+    if (event.type === "payment_intent.canceled") {
+      return markCanceled(paymentIntent.id);
+    }
+    return null;
+  };
+};
+
+exports.buildStripeWebhookEventHandler = buildStripeWebhookEventHandler;
+const handleStripeWebhookEvent = buildStripeWebhookEventHandler();
+
 exports.handleWebhook = async (req, res) => {
   try {
     const stripe = getStripe();
@@ -619,23 +819,7 @@ exports.handleWebhook = async (req, res) => {
       envSTRIPEWEBHOOKSECRET,
     );
 
-    if (event.type === "payment_intent.succeeded") {
-      const paymentIntent = event.data.object;
-      const charge = paymentIntent.latest_charge
-        ? await stripe.charges.retrieve(paymentIntent.latest_charge)
-        : null;
-      await markPaymentSucceeded(paymentIntent, charge);
-    }
-
-    if (
-      event.type === "payment_intent.payment_failed"
-    ) {
-      await markPaymentFailed(event.data.object.id);
-    }
-
-    if (event.type === "payment_intent.canceled") {
-      await markPaymentCanceled(event.data.object.id);
-    }
+    await handleStripeWebhookEvent(event);
 
     res.json({ received: true });
   } catch (error) {
@@ -643,24 +827,248 @@ exports.handleWebhook = async (req, res) => {
   }
 };
 
-exports.refundPaidOrder = async (req, res) => {
+const buildRefundPaidOrderController = ({
+  getPaidOrderForRefund: findPaidOrder = getPaidOrderForRefund,
+  getStripe: getStripeClient = getStripe,
+  recordRefundState: persistRefundState = recordRefundState,
+} = {}) => async (req, res) => {
   try {
-    const orderId = req.params.id;
-    const rows = await getPaidOrderForRefund(orderId, req.shopid);
+    const rawOrderId = req.params && req.params.id;
+    if (typeof rawOrderId !== "string"
+      || !/^[1-9]\d*$/.test(rawOrderId)
+      || !Number.isSafeInteger(Number(rawOrderId))
+      || String(Number(rawOrderId)) !== rawOrderId) {
+      return custom(res, 400, "Identifiant de commande invalide.", null, {
+        code: "STRIPE_REFUND_ORDER_INVALID",
+        field: "order_id",
+      });
+    }
+    const orderId = Number(rawOrderId);
+    const rows = await findPaidOrder(orderId, req.shopid);
 
     if (!rows.length) {
       return custom(res, 404, "Commande payee introuvable.", null, null);
     }
 
-    const refund = await getStripe().refunds.create({
-      payment_intent: rows[0].stripe_payment_intent_id,
-      reverse_transfer: true,
-      refund_application_fee: true,
+    const payment = rows[0];
+    const coherentRefunded = payment.payment_status === "refunded"
+      && payment.payment_record_status === "refunded";
+    const legacyUnknown = coherentRefunded
+      && payment.refund_status === "legacy_unknown";
+    const manualReview = () => custom(
+      res,
+      409,
+      "Remboursement historique a verifier manuellement.",
+      null,
+      {
+        code: "STRIPE_REFUND_LEGACY_UNKNOWN",
+        refundId: payment.stripe_refund_id || null,
+        refundStatus: "legacy_unknown",
+        manual_review_required: true,
+      },
+    );
+    if (coherentRefunded && !legacyUnknown && !payment.stripe_refund_id) {
+      return success(res, "Commande deja remboursee.", null, {
+        refundId: null,
+        refundStatus: "succeeded",
+        already_refunded: true,
+      });
+    }
+
+    const stripe = getStripeClient();
+    let refund;
+    if (payment.stripe_refund_id) {
+      try {
+        refund = await stripe.refunds.retrieve(payment.stripe_refund_id);
+      } catch (error) {
+        refund = {
+          id: payment.stripe_refund_id,
+          status: payment.refund_status || "pending",
+          failure_reason: payment.refund_failure_reason || null,
+          payment_intent: payment.stripe_payment_intent_id,
+          charge: payment.stripe_charge_id || null,
+          metadata: {
+            order_id: String(orderId),
+            shop_id: String(req.shopid),
+          },
+        };
+      }
+      if (!legacyUnknown
+        && refund
+        && ["failed", "canceled"].includes(refund.status)) {
+        refund = null;
+      }
+    } else if (legacyUnknown) {
+      if (!payment.stripe_payment_intent_id) return manualReview();
+      const listed = await stripe.refunds.list({
+        payment_intent: payment.stripe_payment_intent_id,
+        limit: 100,
+      });
+      if (listed && listed.has_more) return manualReview();
+      const refunds = Array.isArray(listed && listed.data) ? listed.data : [];
+      const paymentIntentId = (candidate) => (
+        typeof candidate.payment_intent === "string"
+          ? candidate.payment_intent
+          : candidate.payment_intent && candidate.payment_intent.id
+      );
+      const fullCandidates = refunds.filter((candidate) => (
+        paymentIntentId(candidate) === payment.stripe_payment_intent_id
+        && Number(candidate.amount) === Number(payment.amount_cents)
+      ));
+      if (fullCandidates.length !== 1) return manualReview();
+      const [candidate] = fullCandidates;
+      {
+        const metadata = candidate.metadata || {};
+        const hasMetadata = metadata.order_id != null || metadata.shop_id != null;
+        const metadataMatches = String(metadata.order_id || "") === String(orderId)
+          && String(metadata.shop_id || "") === String(req.shopid);
+        if (hasMetadata && !metadataMatches) return manualReview();
+      }
+      refund = candidate;
+    }
+    if (!refund) {
+      let chargeId = payment.stripe_charge_id || null;
+      if (!chargeId) {
+        const paymentIntent = await stripe.paymentIntents.retrieve(
+          payment.stripe_payment_intent_id,
+        );
+        chargeId = stripeObjectId(paymentIntent && paymentIntent.latest_charge);
+      }
+      if (!chargeId) throw new Error("Stripe payment charge is unavailable");
+
+      const snapshot = await listStripeRefundsByCharge(stripe, chargeId);
+      const attempts = snapshot.refunds.map((candidate) => ({
+        refund: candidate,
+        generation: getRefundAttemptGeneration(
+          candidate,
+          orderId,
+          req.shopid,
+          payment.stripe_payment_intent_id,
+        ),
+      })).filter(({ generation }) => generation != null);
+      const activeAttempts = attempts.filter(({ refund: candidate }) => (
+        ["pending", "requires_action"].includes(candidate.status)
+      ));
+      if (activeAttempts.length > 1) {
+        throw new Error("Multiple active Stripe refund attempts found");
+      }
+
+      if (snapshot.cumulativeSucceededAmount >= Number(payment.amount_cents)) {
+        const succeededAttempts = attempts.filter(({ refund: candidate }) => (
+          candidate.status === "succeeded"
+        )).sort((left, right) => right.generation - left.generation);
+        if (!succeededAttempts.length) {
+          throw new Error("Completed Stripe refund has no matching attempt");
+        }
+        refund = succeededAttempts[0].refund;
+      } else if (activeAttempts.length === 1) {
+        refund = activeAttempts[0].refund;
+      } else {
+        const generation = attempts.length
+          ? Math.max(...attempts.map((attempt) => attempt.generation)) + 1
+          : 0;
+        refund = await stripe.refunds.create({
+          payment_intent: payment.stripe_payment_intent_id,
+          reverse_transfer: true,
+          refund_application_fee: true,
+          metadata: {
+            order_id: String(orderId),
+            shop_id: String(req.shopid),
+            refund_attempt_generation: String(generation),
+          },
+        }, {
+          idempotencyKey: refundIdempotencyKey(req.shopid, orderId, generation),
+        });
+      }
+    }
+
+    refund = await enrichRefundWithCumulativeAmount(stripe, refund, {
+      paymentIntentId: payment.stripe_payment_intent_id,
+      chargeId: payment.stripe_charge_id || null,
     });
 
-    await markPaymentRefunded(orderId, refund.id);
-    success(res, "Commande remboursee.", null, { refundId: refund.id });
+    const persistence = await persistRefundState({
+      orderId,
+      shopId: req.shopid,
+      refund,
+    });
+    let refundId = refund.id;
+    let refundStatus;
+    let alreadyRefunded = false;
+    let partialRefund = false;
+    if (persistence
+      && persistence.partial_refund
+      && ["pending", "requires_action", "failed", "canceled"].includes(refund.status)) {
+      refundStatus = refund.status;
+      partialRefund = true;
+    } else if (persistence && persistence.status) {
+      refundStatus = persistence.status;
+      alreadyRefunded = Boolean(persistence.idempotent_replay);
+    } else if (persistence && (persistence.ignored || persistence.missing)) {
+      const currentRows = await findPaidOrder(orderId, req.shopid);
+      const current = currentRows[0];
+      if (!current) {
+        return custom(res, 409, "Etat du remboursement incoherent.", null, {
+          code: "STRIPE_REFUND_STATE_CONFLICT",
+        });
+      }
+      if (current.refund_status === "legacy_unknown") {
+        return custom(
+          res,
+          409,
+          "Remboursement historique a verifier manuellement.",
+          null,
+          {
+            code: "STRIPE_REFUND_LEGACY_UNKNOWN",
+            refundId: current.stripe_refund_id || null,
+            refundStatus: "legacy_unknown",
+            manual_review_required: true,
+          },
+        );
+      }
+      if (current.payment_status === "refunded"
+        && current.payment_record_status === "refunded") {
+        refundId = current.stripe_refund_id || null;
+        refundStatus = "succeeded";
+        alreadyRefunded = true;
+      } else if (current.stripe_refund_id === refund.id && current.refund_status) {
+        refundId = current.stripe_refund_id;
+        refundStatus = current.refund_status;
+      } else if (current.stripe_refund_id !== refund.id
+        && ["failed", "canceled"].includes(current.refund_status)
+        && ["failed", "canceled"].includes(refund.status)) {
+        refundId = refund.id;
+        refundStatus = refund.status;
+      } else {
+        return custom(res, 409, "Etat du remboursement incoherent.", null, {
+          code: "STRIPE_REFUND_STATE_CONFLICT",
+        });
+      }
+    } else {
+      refundStatus = refund.status;
+    }
+    const data = { refundId, refundStatus };
+    if (alreadyRefunded) data.already_refunded = true;
+    if (partialRefund) data.partial_refund = true;
+    if (persistence && persistence.business_status_unchanged) {
+      data.business_status_unchanged = true;
+      data.orderStatus = persistence.order_status;
+    }
+    success(
+      res,
+      refundStatus === "succeeded"
+        ? "Commande remboursee."
+        : "Demande de remboursement enregistree.",
+      null,
+      data,
+    );
   } catch (error) {
-    failed(res, "Erreur lors du remboursement Stripe.", error.message);
+    failed(res, "Erreur lors du remboursement Stripe.");
   }
 };
+
+exports.buildMarkQrTablePaymentAtCounter = buildMarkQrTablePaymentAtCounter;
+exports.markQrTablePaymentAtCounter = buildMarkQrTablePaymentAtCounter();
+
+exports.buildRefundPaidOrderController = buildRefundPaidOrderController;
+exports.refundPaidOrder = buildRefundPaidOrderController();

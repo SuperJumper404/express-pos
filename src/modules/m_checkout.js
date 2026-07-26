@@ -214,10 +214,18 @@ const sqlRepository = {
 
   lockExpiredReservations: ({ now, connection }) => queryResult(
     connection,
-    `SELECT id, order_id, product_id, quantity, status, expires_at
-     FROM order_stock_reservations
-     WHERE status = 'reserved' AND expires_at IS NOT NULL AND expires_at <= ?
-     ORDER BY product_id, id
+    `SELECT reservations.id, reservations.order_id, reservations.product_id,
+            reservations.quantity, reservations.status, reservations.expires_at
+     FROM order_stock_reservations reservations
+     JOIN orders ON orders.id = reservations.order_id
+     WHERE reservations.status = 'reserved'
+       AND reservations.expires_at IS NOT NULL
+       AND reservations.expires_at <= ?
+       AND NOT (
+         COALESCE(orders.payment_provider, '') = 'stripe'
+         AND COALESCE(orders.payment_status, '') = 'requires_payment'
+       )
+     ORDER BY reservations.product_id, reservations.id
      FOR UPDATE`,
     [now],
   ),

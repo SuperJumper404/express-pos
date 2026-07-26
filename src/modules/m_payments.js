@@ -6,6 +6,13 @@ const { resolveStripePaymentMethod } = require("../helpers/stripePaymentMethod")
 const { withTransaction } = require("../helpers/withTransaction");
 
 const formatDate = (value) => value.toISOString().slice(0, 19).replace("T", " ");
+const SQL_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+const normalizeSqlTimestamp = (value) => {
+  if (typeof value === "string" && SQL_TIMESTAMP_PATTERN.test(value)) return value;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) throw new Error("Invalid payment timestamp");
+  return formatDate(date);
+};
 
 const queryResult = async (connection, sql, values = []) => {
   const [result] = await (connection || pool).query(sql, values);
@@ -24,7 +31,7 @@ const sqlRepository = {
        application_fee_amount = VALUES(application_fee_amount),
        currency = VALUES(currency),
        status = CASE
-         WHEN payments.status IN ('succeeded', 'canceled', 'failed', 'refunded')
+         WHEN payments.status IN ('succeeded', 'canceled', 'refunded')
            THEN payments.status
          ELSE VALUES(status)
        END`,
@@ -135,15 +142,36 @@ const sqlRepository = {
     ).then((rows) => rows[0] || null);
   },
 
+  lockOrderReservations: ({ orderId, connection }) => queryResult(
+    connection,
+    `SELECT id, order_id, status
+     FROM order_stock_reservations
+     WHERE order_id = ?
+     ORDER BY id
+     FOR UPDATE`,
+    [orderId],
+  ),
+
   getPaidOrderForRefund: ({ orderId, shopId, connection }) => queryResult(
     connection,
     `SELECT orders.*, payments.stripe_payment_intent_id,
+            payments.stripe_charge_id,
+            payments.stripe_refund_id,
+            payments.refund_status,
+            payments.refund_failure_reason,
+            payments.amount_cents,
             payments.status AS payment_record_status
      FROM orders
-     JOIN payments ON payments.order_id = orders.id
+     JOIN payments
+       ON payments.order_id = orders.id
+      AND payments.stripe_payment_intent_id = orders.stripe_payment_intent_id
+      AND payments.status IN ('succeeded', 'refunded')
      WHERE orders.id = ?
        AND orders.shopid = ?
-       AND orders.payment_status = 'paid'
+       AND (
+         (orders.payment_status = 'paid' AND payments.status = 'succeeded')
+         OR (orders.payment_status = 'refunded' AND payments.status = 'refunded')
+       )
      LIMIT 1`,
     [orderId, shopId],
   ),
@@ -155,13 +183,73 @@ const sqlRepository = {
             orders.payment_status,
             payments.stripe_payment_intent_id
      FROM orders
-     JOIN payments ON payments.order_id = orders.id
+     JOIN payments
+       ON payments.order_id = orders.id
+      AND payments.stripe_payment_intent_id = orders.stripe_payment_intent_id
      WHERE orders.id = ?
        AND orders.shopid = ?
        AND orders.payment_status = 'requires_payment'
        AND orders.payment_provider = 'stripe'
      LIMIT 1`,
     [orderId, shopId],
+  ),
+
+  findPaymentForOrderRefund: ({
+    orderId, shopId, paymentIntentId, connection,
+  }) => queryResult(
+    connection,
+    `SELECT * FROM payments
+     WHERE order_id = ?
+       AND shop_id = ?
+       AND stripe_payment_intent_id = ?
+       AND status IN ('succeeded', 'refunded')
+     LIMIT 1${connection ? " FOR UPDATE" : ""}`,
+    [orderId, shopId, paymentIntentId],
+  ).then((rows) => rows[0] || null),
+
+  findPaymentsForRefund: ({ refund, connection }) => {
+    const chargeId = typeof refund.charge === "string"
+      ? refund.charge
+      : refund.charge && refund.charge.id;
+    return queryResult(
+      connection,
+      `SELECT * FROM payments
+       WHERE (? IS NOT NULL AND stripe_refund_id = ?)
+          OR (? IS NOT NULL AND stripe_payment_intent_id = ?)
+          OR (? IS NOT NULL AND stripe_charge_id = ?)
+       ${connection ? "FOR UPDATE" : ""}`,
+      [
+        refund.id || null,
+        refund.id || null,
+        refund.payment_intent || null,
+        refund.payment_intent || null,
+        chargeId || null,
+        chargeId || null,
+      ],
+    );
+  },
+
+  findExpiredStripePayments: ({ now, connection }) => queryResult(
+    connection,
+    `SELECT DISTINCT orders.id AS order_id,
+            orders.shopid AS shop_id,
+            COALESCE(
+              payments.stripe_payment_intent_id,
+              orders.stripe_payment_intent_id
+            ) AS stripe_payment_intent_id
+     FROM orders
+     LEFT JOIN payments
+       ON payments.order_id = orders.id
+      AND payments.stripe_payment_intent_id = orders.stripe_payment_intent_id
+     JOIN order_stock_reservations reservations
+       ON reservations.order_id = orders.id
+     WHERE orders.payment_provider = 'stripe'
+       AND orders.payment_status = 'requires_payment'
+       AND reservations.status = 'reserved'
+       AND reservations.expires_at IS NOT NULL
+       AND reservations.expires_at <= ?
+     ORDER BY orders.id`,
+    [now],
   ),
 
   updatePaymentSucceeded: ({
@@ -177,16 +265,28 @@ const sqlRepository = {
     [chargeId, paymentMethod, timestamp, paymentIntentId],
   ),
 
+  updatePaymentPending: ({ paymentIntentId, status, timestamp, connection }) => queryResult(
+    connection,
+    `UPDATE payments
+     SET status = ?, updated = ?
+     WHERE stripe_payment_intent_id = ?
+       AND status NOT IN ('succeeded', 'canceled', 'refunded')`,
+    [status, timestamp, paymentIntentId],
+  ),
+
   updateOrderSucceeded: ({
-    orderId, shopId, paymentMethod, timestamp, connection,
+    orderId, shopId, paymentIntentId, paymentMethod, timestamp, connection,
   }) => queryResult(
     connection,
     `UPDATE orders
      SET payment_status = 'paid',
          payment = ?,
          finished = ?
-     WHERE id = ? AND shopid = ? AND payment_status = 'requires_payment'`,
-    [paymentMethod, timestamp, orderId, shopId],
+     WHERE id = ?
+       AND shopid = ?
+       AND payment_status = 'requires_payment'
+       AND stripe_payment_intent_id = ?`,
+    [paymentMethod, timestamp, orderId, shopId, paymentIntentId],
   ),
 
   updatePaymentTerminal: ({ paymentIntentId, status, timestamp, connection }) => queryResult(
@@ -197,23 +297,33 @@ const sqlRepository = {
     [status, timestamp, paymentIntentId],
   ),
 
-  updateOrderTerminal: ({ orderId, shopId, status, connection }) => queryResult(
+  updateOrderTerminal: ({
+    orderId, shopId, paymentIntentId, status, connection,
+  }) => queryResult(
     connection,
     `UPDATE orders
      SET payment_status = ?
-     WHERE id = ? AND shopid = ? AND payment_status = 'requires_payment'`,
-    [status, orderId, shopId],
+     WHERE id = ?
+       AND shopid = ?
+       AND payment_status = 'requires_payment'
+       AND stripe_payment_intent_id = ?`,
+    [status, orderId, shopId, paymentIntentId],
   ),
 
-  updatePaymentAtCounter: ({ orderId, timestamp, connection }) => queryResult(
+  updatePaymentAtCounter: ({
+    orderId, paymentIntentId, timestamp, connection,
+  }) => queryResult(
     connection,
     `UPDATE payments
      SET status = 'canceled', updated = ?
-     WHERE order_id = ?`,
-    [timestamp, orderId],
+     WHERE order_id = ?
+       AND stripe_payment_intent_id = ?`,
+    [timestamp, orderId, paymentIntentId],
   ),
 
-  updateOrderAtCounter: ({ orderId, shopId, timestamp, connection }) => queryResult(
+  updateOrderAtCounter: ({
+    orderId, shopId, paymentIntentId, timestamp, connection,
+  }) => queryResult(
     connection,
     `UPDATE orders
      SET status = 1,
@@ -225,46 +335,125 @@ const sqlRepository = {
      WHERE id = ?
        AND shopid = ?
        AND payment_status = 'requires_payment'
-       AND payment_provider = 'stripe'`,
-    [timestamp, orderId, shopId],
+       AND payment_provider = 'stripe'
+       AND stripe_payment_intent_id = ?`,
+    [timestamp, orderId, shopId, paymentIntentId],
   ),
 
-  cancelPaymentsForOrder: ({ orderId, timestamp, connection }) => queryResult(
+  cancelPaymentsForOrder: ({
+    orderId, paymentIntentId, timestamp, connection,
+  }) => queryResult(
     connection,
     `UPDATE payments
      SET status = 'canceled', updated = ?
-     WHERE order_id = ? AND status <> 'succeeded'`,
-    [timestamp, orderId],
+     WHERE order_id = ?
+       AND stripe_payment_intent_id <=> ?
+       AND status <> 'succeeded'`,
+    [timestamp, orderId, paymentIntentId],
   ),
 
-  cancelProvisionalOrder: ({ orderId, shopId, timestamp, connection }) => queryResult(
+  cancelProvisionalOrder: ({
+    orderId, shopId, paymentIntentId, timestamp, connection,
+  }) => queryResult(
     connection,
     `UPDATE orders
      SET payment_status = 'canceled', status = ?, finished = ?
      WHERE id = ?
        AND shopid = ?
        AND payment_status = 'requires_payment'
-       AND payment_provider = 'stripe'`,
-    [ORDER_STATUSES.CANCELED, timestamp, orderId, shopId],
+       AND payment_provider = 'stripe'
+       AND stripe_payment_intent_id <=> ?`,
+    [ORDER_STATUSES.CANCELED, timestamp, orderId, shopId, paymentIntentId],
   ),
 
-  updatePaymentRefunded: ({ orderId, refundId, timestamp, connection }) => queryResult(
+  cancelOrphanedProvisionalOrder: ({
+    orderId, shopId, timestamp, connection,
+  }) => queryResult(
+    connection,
+    `UPDATE orders
+     SET payment_status = 'canceled', status = ?, finished = ?
+     WHERE id = ?
+       AND shopid = ?
+       AND status = ?
+       AND payment_status = 'requires_payment'
+       AND payment_provider = 'stripe'
+       AND stripe_payment_intent_id IS NULL`,
+    [ORDER_STATUSES.CANCELED, timestamp, orderId, shopId, ORDER_STATUSES.PENDING],
+  ),
+
+  updatePaymentRefundState: ({
+    paymentId,
+    orderId,
+    shopId,
+    paymentIntentId,
+    refundId,
+    refundStatus,
+    failureReason,
+    paymentStatus,
+    refundedAt,
+    timestamp,
+    connection,
+  }) => queryResult(
     connection,
     `UPDATE payments
-     SET status = 'refunded',
+     SET stripe_refund_id = ?,
+         refund_status = ?,
+         refund_failure_reason = ?,
+         status = ?,
          refunded_at = ?,
-         updated = ?,
-         stripe_charge_id = COALESCE(stripe_charge_id, ?)
-     WHERE order_id = ?`,
-    [timestamp, timestamp, refundId, orderId],
+         updated = ?
+     WHERE id = ?
+       AND order_id = ?
+       AND shop_id = ?
+       AND stripe_payment_intent_id = ?`,
+    [
+      refundId,
+      refundStatus,
+      failureReason,
+      paymentStatus,
+      refundedAt,
+      timestamp,
+      paymentId,
+      orderId,
+      shopId,
+      paymentIntentId,
+    ],
   ),
 
-  updateOrderRefunded: ({ orderId, connection }) => queryResult(
+  updateOrderRefunded: ({ orderId, shopId, connection }) => queryResult(
     connection,
     `UPDATE orders
      SET payment_status = 'refunded', status = ?
-     WHERE id = ?`,
-    [ORDER_STATUSES.CANCELED, orderId],
+     WHERE id = ?
+       AND shopid = ?
+       AND payment_status = 'paid'
+       AND payment_provider = 'stripe'`,
+    [ORDER_STATUSES.CANCELED, orderId, shopId],
+  ),
+
+  updateOrderRefundNonFinal: ({ orderId, shopId, connection }) => queryResult(
+    connection,
+    `UPDATE orders
+     SET payment_status = 'paid'
+     WHERE id = ?
+       AND shopid = ?
+       AND payment_status = 'refunded'
+       AND payment_provider = 'stripe'`,
+    [orderId, shopId],
+  ),
+
+  backfillRefundCharge: ({
+    paymentId, orderId, shopId, paymentIntentId, chargeId, connection,
+  }) => queryResult(
+    connection,
+    `UPDATE payments
+     SET stripe_charge_id = ?
+     WHERE id = ?
+       AND order_id = ?
+       AND shop_id = ?
+       AND stripe_payment_intent_id = ?
+       AND stripe_charge_id IS NULL`,
+    [chargeId, paymentId, orderId, shopId, paymentIntentId],
   ),
 };
 
@@ -283,7 +472,6 @@ const buildPaymentModule = ({
   const terminalPaymentStatuses = new Set([
     "succeeded",
     "canceled",
-    "failed",
     "refunded",
   ]);
 
@@ -374,6 +562,10 @@ const buildPaymentModule = ({
     repository.getPendingStripeOrderForCounter({ orderId, shopId })
   );
 
+  const findExpiredStripePayments = (currentTimestamp = timestamp()) => (
+    repository.findExpiredStripePayments({ now: normalizeSqlTimestamp(currentTimestamp) })
+  );
+
   const getStripeOrderForCancellation = (orderId, shopId) => (
     repository.findOrderById({ orderId, shopId })
   );
@@ -399,6 +591,9 @@ const buildPaymentModule = ({
       if (Number(payment.order_id) !== Number(order.id)
         || Number(payment.shop_id) !== Number(order.shopid)) {
         throw new Error("Paiement introuvable");
+      }
+      if (order.stripe_payment_intent_id !== paymentIntentId) {
+        return { ignored: true, stale_intent: true };
       }
       if (order.payment_status === "paid") return { alreadyPaid: true };
       if (order.payment_status !== "requires_payment") return { ignored: true };
@@ -427,6 +622,7 @@ const buildPaymentModule = ({
       await repository.updateOrderSucceeded({
         orderId: order.id,
         shopId: payment.shop_id,
+        paymentIntentId,
         paymentMethod,
         timestamp: currentTimestamp,
         connection,
@@ -434,6 +630,48 @@ const buildPaymentModule = ({
       return { paid: true };
     });
   };
+
+  const markPaymentPending = async (paymentIntentId, status) => {
+    const paymentReference = await repository.findPaymentByIntent({ paymentIntentId });
+    if (!paymentReference) return { missing: true };
+
+    return runInTransaction(async (connection) => {
+      const order = await repository.lockOrder({
+        orderId: paymentReference.order_id,
+        shopId: paymentReference.shop_id,
+        connection,
+      });
+      if (!order || order.payment_status !== "requires_payment") return { ignored: true };
+
+      const payment = await repository.findPaymentByIntent({
+        paymentIntentId,
+        connection,
+      });
+      if (!payment
+        || Number(payment.order_id) !== Number(order.id)
+        || Number(payment.shop_id) !== Number(order.shopid)) {
+        return { missing: true };
+      }
+
+      await repository.updatePaymentPending({
+        paymentIntentId,
+        status,
+        timestamp: timestamp(),
+        connection,
+      });
+      return { status };
+    });
+  };
+
+  const markPaymentAttemptFailed = (paymentIntent) => markPaymentPending(
+    paymentIntent.id,
+    paymentIntent.status || "requires_payment_method",
+  );
+
+  const markPaymentProcessing = (paymentIntentId) => markPaymentPending(
+    paymentIntentId,
+    "processing",
+  );
 
   const applyPaymentTerminal = async ({
     paymentIntentId, status, connection, lockedOrder,
@@ -452,6 +690,9 @@ const buildPaymentModule = ({
     if (Number(order.id) !== Number(payment.order_id)
       || Number(order.shopid) !== Number(payment.shop_id)) {
       return { missing: true };
+    }
+    if (order.stripe_payment_intent_id !== paymentIntentId) {
+      return { ignored: true, stale_intent: true };
     }
     if (order.payment_status !== "requires_payment") return { ignored: true };
 
@@ -476,6 +717,7 @@ const buildPaymentModule = ({
     await repository.updateOrderTerminal({
       orderId: order.id,
       shopId: payment.shop_id,
+      paymentIntentId,
       status,
       connection,
     });
@@ -513,10 +755,6 @@ const buildPaymentModule = ({
       });
     });
   };
-
-  const markPaymentFailed = (paymentIntentId, options) => (
-    markPaymentTerminal(paymentIntentId, "failed", options)
-  );
 
   const stagePaymentReplacement = async ({
     orderId, shopId, paymentIntentId, connection,
@@ -577,6 +815,14 @@ const buildPaymentModule = ({
         paymentIntentId: data.stripe_payment_intent_id,
         connection,
       });
+      const reservations = await repository.lockOrderReservations({
+        orderId: data.orderId,
+        connection,
+      });
+      if (!reservations.length
+        || reservations.some((reservation) => reservation.status !== "reserved")) {
+        return { attached: false, reservations_unavailable: true };
+      }
       if (order.payment_status === "requires_payment"
         && order.payment_provider === "stripe"
         && order.stripe_payment_intent_id === data.stripe_payment_intent_id
@@ -642,7 +888,11 @@ const buildPaymentModule = ({
     markPaymentTerminal(paymentIntentId, "canceled", options)
   );
 
-  const markStripeOrderPayAtCounter = (orderId, shopId) => runInTransaction(
+  const markStripeOrderPayAtCounter = (
+    orderId,
+    shopId,
+    paymentIntentId,
+  ) => runInTransaction(
     async (connection) => {
       const order = await repository.lockOrder({ orderId, shopId, connection });
       if (!order) throw new Error("Commande introuvable");
@@ -651,6 +901,9 @@ const buildPaymentModule = ({
       }
       if (order.payment_status !== "requires_payment" || order.payment_provider !== "stripe") {
         throw new Error("Commande Stripe en attente introuvable");
+      }
+      if (order.stripe_payment_intent_id !== paymentIntentId) {
+        return { ignored: true, stale_intent: true };
       }
 
       await settleReservations({
@@ -662,12 +915,14 @@ const buildPaymentModule = ({
       const currentTimestamp = timestamp();
       await repository.updatePaymentAtCounter({
         orderId: order.id,
+        paymentIntentId,
         timestamp: currentTimestamp,
         connection,
       });
       const result = await repository.updateOrderAtCounter({
         orderId: order.id,
         shopId,
+        paymentIntentId,
         timestamp: currentTimestamp,
         connection,
       });
@@ -676,12 +931,19 @@ const buildPaymentModule = ({
     },
   );
 
-  const cancelProvisionalStripeOrder = (orderId, shopId) => runInTransaction(
+  const cancelProvisionalStripeOrder = (
+    orderId,
+    shopId,
+    paymentIntentId,
+  ) => runInTransaction(
     async (connection) => {
       const order = await repository.lockOrder({ orderId, shopId, connection });
       if (!order) return { missing: true };
       if (order.payment_status !== "requires_payment" || order.payment_provider !== "stripe") {
         return { ignored: true };
+      }
+      if (order.stripe_payment_intent_id !== paymentIntentId) {
+        return { ignored: true, stale_intent: true };
       }
 
       await settleReservations({
@@ -692,12 +954,14 @@ const buildPaymentModule = ({
       const currentTimestamp = timestamp();
       await repository.cancelPaymentsForOrder({
         orderId: order.id,
+        paymentIntentId,
         timestamp: currentTimestamp,
         connection,
       });
       await repository.cancelProvisionalOrder({
         orderId: order.id,
         shopId,
+        paymentIntentId,
         timestamp: currentTimestamp,
         connection,
       });
@@ -705,35 +969,358 @@ const buildPaymentModule = ({
     },
   );
 
-  const markPaymentRefunded = (orderId, refundId) => runInTransaction(
+  const cancelOrphanedProvisionalStripeOrder = (orderId, shopId) => runInTransaction(
     async (connection) => {
-      const order = await repository.lockOrder({ orderId, connection });
+      const order = await repository.lockOrder({ orderId, shopId, connection });
       if (!order) return { missing: true };
+      if (Number(order.status) !== ORDER_STATUSES.PENDING
+        || order.payment_status !== "requires_payment"
+        || order.payment_provider !== "stripe") {
+        return { ignored: true };
+      }
+      if (order.stripe_payment_intent_id != null) {
+        return { ignored: true, stale_scan: true };
+      }
+
+      await settleReservations({
+        orderId: order.id,
+        status: "released",
+        connection,
+      });
       const currentTimestamp = timestamp();
-      await repository.updatePaymentRefunded({
-        orderId,
-        refundId,
+      await repository.cancelPaymentsForOrder({
+        orderId: order.id,
+        paymentIntentId: null,
         timestamp: currentTimestamp,
         connection,
       });
-      return repository.updateOrderRefunded({ orderId, connection });
+      const result = await repository.cancelOrphanedProvisionalOrder({
+        orderId: order.id,
+        shopId,
+        timestamp: currentTimestamp,
+        connection,
+      });
+      if (!result.affectedRows) {
+        throw new Error("Orphaned Stripe order changed during cancellation");
+      }
+      return { canceled: true };
     },
   );
 
+  const refundChargeId = (refund) => (
+    typeof refund.charge === "string"
+      ? refund.charge
+      : refund.charge && refund.charge.id
+  );
+  const matchesLegacyTerminalReference = (payment, refund) => {
+    const chargeId = refundChargeId(refund);
+    const refundIdMatches = payment.stripe_refund_id
+      && refund.id === payment.stripe_refund_id;
+    const externalReferenceMatches = !payment.stripe_refund_id
+      && Number(refund.amount) === Number(payment.amount_cents)
+      && (
+        (refund.payment_intent
+          && refund.payment_intent === payment.stripe_payment_intent_id)
+        || (chargeId && chargeId === payment.stripe_charge_id)
+      );
+    return (payment.status === "refunded" || payment.refund_status === "legacy_unknown")
+      && (refundIdMatches || externalReferenceMatches);
+  };
+  const validRefundMetadata = (
+    payment,
+    refund,
+    { requireForNewAssociation = false, order = null } = {},
+  ) => {
+    const metadata = refund.metadata || {};
+    const alreadyAssociated = Boolean(
+      refund.id && payment.stripe_refund_id === refund.id,
+    );
+    const legacyTerminal = matchesLegacyTerminalReference(payment, refund)
+      && (!order || order.payment_status === "refunded");
+    const matchesNumber = (key, expected) => {
+      if (metadata[key] == null || metadata[key] === "") {
+        return alreadyAssociated || legacyTerminal || !requireForNewAssociation;
+      }
+      return /^\d+$/.test(String(metadata[key]))
+        && Number(metadata[key]) === Number(expected);
+    };
+    return matchesNumber("order_id", payment.order_id)
+      && matchesNumber("shop_id", payment.shop_id);
+  };
+  const isTerminalRefundReplacement = (payment, refund) => {
+    const metadata = refund.metadata || {};
+    const rawGeneration = metadata.refund_attempt_generation;
+    const generation = Number(rawGeneration);
+    const chargeId = refundChargeId(refund);
+    return Boolean(
+      payment.stripe_refund_id
+      && refund.id
+      && payment.stripe_refund_id !== refund.id
+      && ["failed", "canceled"].includes(payment.refund_status)
+      && ["pending", "requires_action", "succeeded"].includes(refund.status)
+      && /^[1-9]\d*$/.test(String(rawGeneration || ""))
+      && Number.isSafeInteger(generation)
+      && refund.payment_intent === payment.stripe_payment_intent_id
+      && chargeId
+      && chargeId === payment.stripe_charge_id
+      && validRefundMetadata(payment, refund, { requireForNewAssociation: true })
+    );
+  };
+  const matchesRefundReferences = (payment, refund, metadataOptions) => {
+    const chargeId = refundChargeId(refund);
+    if (payment.stripe_refund_id
+      && refund.id
+      && payment.stripe_refund_id !== refund.id
+      && !isTerminalRefundReplacement(payment, refund)) return false;
+    if (refund.payment_intent
+      && payment.stripe_payment_intent_id !== refund.payment_intent) return false;
+    if (chargeId && payment.stripe_charge_id && payment.stripe_charge_id !== chargeId) {
+      return false;
+    }
+    if (chargeId && !payment.stripe_charge_id) {
+      const extractedLegacyRefundMatches = payment.refund_status === "legacy_unknown"
+        && payment.stripe_refund_id === refund.id
+        && refund.payment_intent === payment.stripe_payment_intent_id;
+      if (!extractedLegacyRefundMatches) return false;
+    }
+    return validRefundMetadata(payment, refund, metadataOptions);
+  };
+  const selectRefundPayment = (payments, refund, order = null) => {
+    const matches = payments.filter((payment) => matchesRefundReferences(
+      payment,
+      refund,
+      { requireForNewAssociation: true, order },
+    ));
+    return matches.length === 1 ? matches[0] : null;
+  };
+
+  const applyRefundState = async ({
+    order, payment, refund, connection,
+  }) => {
+    if (!payment
+      || Number(payment.order_id) !== Number(order.id)
+      || Number(payment.shop_id) !== Number(order.shopid)
+      || order.payment_provider !== "stripe"
+      || order.stripe_payment_intent_id !== payment.stripe_payment_intent_id
+      || !matchesRefundReferences(payment, refund)) {
+      return { ignored: true };
+    }
+    const cumulativeRefunded = Number(refund.cumulative_succeeded_amount);
+    const hasAuthoritativeCumulative = refund.cumulative_succeeded_amount != null
+      && Number.isSafeInteger(cumulativeRefunded)
+      && cumulativeRefunded >= 0;
+    const cumulativeRefundComplete = hasAuthoritativeCumulative
+      && cumulativeRefunded >= Number(payment.amount_cents);
+    const individualRefundIsPartial = refund.amount != null
+      && Number(refund.amount) !== Number(payment.amount_cents);
+    if ((refund.status === "succeeded"
+      && hasAuthoritativeCumulative
+      && !cumulativeRefundComplete)
+      || (individualRefundIsPartial
+        && !(refund.status === "succeeded" && cumulativeRefundComplete))) {
+      return { ignored: true, partial_refund: true };
+    }
+    const legacyUnknownState = payment.refund_status === "legacy_unknown"
+      || (
+        !payment.refund_status
+        && !payment.stripe_refund_id
+        && payment.status === "refunded"
+      );
+    const legacyTerminal = legacyUnknownState
+      && matchesLegacyTerminalReference(payment, refund)
+      && order.payment_status === "refunded";
+    const legacyChargeId = refundChargeId(refund);
+    if (legacyTerminal && legacyChargeId && !payment.stripe_charge_id) {
+      const backfilledCharge = await repository.backfillRefundCharge({
+        paymentId: payment.id,
+        orderId: payment.order_id,
+        shopId: payment.shop_id,
+        paymentIntentId: payment.stripe_payment_intent_id,
+        chargeId: legacyChargeId,
+        connection,
+      });
+      if (!backfilledCharge.affectedRows) {
+        throw new Error("Legacy refund charge backfill failed");
+      }
+    }
+    if (legacyTerminal && refund.status === "succeeded") {
+      const updatedPayment = await repository.updatePaymentRefundState({
+        paymentId: payment.id,
+        orderId: payment.order_id,
+        shopId: payment.shop_id,
+        paymentIntentId: payment.stripe_payment_intent_id,
+        refundId: refund.id,
+        refundStatus: "succeeded",
+        failureReason: null,
+        paymentStatus: "refunded",
+        refundedAt: payment.refunded_at,
+        timestamp: timestamp(),
+        connection,
+      });
+      if (!updatedPayment.affectedRows) {
+        throw new Error("Legacy refund backfill failed");
+      }
+      return { status: "succeeded", legacy_backfill: true };
+    }
+    if (legacyTerminal
+      && ["pending", "requires_action", "failed", "canceled"].includes(refund.status)) {
+      const updatedPayment = await repository.updatePaymentRefundState({
+        paymentId: payment.id,
+        orderId: payment.order_id,
+        shopId: payment.shop_id,
+        paymentIntentId: payment.stripe_payment_intent_id,
+        refundId: refund.id,
+        refundStatus: refund.status,
+        failureReason: ["failed", "canceled"].includes(refund.status)
+          ? refund.failure_reason || null
+          : null,
+        paymentStatus: "succeeded",
+        refundedAt: null,
+        timestamp: timestamp(),
+        connection,
+      });
+      if (!updatedPayment.affectedRows) {
+        throw new Error("Legacy refund payment correction failed");
+      }
+      const updatedOrder = await repository.updateOrderRefundNonFinal({
+        orderId: order.id,
+        shopId: order.shopid,
+        connection,
+      });
+      if (!updatedOrder.affectedRows) {
+        throw new Error("Legacy refund order correction failed");
+      }
+      return {
+        status: refund.status,
+        business_status_unchanged: true,
+        order_status: order.status,
+      };
+    }
+    if (payment.status === "refunded"
+      && payment.refund_status === "succeeded"
+      && payment.stripe_refund_id === refund.id
+      && order.payment_status === "refunded") {
+      return { status: "succeeded", idempotent_replay: true };
+    }
+    if (payment.refund_status === "succeeded" && refund.status !== "succeeded") {
+      return { ignored: true };
+    }
+    if (["failed", "canceled"].includes(payment.refund_status)
+      && ["pending", "requires_action"].includes(refund.status)
+      && payment.stripe_refund_id === refund.id) {
+      return { ignored: true };
+    }
+    if (payment.status !== "succeeded" || order.payment_status !== "paid") {
+      return { ignored: true };
+    }
+    if (refund.status === "succeeded") {
+      const currentTimestamp = timestamp();
+      const updatedPayment = await repository.updatePaymentRefundState({
+        paymentId: payment.id,
+        orderId: payment.order_id,
+        shopId: payment.shop_id,
+        paymentIntentId: payment.stripe_payment_intent_id,
+        refundId: refund.id,
+        refundStatus: "succeeded",
+        failureReason: null,
+        paymentStatus: "refunded",
+        refundedAt: currentTimestamp,
+        timestamp: currentTimestamp,
+        connection,
+      });
+      if (!updatedPayment.affectedRows) {
+        throw new Error("Refund payment transition failed");
+      }
+      const updatedOrder = await repository.updateOrderRefunded({
+        orderId: order.id,
+        shopId: order.shopid,
+        connection,
+      });
+      if (!updatedOrder.affectedRows) {
+        throw new Error("Refund order transition failed");
+      }
+      return { status: "succeeded" };
+    }
+    if (!["pending", "requires_action", "failed", "canceled"].includes(refund.status)) {
+      return { ignored: true };
+    }
+    const failureReason = ["failed", "canceled"].includes(refund.status)
+      ? refund.failure_reason || null
+      : null;
+    const updatedPayment = await repository.updatePaymentRefundState({
+      paymentId: payment.id,
+      orderId: payment.order_id,
+      shopId: payment.shop_id,
+      paymentIntentId: payment.stripe_payment_intent_id,
+      refundId: refund.id,
+      refundStatus: refund.status,
+      failureReason,
+      paymentStatus: "succeeded",
+      refundedAt: null,
+      timestamp: timestamp(),
+      connection,
+    });
+    if (!updatedPayment.affectedRows) {
+      throw new Error("Refund payment transition failed");
+    }
+    return { status: refund.status };
+  };
+
+  const recordRefundState = ({
+    orderId, shopId, refund,
+  }) => runInTransaction(async (connection) => {
+    const order = await repository.lockOrder({ orderId, shopId, connection });
+    if (!order) return { missing: true };
+    const payment = await repository.findPaymentForOrderRefund({
+      orderId,
+      shopId,
+      paymentIntentId: order.stripe_payment_intent_id,
+      connection,
+    });
+    return applyRefundState({ order, payment, refund, connection });
+  });
+
+  const reconcileStripeRefund = async (refund) => {
+    const references = await repository.findPaymentsForRefund({ refund });
+    if (!references.length) return { missing: true };
+    const reference = selectRefundPayment(references, refund);
+    if (!reference) return { ignored: true };
+
+    return runInTransaction(async (connection) => {
+      const order = await repository.lockOrder({
+        orderId: reference.order_id,
+        shopId: reference.shop_id,
+        connection,
+      });
+      if (!order) return { missing: true };
+      const lockedReferences = await repository.findPaymentsForRefund({
+        refund,
+        connection,
+      });
+      const payment = selectRefundPayment(lockedReferences, refund, order);
+      if (!payment) return { ignored: true };
+      return applyRefundState({ order, payment, refund, connection });
+    });
+  };
+
   return {
     attachPaymentIntentToOrder,
+    cancelOrphanedProvisionalStripeOrder,
     cancelProvisionalStripeOrder,
     createPaymentRecord,
+    findExpiredStripePayments,
     getPaidOrderForRefund,
     getPendingStripeOrderForCounter,
     getStripeOrderForCancellation,
+    markPaymentAttemptFailed,
     markPaymentCanceled,
-    markPaymentFailed,
-    markPaymentRefunded,
+    markPaymentProcessing,
     markPaymentSucceeded,
     markStripeOrderPayAtCounter,
     persistPaymentIntentForOrder,
     persistReplacementPaymentIntent,
+    recordRefundState,
+    reconcileStripeRefund,
     recoverCanceledEditPayment,
     rotatePaymentReplacementAttempt,
     stagePaymentReplacement,

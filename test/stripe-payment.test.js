@@ -23,8 +23,11 @@ require.cache[callbackDbPath] = {
   exports: { query: () => { throw new Error("unexpected legacy DB query"); } },
 };
 const {
+  buildStripeWebhookEventHandler,
   buildCancelQrTablePaymentIntentController,
   buildQrTablePaymentIntentController,
+  buildMarkQrTablePaymentAtCounter,
+  buildRefundPaidOrderController,
   buildRegenerateOrderPaymentIntent,
 } = require("../src/controllers/c_stripe");
 const {
@@ -32,6 +35,10 @@ const {
   buildPendingStripeArchiveSync,
 } = require("../src/controllers/c_orders");
 const { buildOrderArchiveModule } = require("../src/modules/m_orders");
+const {
+  buildNonOverlappingRunner,
+  buildStripePaymentMaintenance,
+} = require("../src/services/stripePaymentMaintenance");
 
 assert.strictEqual(toStripeAmount(12.34), 1234);
 assert.strictEqual(toStripeAmount("12.30"), 1230);
@@ -260,6 +267,9 @@ const makeStripeLifecycleHarness = ({
       ) || null;
     },
     lockOrder: (input) => paymentRepository.findOrderById(input),
+    lockOrderReservations: async ({ orderId }) => state.reservations.filter(
+      (row) => row.order_id === Number(orderId),
+    ),
     attachPaymentIntentToOrder: async ({ orderId, shopId, paymentIntentId }) => {
       if (failAttachment) throw new Error("SQL attach failure");
       const order = state.orders.find(
@@ -307,6 +317,15 @@ const makeStripeLifecycleHarness = ({
       order.payment = paymentMethod;
       return { affectedRows: 1 };
     },
+    updatePaymentPending: async ({ paymentIntentId, status }) => {
+      const payment = state.payments.find(
+        (row) => row.stripe_payment_intent_id === paymentIntentId,
+      );
+      if (payment && !["succeeded", "canceled", "refunded"].includes(payment.status)) {
+        payment.status = status;
+      }
+      return { affectedRows: payment ? 1 : 0 };
+    },
     updatePaymentTerminal: async ({ paymentIntentId, status }) => {
       const payment = state.payments.find(
         (row) => row.stripe_payment_intent_id === paymentIntentId,
@@ -319,16 +338,23 @@ const makeStripeLifecycleHarness = ({
       if (order) order.payment_status = status;
       return { affectedRows: order ? 1 : 0 };
     },
-    updatePaymentAtCounter: async ({ orderId }) => {
-      const payment = state.payments.find((row) => row.order_id === Number(orderId));
+    updatePaymentAtCounter: async ({ orderId, paymentIntentId }) => {
+      const payment = state.payments.find(
+        (row) => row.order_id === Number(orderId)
+          && row.stripe_payment_intent_id === paymentIntentId,
+      );
       if (payment) payment.status = "canceled";
       return { affectedRows: payment ? 1 : 0 };
     },
-    updateOrderAtCounter: async ({ orderId, shopId }) => {
+    updateOrderAtCounter: async ({ orderId, shopId, paymentIntentId }) => {
       const order = state.orders.find(
         (row) => row.id === Number(orderId) && row.shopid === Number(shopId),
       );
-      if (!order || order.payment_status !== "requires_payment") return { affectedRows: 0 };
+      if (!order
+        || order.payment_status !== "requires_payment"
+        || order.stripe_payment_intent_id !== paymentIntentId) {
+        return { affectedRows: 0 };
+      }
       Object.assign(order, {
         payment_status: "unpaid",
         payment: "Paiement au comptoir",
@@ -337,16 +363,38 @@ const makeStripeLifecycleHarness = ({
       });
       return { affectedRows: 1 };
     },
-    cancelPaymentsForOrder: async ({ orderId }) => {
-      const payment = state.payments.find((row) => row.order_id === Number(orderId));
+    cancelPaymentsForOrder: async ({ orderId, paymentIntentId }) => {
+      const payment = state.payments.find(
+        (row) => row.order_id === Number(orderId)
+          && (row.stripe_payment_intent_id || null) === paymentIntentId,
+      );
       if (payment) payment.status = "canceled";
       return { affectedRows: payment ? 1 : 0 };
     },
-    cancelProvisionalOrder: async ({ orderId, shopId }) => {
+    cancelProvisionalOrder: async ({ orderId, shopId, paymentIntentId }) => {
       const order = state.orders.find(
         (row) => row.id === Number(orderId) && row.shopid === Number(shopId),
       );
-      if (!order || order.payment_status !== "requires_payment") return { affectedRows: 0 };
+      if (!order
+        || order.payment_status !== "requires_payment"
+        || (order.stripe_payment_intent_id || null) !== paymentIntentId) {
+        return { affectedRows: 0 };
+      }
+      order.payment_status = "canceled";
+      order.status = ORDER_STATUSES.CANCELED;
+      return { affectedRows: 1 };
+    },
+    cancelOrphanedProvisionalOrder: async ({ orderId, shopId }) => {
+      const order = state.orders.find(
+        (row) => row.id === Number(orderId) && row.shopid === Number(shopId),
+      );
+      if (!order
+        || Number(order.status) !== ORDER_STATUSES.PENDING
+        || order.payment_status !== "requires_payment"
+        || order.payment_provider !== "stripe"
+        || order.stripe_payment_intent_id != null) {
+        return { affectedRows: 0 };
+      }
       order.payment_status = "canceled";
       order.status = ORDER_STATUSES.CANCELED;
       return { affectedRows: 1 };
@@ -392,6 +440,7 @@ const runPaymentEditRaceContract = async () => {
       status: ORDER_STATUSES.PENDING,
       payment_status: "requires_payment",
       payment_provider: "stripe",
+      stripe_payment_intent_id: "pi_42",
     },
     payment: {
       order_id: 42,
@@ -514,6 +563,7 @@ const runSucceededPaymentShopScopeContract = async () => {
           status: ORDER_STATUSES.PENDING,
           payment_status: "requires_payment",
           payment_provider: "stripe",
+          stripe_payment_intent_id: "pi_42",
         };
       },
       updatePaymentSucceeded: async () => ({ affectedRows: 1 }),
@@ -541,13 +591,14 @@ const runSucceededPaymentShopScopeContract = async () => {
   assert.deepStrictEqual(received.updateOrderSucceeded, {
     orderId: 42,
     shopId: 7,
+    paymentIntentId: "pi_42",
     paymentMethod: "Carte",
     timestamp: "2026-07-24 12:00:00",
     connection,
   });
 };
 
-const runTerminalPaymentShopScopeContract = async () => {
+const runPendingPaymentShopScopeContract = async () => {
   const connection = { transaction: true };
   const received = {};
   const events = [];
@@ -576,9 +627,8 @@ const runTerminalPaymentShopScopeContract = async () => {
           payment_provider: "stripe",
         };
       },
-      updatePaymentTerminal: async () => ({ affectedRows: 1 }),
-      updateOrderTerminal: async (input) => {
-        received.updateOrderTerminal = input;
+      updatePaymentPending: async (input) => {
+        received.updatePaymentPending = input;
         return { affectedRows: 1 };
       },
     },
@@ -586,7 +636,10 @@ const runTerminalPaymentShopScopeContract = async () => {
     now: () => new Date("2026-07-24T12:00:00.000Z"),
   });
 
-  await payments.markPaymentFailed("pi_42");
+  await payments.markPaymentAttemptFailed({
+    id: "pi_42",
+    status: "requires_payment_method",
+  });
 
   assert.deepStrictEqual(events.slice(0, 3), [
     "read-payment",
@@ -598,12 +651,136 @@ const runTerminalPaymentShopScopeContract = async () => {
     shopId: 7,
     connection,
   });
-  assert.deepStrictEqual(received.updateOrderTerminal, {
-    orderId: 42,
-    shopId: 7,
-    status: "failed",
+  assert.deepStrictEqual(received.updatePaymentPending, {
+    paymentIntentId: "pi_42",
+    status: "requires_payment_method",
+    timestamp: "2026-07-24 12:00:00",
     connection,
   });
+};
+
+const runStripeWebhookReconciliationContract = async () => {
+  const actions = [];
+  let currentPaymentIntent = {
+    id: "pi_42",
+    status: "requires_payment_method",
+  };
+  let currentRefund = { id: "re_42", status: "pending" };
+  const handler = buildStripeWebhookEventHandler({
+    getStripe: () => ({
+      paymentIntents: {
+        retrieve: async (id) => ({ ...currentPaymentIntent, id }),
+      },
+      charges: {
+        retrieve: async (id) => ({ id }),
+      },
+      refunds: {
+        retrieve: async (id) => {
+          actions.push(["retrieve-refund", id]);
+          return { ...currentRefund, id };
+        },
+        list: async (params) => {
+          actions.push(["list-refunds", params]);
+          return {
+            data: [
+              { id: "re_previous", status: "succeeded", amount: 1200 },
+              { id: "re_42", status: "succeeded", amount: 1100 },
+            ],
+            has_more: false,
+          };
+        },
+      },
+    }),
+    markPaymentAttemptFailed: async (paymentIntent) => {
+      actions.push(["failed", paymentIntent.status]);
+    },
+    markPaymentProcessing: async (paymentIntentId) => {
+      actions.push(["processing", paymentIntentId]);
+    },
+    markPaymentSucceeded: async (paymentIntent, charge) => {
+      actions.push(["succeeded", paymentIntent.id, charge && charge.id]);
+    },
+    markPaymentCanceled: async (paymentIntentId) => {
+      actions.push(["canceled", paymentIntentId]);
+    },
+    reconcileStripeRefund: async (refund) => {
+      actions.push([
+        "refund",
+        refund.id,
+        refund.status,
+        refund.cumulative_succeeded_amount,
+      ]);
+    },
+  });
+
+  await handler({
+    type: "payment_intent.payment_failed",
+    data: { object: { id: "pi_42", status: "requires_payment_method" } },
+  });
+  await handler({
+    type: "payment_intent.processing",
+    data: { object: { id: "pi_42", status: "processing" } },
+  });
+  assert.deepStrictEqual(actions, [
+    ["failed", "requires_payment_method"],
+    ["failed", "requires_payment_method"],
+  ], "a stale processing webhook must use Stripe's current retryable state");
+
+  actions.length = 0;
+  currentPaymentIntent = { id: "pi_42", status: "processing" };
+  await handler({
+    type: "payment_intent.processing",
+    data: { object: { id: "pi_42", status: "processing" } },
+  });
+  assert.deepStrictEqual(actions, [["processing", "pi_42"]]);
+
+  actions.length = 0;
+  currentPaymentIntent = {
+    id: "pi_42",
+    status: "succeeded",
+    latest_charge: "ch_42",
+  };
+  await handler({
+    type: "payment_intent.processing",
+    data: { object: { id: "pi_42", status: "processing" } },
+  });
+  assert.deepStrictEqual(actions, [["succeeded", "pi_42", "ch_42"]]);
+
+  actions.length = 0;
+  currentPaymentIntent = { id: "pi_42", status: "canceled" };
+  await handler({
+    type: "payment_intent.payment_failed",
+    data: { object: { id: "pi_42", status: "requires_payment_method" } },
+  });
+  assert.deepStrictEqual(actions, [["canceled", "pi_42"]]);
+
+  actions.length = 0;
+  currentRefund = {
+    id: "re_42",
+    status: "succeeded",
+    amount: 1100,
+    charge: "ch_42",
+  };
+  await handler({
+    type: "refund.created",
+    data: { object: { id: "re_42", status: "pending" } },
+  });
+  assert.deepStrictEqual(actions, [
+    ["retrieve-refund", "re_42"],
+    ["list-refunds", { charge: "ch_42", limit: 100 }],
+    ["refund", "re_42", "succeeded", 2300],
+  ]);
+
+  actions.length = 0;
+  currentRefund = { id: "re_42", status: "pending" };
+  await handler({
+    type: "refund.failed",
+    data: { object: { id: "re_42", status: "failed" } },
+  });
+  assert.deepStrictEqual(actions, [
+    ["retrieve-refund", "re_42"],
+    ["refund", "re_42", "pending", undefined],
+  ]);
 };
 
 const runCanceledPaymentUsesSuppliedOrderLockContract = async () => {
@@ -616,6 +793,7 @@ const runCanceledPaymentUsesSuppliedOrderLockContract = async () => {
     status: ORDER_STATUSES.PENDING,
     payment_status: "requires_payment",
     payment_provider: "stripe",
+    stripe_payment_intent_id: "pi_42",
   };
   let startedTransactions = 0;
   let redundantOrderLocks = 0;
@@ -653,34 +831,817 @@ const runCanceledPaymentUsesSuppliedOrderLockContract = async () => {
   assert.deepStrictEqual(received.updateOrderTerminal, {
     orderId: 42,
     shopId: 7,
+    paymentIntentId: "pi_42",
     status: "canceled",
     connection,
   });
 };
 
-const runRefundLockOrderContract = async () => {
+const makeRefundLifecycleHarness = () => {
+  const state = {
+    order: {
+      id: 42,
+      shopid: 7,
+      status: 3,
+      payment_status: "paid",
+      payment_provider: "stripe",
+      stripe_payment_intent_id: "pi_42",
+    },
+    payment: {
+      id: 12,
+      order_id: 42,
+      shop_id: 7,
+      stripe_payment_intent_id: "pi_42",
+      stripe_charge_id: "ch_42",
+      amount_cents: 2300,
+      stripe_refund_id: null,
+      refund_status: null,
+      refund_failure_reason: null,
+      refunded_at: null,
+      status: "succeeded",
+    },
+  };
   const events = [];
+  const repository = {
+    findPaymentForOrderRefund: async ({ orderId, shopId, connection }) => {
+      if (connection) events.push("lock-payment");
+      if (Number(orderId) !== state.payment.order_id
+        || Number(shopId) !== state.payment.shop_id) return null;
+      return state.payment;
+    },
+    findPaymentsForRefund: async ({ refund, connection }) => {
+      if (connection) events.push("lock-payment");
+      const chargeId = typeof refund.charge === "string"
+        ? refund.charge
+        : refund.charge && refund.charge.id;
+      return [
+        state.payment.stripe_refund_id === refund.id,
+        state.payment.stripe_payment_intent_id === refund.payment_intent,
+        state.payment.stripe_charge_id === chargeId,
+      ].some(Boolean) ? [state.payment] : [];
+    },
+    lockOrder: async ({ orderId, shopId }) => {
+      events.push("lock-order");
+      return Number(orderId) === state.order.id && Number(shopId) === state.order.shopid
+        ? state.order
+        : null;
+    },
+    updatePaymentRefundState: async ({
+      refundId,
+      refundStatus,
+      failureReason,
+      paymentStatus,
+      refundedAt,
+    }) => {
+      Object.assign(state.payment, {
+        stripe_refund_id: refundId,
+        refund_status: refundStatus,
+        refund_failure_reason: failureReason,
+        refunded_at: refundedAt,
+        status: paymentStatus,
+      });
+      events.push("update-payment");
+      return { affectedRows: 1 };
+    },
+    updateOrderRefunded: async () => {
+      state.order.payment_status = "refunded";
+      state.order.status = ORDER_STATUSES.CANCELED;
+      events.push("update-order");
+      return { affectedRows: 1 };
+    },
+    updateOrderRefundNonFinal: async () => {
+      state.order.payment_status = "paid";
+      events.push("update-order-non-final");
+      return { affectedRows: 1 };
+    },
+    backfillRefundCharge: async ({ chargeId }) => {
+      if (state.payment.stripe_charge_id != null) return { affectedRows: 0 };
+      state.payment.stripe_charge_id = chargeId;
+      events.push("backfill-charge");
+      return { affectedRows: 1 };
+    },
+  };
   const payments = buildPaymentModule({
+    repository,
     withTransaction: async (work) => work({ transaction: true }),
-    repository: {
-      lockOrder: async () => {
-        events.push("lock-order");
-        return { id: 42, shopid: 7, payment_status: "paid" };
-      },
-      updatePaymentRefunded: async () => {
-        events.push("update-payment");
-        return { affectedRows: 1 };
-      },
-      updateOrderRefunded: async () => {
-        events.push("update-order");
-        return { affectedRows: 1 };
-      },
+    now: () => new Date("2026-07-26T19:30:00.000Z"),
+  });
+  return { events, payments, state };
+};
+
+const runPendingRefundLifecycleContract = async () => {
+  const harness = makeRefundLifecycleHarness();
+
+  const result = await harness.payments.recordRefundState({
+    orderId: 42,
+    shopId: 7,
+    refund: {
+      id: "re_42",
+      status: "pending",
+      payment_intent: "pi_42",
+      charge: "ch_42",
     },
   });
 
-  await payments.markPaymentRefunded(42, "re_42");
+  assert.deepStrictEqual(result, { status: "pending" });
+  assert.strictEqual(harness.state.payment.stripe_refund_id, "re_42");
+  assert.strictEqual(harness.state.payment.refund_status, "pending");
+  assert.strictEqual(harness.state.payment.status, "succeeded");
+  assert.strictEqual(harness.state.payment.refunded_at, null);
+  assert.strictEqual(harness.state.order.payment_status, "paid");
+  assert.strictEqual(harness.state.order.status, 3);
+  assert.deepStrictEqual(harness.events, [
+    "lock-order",
+    "lock-payment",
+    "update-payment",
+  ]);
+};
 
-  assert.deepStrictEqual(events, ["lock-order", "update-payment", "update-order"]);
+const runPartialRefundDoesNotClaimAssociationContract = async () => {
+  const harness = makeRefundLifecycleHarness();
+  const partialSucceeded = await harness.payments.reconcileStripeRefund({
+    id: "re_partial_succeeded",
+    status: "succeeded",
+    amount: 1200,
+    cumulative_succeeded_amount: 1200,
+    payment_intent: "pi_42",
+    charge: "ch_42",
+    metadata: { order_id: "42", shop_id: "7" },
+  });
+  assert.deepStrictEqual(partialSucceeded, {
+    ignored: true,
+    partial_refund: true,
+  });
+  assert.strictEqual(harness.state.payment.stripe_refund_id, null);
+  assert.strictEqual(harness.state.payment.refund_status, null);
+  assert.strictEqual(harness.state.payment.status, "succeeded");
+  assert.strictEqual(harness.state.order.payment_status, "paid");
+
+  const remainingSucceeded = await harness.payments.reconcileStripeRefund({
+    id: "re_remaining_after_partial",
+    status: "succeeded",
+    amount: 1100,
+    cumulative_succeeded_amount: 2300,
+    payment_intent: "pi_42",
+    charge: "ch_42",
+    metadata: { order_id: "42", shop_id: "7" },
+  });
+  assert.deepStrictEqual(remainingSucceeded, { status: "succeeded" });
+  assert.strictEqual(harness.state.payment.stripe_refund_id, "re_remaining_after_partial");
+  assert.strictEqual(harness.state.payment.refund_status, "succeeded");
+  assert.strictEqual(harness.state.payment.status, "refunded");
+  assert.strictEqual(harness.state.order.payment_status, "refunded");
+};
+
+const runCumulativeRefundWebhookLifecycleContract = async () => {
+  const harness = makeRefundLifecycleHarness();
+  const refunds = {
+    re_a: {
+      id: "re_a",
+      status: "succeeded",
+      amount: 1200,
+      payment_intent: "pi_42",
+      charge: "ch_42",
+      metadata: { order_id: "42", shop_id: "7" },
+    },
+    re_b: {
+      id: "re_b",
+      status: "pending",
+      amount: 1100,
+      payment_intent: "pi_42",
+      charge: "ch_42",
+      metadata: { order_id: "42", shop_id: "7" },
+    },
+  };
+  const listCalls = [];
+  const handler = buildStripeWebhookEventHandler({
+    getStripe: () => ({
+      refunds: {
+        retrieve: async (refundId) => ({ ...refunds[refundId] }),
+        list: async (params) => {
+          listCalls.push(params);
+          return {
+            data: Object.values(refunds).map((refund) => ({ ...refund })),
+            has_more: false,
+          };
+        },
+      },
+    }),
+    reconcileStripeRefund: harness.payments.reconcileStripeRefund,
+  });
+
+  await handler({ type: "refund.updated", data: { object: { id: "re_a" } } });
+  assert.strictEqual(harness.state.payment.stripe_refund_id, null);
+  assert.strictEqual(harness.state.payment.status, "succeeded");
+  assert.strictEqual(harness.state.order.payment_status, "paid");
+
+  refunds.re_b.status = "failed";
+  await handler({ type: "refund.failed", data: { object: { id: "re_b" } } });
+  assert.strictEqual(harness.state.payment.stripe_refund_id, null);
+  assert.strictEqual(harness.state.payment.status, "succeeded");
+  assert.strictEqual(harness.state.order.payment_status, "paid");
+
+  refunds.re_b.status = "succeeded";
+  await handler({ type: "refund.updated", data: { object: { id: "re_b" } } });
+  assert.strictEqual(harness.state.payment.stripe_refund_id, "re_b");
+  assert.strictEqual(harness.state.payment.status, "refunded");
+  assert.strictEqual(harness.state.order.payment_status, "refunded");
+  assert.deepStrictEqual(listCalls, [
+    { charge: "ch_42", limit: 100 },
+    { charge: "ch_42", limit: 100 },
+    { charge: "ch_42", limit: 100 },
+  ]);
+};
+
+const runRefundPaginationContract = async () => {
+  const listCalls = [];
+  let reconciled = null;
+  const handler = buildStripeWebhookEventHandler({
+    getStripe: () => ({
+      refunds: {
+        retrieve: async () => ({
+          id: "re_b",
+          status: "succeeded",
+          amount: 1100,
+          charge: "ch_42",
+        }),
+        list: async (params) => {
+          listCalls.push(params);
+          if (!params.starting_after) {
+            return {
+              data: [{ id: "re_a", status: "succeeded", amount: 1200 }],
+              has_more: true,
+            };
+          }
+          return {
+            data: [{ id: "re_b", status: "succeeded", amount: 1100 }],
+            has_more: false,
+          };
+        },
+      },
+    }),
+    reconcileStripeRefund: async (refund) => {
+      reconciled = refund;
+    },
+  });
+  await handler({ type: "refund.updated", data: { object: { id: "re_b" } } });
+  assert.deepStrictEqual(listCalls, [
+    { charge: "ch_42", limit: 100 },
+    { charge: "ch_42", limit: 100, starting_after: "re_a" },
+  ]);
+  assert.strictEqual(reconciled.cumulative_succeeded_amount, 2300);
+
+  const malformedHandler = buildStripeWebhookEventHandler({
+    getStripe: () => ({
+      refunds: {
+        retrieve: async () => ({
+          id: "re_b",
+          status: "succeeded",
+          amount: 1100,
+          charge: "ch_42",
+        }),
+        list: async () => ({ data: [], has_more: true }),
+      },
+    }),
+    reconcileStripeRefund: async () => {
+      throw new Error("malformed pagination must not reconcile");
+    },
+  });
+  await assert.rejects(
+    () => malformedHandler({
+      type: "refund.updated",
+      data: { object: { id: "re_b" } },
+    }),
+    /Stripe refund pagination is incomplete/,
+  );
+
+  let reconciliationsAfterApiError = 0;
+  const apiErrorHandler = buildStripeWebhookEventHandler({
+    getStripe: () => ({
+      refunds: {
+        retrieve: async () => ({
+          id: "re_b",
+          status: "succeeded",
+          amount: 1100,
+          charge: "ch_42",
+        }),
+        list: async () => {
+          throw new Error("Stripe list unavailable");
+        },
+      },
+    }),
+    reconcileStripeRefund: async () => {
+      reconciliationsAfterApiError += 1;
+    },
+  });
+  await assert.rejects(
+    () => apiErrorHandler({
+      type: "refund.updated",
+      data: { object: { id: "re_b" } },
+    }),
+    /Stripe list unavailable/,
+  );
+  assert.strictEqual(reconciliationsAfterApiError, 0);
+};
+
+const runSucceededRefundLifecycleContract = async () => {
+  const harness = makeRefundLifecycleHarness();
+  const refund = {
+    id: "re_42",
+    status: "succeeded",
+    amount: 2300,
+    payment_intent: "pi_42",
+    charge: "ch_42",
+  };
+
+  assert.deepStrictEqual(
+    await harness.payments.recordRefundState({ orderId: 42, shopId: 7, refund }),
+    { status: "succeeded" },
+  );
+  assert.strictEqual(harness.state.payment.status, "refunded");
+  assert.strictEqual(harness.state.payment.refund_status, "succeeded");
+  assert.strictEqual(harness.state.payment.refund_failure_reason, null);
+  assert.strictEqual(harness.state.payment.refunded_at, "2026-07-26 19:30:00");
+  assert.strictEqual(harness.state.order.payment_status, "refunded");
+
+  let legacyChargeHarness = makeRefundLifecycleHarness();
+  legacyChargeHarness.state.order.payment_status = "refunded";
+  legacyChargeHarness.state.order.status = ORDER_STATUSES.CANCELED;
+  Object.assign(legacyChargeHarness.state.payment, {
+    status: "refunded",
+    refund_status: "legacy_unknown",
+    refunded_at: "2026-07-25 10:00:00",
+    stripe_refund_id: "re_extracted",
+    stripe_charge_id: null,
+  });
+  assert.deepStrictEqual(
+    await legacyChargeHarness.payments.reconcileStripeRefund({
+      id: "re_extracted",
+      status: "succeeded",
+      payment_intent: "pi_42",
+      amount: 2300,
+      charge: "ch_backfilled",
+    }),
+    { status: "succeeded", legacy_backfill: true },
+  );
+  assert.strictEqual(legacyChargeHarness.state.payment.stripe_charge_id, "ch_backfilled");
+
+  const partialLegacyHarness = makeRefundLifecycleHarness();
+  partialLegacyHarness.state.order.payment_status = "refunded";
+  partialLegacyHarness.state.order.status = ORDER_STATUSES.CANCELED;
+  Object.assign(partialLegacyHarness.state.payment, {
+    status: "refunded",
+    refund_status: "legacy_unknown",
+    refunded_at: "2026-07-25 10:00:00",
+    stripe_refund_id: null,
+  });
+  assert.deepStrictEqual(
+    await partialLegacyHarness.payments.reconcileStripeRefund({
+      id: "re_partial",
+      status: "pending",
+      payment_intent: "pi_42",
+      charge: "ch_42",
+      amount: 1200,
+    }),
+    { ignored: true },
+  );
+  assert.strictEqual(partialLegacyHarness.state.payment.stripe_refund_id, null);
+  assert.strictEqual(partialLegacyHarness.state.payment.refund_status, "legacy_unknown");
+  assert.strictEqual(partialLegacyHarness.state.order.payment_status, "refunded");
+  assert.deepStrictEqual(partialLegacyHarness.events, []);
+
+  const partialModernHarness = makeRefundLifecycleHarness();
+  const partialModern = await partialModernHarness.payments.reconcileStripeRefund({
+    id: "re_partial_modern",
+    status: "succeeded",
+    amount: 1200,
+    payment_intent: "pi_42",
+    charge: "ch_42",
+    metadata: { order_id: "42", shop_id: "7" },
+  });
+  assert.deepStrictEqual(partialModern, {
+    ignored: true,
+    partial_refund: true,
+  });
+  assert.strictEqual(partialModernHarness.state.payment.status, "succeeded");
+  assert.strictEqual(partialModernHarness.state.payment.refund_status, null);
+  assert.strictEqual(partialModernHarness.state.order.payment_status, "paid");
+
+  legacyChargeHarness = makeRefundLifecycleHarness();
+  legacyChargeHarness.state.order.payment_status = "refunded";
+  legacyChargeHarness.state.order.status = ORDER_STATUSES.CANCELED;
+  Object.assign(legacyChargeHarness.state.payment, {
+    status: "refunded",
+    refund_status: "legacy_unknown",
+    stripe_refund_id: "re_extracted",
+    stripe_charge_id: "ch_local",
+  });
+  assert.deepStrictEqual(
+    await legacyChargeHarness.payments.reconcileStripeRefund({
+      id: "re_extracted",
+      status: "succeeded",
+      payment_intent: "pi_42",
+      charge: "ch_other",
+    }),
+    { ignored: true },
+  );
+  assert.strictEqual(legacyChargeHarness.state.payment.stripe_charge_id, "ch_local");
+  assert.strictEqual(harness.state.order.status, ORDER_STATUSES.CANCELED);
+
+  const eventsAfterSuccess = harness.events.slice();
+  assert.deepStrictEqual(
+    await harness.payments.recordRefundState({ orderId: 42, shopId: 7, refund }),
+    { status: "succeeded", idempotent_replay: true },
+  );
+  assert.deepStrictEqual(harness.events, [
+    ...eventsAfterSuccess,
+    "lock-order",
+    "lock-payment",
+  ]);
+
+  const webhookFirst = makeRefundLifecycleHarness();
+  await webhookFirst.payments.reconcileStripeRefund({
+    ...refund,
+    metadata: { order_id: "42", shop_id: "7" },
+  });
+  assert.deepStrictEqual(
+    await webhookFirst.payments.recordRefundState({
+      orderId: 42,
+      shopId: 7,
+      refund: { ...refund, status: "pending" },
+    }),
+    { status: "succeeded", idempotent_replay: true },
+  );
+  assert.strictEqual(webhookFirst.state.payment.status, "refunded");
+  assert.strictEqual(webhookFirst.state.order.payment_status, "refunded");
+};
+
+const runFailedRefundLifecycleContract = async () => {
+  for (const [status, failureReason] of [
+    ["failed", "lost_or_stolen_card"],
+    ["canceled", null],
+  ]) {
+    const harness = makeRefundLifecycleHarness();
+    await harness.payments.recordRefundState({
+      orderId: 42,
+      shopId: 7,
+      refund: { id: "re_42", status: "pending", payment_intent: "pi_42" },
+    });
+
+    assert.deepStrictEqual(
+      await harness.payments.recordRefundState({
+        orderId: 42,
+        shopId: 7,
+        refund: {
+          id: "re_42",
+          status,
+          payment_intent: "pi_42",
+          failure_reason: failureReason,
+        },
+      }),
+      { status },
+    );
+    assert.strictEqual(harness.state.payment.status, "succeeded");
+    assert.strictEqual(harness.state.payment.refund_status, status);
+    assert.strictEqual(harness.state.payment.refund_failure_reason, failureReason);
+    assert.strictEqual(harness.state.payment.refunded_at, null);
+    assert.strictEqual(harness.state.order.payment_status, "paid");
+    assert.strictEqual(harness.state.order.status, 3);
+
+    assert.deepStrictEqual(
+      await harness.payments.recordRefundState({
+        orderId: 42,
+        shopId: 7,
+        refund: {
+          id: "re_42",
+          status: "pending",
+          payment_intent: "pi_42",
+        },
+      }),
+      { ignored: true },
+      "a stale update for the terminal attempt must not erase its audit state",
+    );
+    assert.strictEqual(harness.state.payment.stripe_refund_id, "re_42");
+    assert.strictEqual(harness.state.payment.refund_status, status);
+    assert.strictEqual(harness.state.payment.refund_failure_reason, failureReason);
+
+    assert.deepStrictEqual(
+      await harness.payments.reconcileStripeRefund({
+        id: "re_unproven_retry",
+        status: "pending",
+        amount: 2300,
+        payment_intent: "pi_42",
+        charge: "ch_42",
+        metadata: {
+          order_id: "42",
+          shop_id: "7",
+        },
+      }),
+      { ignored: true },
+      "a different refund ID without a proven retry generation is ignored",
+    );
+    assert.strictEqual(harness.state.payment.stripe_refund_id, "re_42");
+    assert.strictEqual(harness.state.payment.refund_status, status);
+    assert.strictEqual(harness.state.payment.refund_failure_reason, failureReason);
+
+    assert.deepStrictEqual(
+      await harness.payments.reconcileStripeRefund({
+        id: "re_retry_generation_1",
+        status: "succeeded",
+        amount: 2300,
+        cumulative_succeeded_amount: 2300,
+        payment_intent: "pi_42",
+        charge: "ch_42",
+        metadata: {
+          order_id: "42",
+          shop_id: "7",
+          refund_attempt_generation: "1",
+        },
+      }),
+      { status: "succeeded" },
+      "the webhook for a proven retry generation can replace the terminal association",
+    );
+    assert.strictEqual(harness.state.payment.stripe_refund_id, "re_retry_generation_1");
+    assert.strictEqual(harness.state.payment.refund_status, "succeeded");
+    assert.strictEqual(harness.state.payment.refund_failure_reason, null);
+    assert.strictEqual(harness.state.payment.status, "refunded");
+    assert.strictEqual(harness.state.order.payment_status, "refunded");
+  }
+
+  for (const delayedStatus of ["failed", "canceled"]) {
+    const harness = makeRefundLifecycleHarness();
+    await harness.payments.recordRefundState({
+      orderId: 42,
+      shopId: 7,
+      refund: {
+        id: "re_current_generation_2",
+        status: "pending",
+        amount: 2300,
+        payment_intent: "pi_42",
+        charge: "ch_42",
+        metadata: {
+          order_id: "42",
+          shop_id: "7",
+          refund_attempt_generation: "2",
+        },
+      },
+    });
+    await harness.payments.recordRefundState({
+      orderId: 42,
+      shopId: 7,
+      refund: {
+        id: "re_current_generation_2",
+        status: "failed",
+        amount: 2300,
+        payment_intent: "pi_42",
+        charge: "ch_42",
+        failure_reason: "current_failure",
+        metadata: {
+          order_id: "42",
+          shop_id: "7",
+          refund_attempt_generation: "2",
+        },
+      },
+    });
+
+    assert.deepStrictEqual(
+      await harness.payments.reconcileStripeRefund({
+        id: "re_delayed_generation_1",
+        status: delayedStatus,
+        amount: 2300,
+        payment_intent: "pi_42",
+        charge: "ch_42",
+        failure_reason: "delayed_failure",
+        metadata: {
+          order_id: "42",
+          shop_id: "7",
+          refund_attempt_generation: "1",
+        },
+      }),
+      { ignored: true },
+      `${delayedStatus} from an older different ID must not replace the audit association`,
+    );
+    assert.strictEqual(harness.state.payment.stripe_refund_id, "re_current_generation_2");
+    assert.strictEqual(harness.state.payment.refund_status, "failed");
+    assert.strictEqual(harness.state.payment.refund_failure_reason, "current_failure");
+  }
+};
+
+const runRefundWebhookLookupContract = async () => {
+  const identifierCases = [
+    {
+      prepare: (payment) => { payment.stripe_refund_id = "re_42"; },
+      refund: { id: "re_42" },
+    },
+    {
+      prepare: () => {},
+      refund: { id: "re_42", payment_intent: "pi_42" },
+    },
+    {
+      prepare: () => {},
+      refund: { id: "re_42", charge: "ch_42" },
+    },
+  ];
+  for (const identifierCase of identifierCases) {
+    const harness = makeRefundLifecycleHarness();
+    identifierCase.prepare(harness.state.payment);
+    const refund = {
+      status: "pending",
+      metadata: { order_id: "42", shop_id: "7" },
+      ...identifierCase.refund,
+    };
+    assert.deepStrictEqual(
+      await harness.payments.reconcileStripeRefund(refund),
+      { status: "pending" },
+    );
+    assert.strictEqual(harness.state.payment.stripe_refund_id, "re_42");
+  }
+
+  let harness = makeRefundLifecycleHarness();
+  harness.state.payment.stripe_refund_id = "re_42";
+  assert.deepStrictEqual(
+    await harness.payments.reconcileStripeRefund({
+      id: "re_42",
+      status: "pending",
+    }),
+    { status: "pending" },
+    "an already-associated refund ID remains reconcilable without metadata",
+  );
+
+  for (const refundReference of [
+    { payment_intent: "pi_42" },
+    { charge: "ch_42" },
+  ]) {
+    harness = makeRefundLifecycleHarness();
+    assert.deepStrictEqual(
+      await harness.payments.reconcileStripeRefund({
+        id: "re_new",
+        status: "pending",
+        ...refundReference,
+      }),
+      { ignored: true },
+      "a new refund association requires order and shop metadata",
+    );
+    assert.strictEqual(harness.state.payment.stripe_refund_id, null);
+    assert.strictEqual(harness.state.payment.refund_status, null);
+    assert.strictEqual(harness.state.payment.status, "succeeded");
+    assert.strictEqual(harness.state.order.payment_status, "paid");
+    assert.strictEqual(harness.state.order.status, 3);
+    assert.deepStrictEqual(harness.events, []);
+  }
+
+  harness = makeRefundLifecycleHarness();
+  harness.state.order.payment_status = "refunded";
+  harness.state.order.status = ORDER_STATUSES.CANCELED;
+  Object.assign(harness.state.payment, {
+    status: "refunded",
+    refund_status: "legacy_unknown",
+    refunded_at: "2026-07-25 10:00:00",
+    stripe_refund_id: null,
+  });
+  assert.deepStrictEqual(
+    await harness.payments.reconcileStripeRefund({
+      id: "re_legacy",
+      status: "succeeded",
+      payment_intent: "pi_42",
+      amount: 2300,
+    }),
+    { status: "succeeded", legacy_backfill: true },
+  );
+  assert.strictEqual(harness.state.payment.stripe_refund_id, "re_legacy");
+  assert.strictEqual(harness.state.payment.refund_status, "succeeded");
+  assert.strictEqual(harness.state.payment.refunded_at, "2026-07-25 10:00:00");
+  assert.strictEqual(harness.state.order.payment_status, "refunded");
+
+  for (const [currentStatus, failureReason] of [
+    ["pending", null],
+    ["failed", "expired_or_canceled_card"],
+  ]) {
+    harness = makeRefundLifecycleHarness();
+    harness.state.order.payment_status = "refunded";
+    harness.state.order.status = ORDER_STATUSES.CANCELED;
+    Object.assign(harness.state.payment, {
+      status: "refunded",
+      refund_status: "legacy_unknown",
+      refunded_at: "2026-07-25 10:00:00",
+      stripe_refund_id: currentStatus === "failed" ? "re_legacy" : null,
+    });
+    assert.deepStrictEqual(
+      await harness.payments.reconcileStripeRefund({
+        id: "re_legacy",
+        status: currentStatus,
+        payment_intent: "pi_42",
+        amount: 2300,
+        failure_reason: failureReason,
+      }),
+      {
+        status: currentStatus,
+        business_status_unchanged: true,
+        order_status: ORDER_STATUSES.CANCELED,
+      },
+    );
+    assert.strictEqual(harness.state.payment.status, "succeeded");
+    assert.strictEqual(harness.state.payment.refund_status, currentStatus);
+    assert.strictEqual(harness.state.payment.refund_failure_reason, failureReason);
+    assert.strictEqual(harness.state.payment.refunded_at, null);
+    assert.strictEqual(harness.state.order.payment_status, "paid");
+    assert.strictEqual(harness.state.order.status, ORDER_STATUSES.CANCELED);
+
+    assert.deepStrictEqual(
+      await harness.payments.reconcileStripeRefund({
+        id: "re_legacy",
+        status: "succeeded",
+        payment_intent: "pi_42",
+        amount: 2300,
+      }),
+      { status: "succeeded" },
+    );
+    assert.strictEqual(harness.state.payment.status, "refunded");
+    assert.strictEqual(harness.state.order.payment_status, "refunded");
+    assert.strictEqual(harness.state.order.status, ORDER_STATUSES.CANCELED);
+  }
+
+  for (const mismatchedReference of [
+    { payment_intent: "pi_wrong", charge: "ch_42" },
+    { payment_intent: "pi_42", charge: "ch_wrong" },
+  ]) {
+    harness = makeRefundLifecycleHarness();
+    harness.state.order.payment_status = "refunded";
+    harness.state.order.status = ORDER_STATUSES.CANCELED;
+    Object.assign(harness.state.payment, {
+      status: "refunded",
+      refund_status: "legacy_unknown",
+      refunded_at: "2026-07-25 10:00:00",
+      stripe_refund_id: null,
+    });
+    assert.deepStrictEqual(
+      await harness.payments.reconcileStripeRefund({
+        id: "re_legacy",
+        status: "succeeded",
+        amount: 2300,
+        ...mismatchedReference,
+      }),
+      { ignored: true },
+    );
+    assert.strictEqual(harness.state.payment.stripe_refund_id, null);
+  }
+
+  harness = makeRefundLifecycleHarness();
+  assert.deepStrictEqual(
+    await harness.payments.reconcileStripeRefund({
+      id: "re_unknown",
+      status: "pending",
+      payment_intent: "pi_unknown",
+      charge: "ch_unknown",
+    }),
+    { missing: true },
+  );
+  assert.strictEqual(harness.events.length, 0);
+  assert.strictEqual(harness.state.payment.stripe_refund_id, null);
+
+  harness = makeRefundLifecycleHarness();
+  assert.deepStrictEqual(
+    await harness.payments.reconcileStripeRefund({
+      id: "re_42",
+      status: "succeeded",
+      payment_intent: "pi_42",
+      metadata: { order_id: "42", shop_id: "999" },
+    }),
+    { ignored: true },
+  );
+  assert.strictEqual(harness.state.payment.status, "succeeded");
+  assert.strictEqual(harness.state.order.payment_status, "paid");
+
+  harness = makeRefundLifecycleHarness();
+  harness.state.order.stripe_payment_intent_id = "pi_other";
+  assert.deepStrictEqual(
+    await harness.payments.reconcileStripeRefund({
+      id: "re_42",
+      status: "succeeded",
+      payment_intent: "pi_42",
+    }),
+    { ignored: true },
+  );
+  assert.strictEqual(harness.state.payment.status, "succeeded");
+  assert.strictEqual(harness.state.order.payment_status, "paid");
+
+  harness = makeRefundLifecycleHarness();
+  const succeededRefund = {
+    id: "re_42",
+    status: "succeeded",
+    amount: 2300,
+    payment_intent: "pi_42",
+    charge: "ch_42",
+    metadata: { order_id: "42", shop_id: "7" },
+  };
+  assert.deepStrictEqual(
+    await harness.payments.reconcileStripeRefund(succeededRefund),
+    { status: "succeeded" },
+  );
+  assert.deepStrictEqual(
+    await harness.payments.reconcileStripeRefund(succeededRefund),
+    { status: "succeeded", idempotent_replay: true },
+  );
 };
 
 const runStripeReservationContracts = async () => {
@@ -702,23 +1663,40 @@ const runStripeReservationContracts = async () => {
   assert.strictEqual(harness.getState().orders[0].payment_status, "paid");
 
   harness = makeStripeLifecycleHarness();
-  await harness.payments.markStripeOrderPayAtCounter(42, 7);
+  await harness.payments.markStripeOrderPayAtCounter(42, 7, "pi_42");
   assert.strictEqual(harness.getState().products.get(10), 8);
   assert.strictEqual(harness.getState().reservations[0].status, "committed");
   assert.strictEqual(harness.getState().movements.length, 1);
   assert.strictEqual(harness.getState().orders[0].payment_status, "unpaid");
 
-  for (const transition of ["failed", "canceled"]) {
-    harness = makeStripeLifecycleHarness();
-    const action = transition === "failed" ? "markPaymentFailed" : "markPaymentCanceled";
-    await harness.payments[action]("pi_42");
-    await harness.payments[action]("pi_42");
-    assert.strictEqual(harness.getState().products.get(10), 10, `${transition} restores once`);
-    assert.strictEqual(harness.getState().reservations[0].status, "released");
-    await harness.payments.markPaymentSucceeded(succeededIntent);
-    assert.strictEqual(harness.getState().products.get(10), 10);
-    assert.strictEqual(harness.getState().orders[0].payment_status, transition);
-  }
+  harness = makeStripeLifecycleHarness();
+  await harness.payments.markPaymentAttemptFailed({
+    id: "pi_42",
+    status: "requires_payment_method",
+  });
+  assert.strictEqual(harness.getState().products.get(10), 8);
+  assert.strictEqual(harness.getState().reservations[0].status, "reserved");
+  assert.strictEqual(harness.getState().orders[0].payment_status, "requires_payment");
+  assert.strictEqual(harness.getState().payments[0].status, "requires_payment_method");
+  await harness.payments.markPaymentSucceeded(succeededIntent);
+  assert.strictEqual(harness.getState().orders[0].payment_status, "paid");
+  assert.strictEqual(harness.getState().reservations[0].status, "committed");
+
+  harness = makeStripeLifecycleHarness();
+  await harness.payments.markPaymentProcessing("pi_42");
+  assert.strictEqual(harness.getState().products.get(10), 8);
+  assert.strictEqual(harness.getState().reservations[0].status, "reserved");
+  assert.strictEqual(harness.getState().orders[0].payment_status, "requires_payment");
+  assert.strictEqual(harness.getState().payments[0].status, "processing");
+
+  harness = makeStripeLifecycleHarness();
+  await harness.payments.markPaymentCanceled("pi_42");
+  await harness.payments.markPaymentCanceled("pi_42");
+  assert.strictEqual(harness.getState().products.get(10), 10, "canceled restores once");
+  assert.strictEqual(harness.getState().reservations[0].status, "released");
+  await harness.payments.markPaymentSucceeded(succeededIntent);
+  assert.strictEqual(harness.getState().products.get(10), 10);
+  assert.strictEqual(harness.getState().orders[0].payment_status, "canceled");
 
   harness = makeStripeLifecycleHarness();
   await harness.payments.markPaymentSucceeded(succeededIntent);
@@ -734,12 +1712,69 @@ const runStripeReservationContracts = async () => {
   assert.strictEqual(harness.getState().reservations[0].status, "released");
 
   harness = makeStripeLifecycleHarness();
-  await harness.payments.cancelProvisionalStripeOrder(42, 7);
-  await harness.payments.cancelProvisionalStripeOrder(42, 7);
+  await harness.payments.cancelProvisionalStripeOrder(42, 7, "pi_42");
+  await harness.payments.cancelProvisionalStripeOrder(42, 7, "pi_42");
   assert.strictEqual(harness.getState().products.get(10), 10);
   assert.strictEqual(harness.getState().reservations[0].status, "released");
   assert.strictEqual(harness.getState().orders[0].payment_status, "canceled");
   assert.strictEqual(harness.getState().orders[0].status, ORDER_STATUSES.CANCELED);
+
+  harness = makeStripeLifecycleHarness();
+  harness.getState().orders[0].stripe_payment_intent_id = "pi_replacement";
+  const staleCancellation = await harness.payments.cancelProvisionalStripeOrder(
+    42,
+    7,
+    "pi_42",
+  );
+  assert.deepStrictEqual(staleCancellation, { ignored: true, stale_intent: true });
+  assert.strictEqual(harness.getState().reservations[0].status, "reserved");
+  assert.strictEqual(harness.getState().orders[0].stripe_payment_intent_id, "pi_replacement");
+
+  harness = makeStripeLifecycleHarness();
+  harness.getState().orders[0].stripe_payment_intent_id = "pi_replacement";
+  const staleCounter = await harness.payments.markStripeOrderPayAtCounter(
+    42,
+    7,
+    "pi_42",
+  );
+  assert.deepStrictEqual(staleCounter, { ignored: true, stale_intent: true });
+  assert.strictEqual(harness.getState().reservations[0].status, "reserved");
+  assert.strictEqual(harness.getState().orders[0].stripe_payment_intent_id, "pi_replacement");
+
+  harness = makeStripeLifecycleHarness({ paymentAttached: false });
+  const orphanCancellation = await harness.payments.cancelOrphanedProvisionalStripeOrder(42, 7);
+  assert.deepStrictEqual(orphanCancellation, { canceled: true });
+  assert.strictEqual(harness.getState().products.get(10), 10);
+  assert.strictEqual(harness.getState().reservations[0].status, "released");
+  assert.strictEqual(harness.getState().orders[0].payment_status, "canceled");
+  assert.strictEqual(harness.getState().orders[0].status, ORDER_STATUSES.CANCELED);
+
+  harness = makeStripeLifecycleHarness({ paymentAttached: false });
+  const orphanScan = {
+    order_id: 42,
+    shop_id: 7,
+    stripe_payment_intent_id: null,
+  };
+  harness.getState().orders[0].stripe_payment_intent_id = "pi_new";
+  harness.getState().payments.push({
+    order_id: 42,
+    shop_id: 7,
+    stripe_payment_intent_id: "pi_new",
+    status: "requires_payment_method",
+  });
+  const staleOrphanCancellation = await (
+    harness.payments.cancelOrphanedProvisionalStripeOrder(
+      orphanScan.order_id,
+      orphanScan.shop_id,
+    )
+  );
+  assert.deepStrictEqual(staleOrphanCancellation, { ignored: true, stale_scan: true });
+  assert.strictEqual(harness.getState().products.get(10), 8);
+  assert.strictEqual(harness.getState().reservations[0].status, "reserved");
+  assert.strictEqual(harness.getState().orders[0].payment_status, "requires_payment");
+  assert.strictEqual(harness.getState().orders[0].status, ORDER_STATUSES.PENDING);
+  assert.strictEqual(harness.getState().orders[0].stripe_payment_intent_id, "pi_new");
+  assert.strictEqual(harness.getState().payments[0].status, "requires_payment_method");
 
   harness = makeStripeLifecycleHarness();
   harness.getState().reservations.length = 0;
@@ -1019,6 +2054,29 @@ const runCashRegisterArchiveContract = async () => {
   assert.strictEqual(harness.getState().orders[0].payment_status, "requires_payment");
 
   harness = makeStripeLifecycleHarness();
+  sync = buildPendingStripeArchiveSync({
+    getStripe: () => ({
+      paymentIntents: {
+        retrieve: async () => ({ id: "pi_42", status: "requires_payment" }),
+        cancel: async () => {
+          harness.getState().orders[0].stripe_payment_intent_id = "pi_replacement";
+          return { id: "pi_42", status: "canceled" };
+        },
+      },
+      charges: { retrieve: async () => null },
+    }),
+    markPaymentSucceeded: harness.payments.markPaymentSucceeded,
+    markStripeOrderPayAtCounter: harness.payments.markStripeOrderPayAtCounter,
+    findOrderById: async () => [harness.getState().orders[0]],
+  });
+  await assert.rejects(
+    () => sync(harness.getState().orders[0]),
+    (error) => error.code === "STRIPE_PAYMENT_NOT_SETTLED",
+  );
+  assert.strictEqual(harness.getState().reservations[0].status, "reserved");
+  assert.strictEqual(harness.getState().orders[0].stripe_payment_intent_id, "pi_replacement");
+
+  harness = makeStripeLifecycleHarness();
   await harness.payments.markPaymentCanceled("pi_42");
   sync = buildPendingStripeArchiveSync({
     getStripe: () => ({ paymentIntents: {}, charges: {} }),
@@ -1266,7 +2324,7 @@ const runStripeCheckoutControllerContracts = async () => {
   response = makeResponse();
   await failingController(request, response);
   assert.strictEqual(response.statusCode, 500);
-  assert.deepStrictEqual(cleaned, [[42, 7]]);
+  assert.deepStrictEqual(cleaned, [[42, 7, null]]);
   assert.ok(!JSON.stringify(response.payload).includes("Stripe secret"));
   assert.strictEqual(logs.length, 1);
 
@@ -1274,7 +2332,7 @@ const runStripeCheckoutControllerContracts = async () => {
     name: "attachment",
     options: { paymentAttached: false, failAttachment: true },
     cancelFails: false,
-    releasesReservation: true,
+    releasesReservation: false,
   }, {
     name: "payment record",
     options: { paymentAttached: false, failPaymentRecord: true },
@@ -1426,8 +2484,8 @@ const runStripeCancellationControllerContracts = async () => {
         },
       },
     }),
-    cancelProvisionalStripeOrder: async (orderId, shopId) => {
-      events.push(["release", Number(orderId), Number(shopId)]);
+    cancelProvisionalStripeOrder: async (orderId, shopId, paymentIntentId) => {
+      events.push(["release", Number(orderId), Number(shopId), paymentIntentId]);
       releaseCount += 1;
       order = { ...order, payment_status: "canceled" };
       return { canceled: true };
@@ -1447,7 +2505,7 @@ const runStripeCancellationControllerContracts = async () => {
     ["read", 42, 7],
     ["retrieve", "pi_42"],
     ["cancel", "pi_42"],
-    ["release", 42, 7],
+    ["release", 42, 7, "pi_42"],
   ], "Stripe must be canceled before reservations are released");
   assert.strictEqual(releaseCount, 1);
 
@@ -1649,6 +2707,64 @@ const runStripeCancellationControllerContracts = async () => {
   assert.strictEqual(response.statusCode, 200, "a concurrent cancellation is idempotent");
   assert.strictEqual(response.payload.data.idempotent_replay, true);
   assert.strictEqual(raceReadCount, 2);
+
+  let replacementOrder = {
+    id: 42,
+    shopid: 7,
+    payment_status: "requires_payment",
+    payment_provider: "stripe",
+    stripe_payment_intent_id: "pi_old",
+  };
+  let expectedCancellationIntent = null;
+  response = makeResponse();
+  await buildCancelQrTablePaymentIntentController({
+    getStripeOrderForCancellation: async () => replacementOrder,
+    getStripe: () => ({
+      paymentIntents: {
+        retrieve: async () => ({ id: "pi_old", status: "requires_payment_method" }),
+        cancel: async () => {
+          replacementOrder = {
+            ...replacementOrder,
+            stripe_payment_intent_id: "pi_replacement",
+          };
+          return { id: "pi_old", status: "canceled" };
+        },
+      },
+    }),
+    cancelProvisionalStripeOrder: async (_orderId, _shopId, paymentIntentId) => {
+      expectedCancellationIntent = paymentIntentId;
+      return { ignored: true, stale_intent: true };
+    },
+    logger: { error: () => {} },
+  })({ params: { orderId: "42" }, shopid: 7 }, response);
+  assert.strictEqual(expectedCancellationIntent, "pi_old");
+  assert.strictEqual(response.statusCode, 409);
+  assert.strictEqual(replacementOrder.stripe_payment_intent_id, "pi_replacement");
+};
+
+const runPayAtCounterIntentRaceContract = async () => {
+  let receivedIntentId = null;
+  const controller = buildMarkQrTablePaymentAtCounter({
+    getShopInfo: async () => [{ id: 7, qr_payment_mode: "pay_at_counter" }],
+    getPendingStripeOrderForCounter: async () => [{
+      stripe_payment_intent_id: "pi_old",
+    }],
+    getStripe: () => ({
+      paymentIntents: {
+        retrieve: async () => ({ id: "pi_old", status: "requires_payment_method" }),
+        cancel: async () => ({ id: "pi_old", status: "canceled" }),
+      },
+    }),
+    markStripeOrderPayAtCounter: async (_orderId, _shopId, paymentIntentId) => {
+      receivedIntentId = paymentIntentId;
+      return { ignored: true, stale_intent: true };
+    },
+  });
+  const response = makeResponse();
+  await controller({ params: { orderId: "42" }, shopid: 7 }, response);
+  assert.strictEqual(receivedIntentId, "pi_old");
+  assert.strictEqual(response.statusCode, 409);
+  assert.strictEqual(response.payload.data.code, "STRIPE_PAYMENT_NOT_SETTLED");
 };
 
 const runReplacementPaymentContracts = async () => {
@@ -1777,11 +2893,13 @@ const runReplacementPaymentContracts = async () => {
       stripe_replacement_attempt_token: "attempt-current",
     },
     payments: [],
+    reservations: [{ order_id: 42, status: "reserved" }],
   };
   const payments = buildPaymentModule({
     withTransaction: async (work) => work({ transaction: true }),
     repository: {
       lockOrder: async () => paymentState.order,
+      lockOrderReservations: async () => paymentState.reservations,
       findPaymentByIntent: async ({ paymentIntentId }) => paymentState.payments.find(
         (payment) => payment.stripe_payment_intent_id === paymentIntentId,
       ) || null,
@@ -1860,6 +2978,33 @@ const runReplacementPaymentContracts = async () => {
     false,
   );
 
+  paymentState.order.payment_status = "unpaid";
+  paymentState.order.stripe_payment_intent_id = null;
+  paymentState.order.stripe_replacement_attempt_token = "attempt-released";
+  paymentState.reservations[0].status = "released";
+  const released = await payments.persistReplacementPaymentIntent({
+    orderId: 42,
+    shopId: 7,
+    stripe_payment_intent_id: "pi_after_release",
+    replacement_attempt_token: "attempt-released",
+    amount: 31,
+    amount_cents: 3100,
+    application_fee_amount: 155,
+    currency: "eur",
+    status: "requires_payment_method",
+  });
+  assert.deepStrictEqual(released, {
+    attached: false,
+    reservations_unavailable: true,
+  });
+  assert.strictEqual(paymentState.order.stripe_payment_intent_id, null);
+  assert.strictEqual(
+    paymentState.payments.some(
+      (payment) => payment.stripe_payment_intent_id === "pi_after_release",
+    ),
+    false,
+  );
+
   const routerSource = require("fs").readFileSync(
     require.resolve("../src/routers/r_stripe"),
     "utf8",
@@ -1870,15 +3015,1717 @@ const runReplacementPaymentContracts = async () => {
   );
 };
 
-runSucceededPaymentShopScopeContract()
-  .then(runTerminalPaymentShopScopeContract)
+const runRefundControllerContract = async () => {
+  const calls = [];
+  const initialRefunds = [];
+  const controller = buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => [{
+      id: 42,
+      shopid: 7,
+      payment_status: "paid",
+      payment_record_status: "succeeded",
+      stripe_payment_intent_id: "pi_42",
+      stripe_charge_id: "ch_42",
+      stripe_refund_id: null,
+    }],
+    getStripe: () => ({
+      refunds: {
+        create: async (params, options) => {
+          calls.push(["create", params, options]);
+          const refund = {
+            id: "re_42",
+            status: "pending",
+            amount: 2300,
+            payment_intent: "pi_42",
+            charge: "ch_42",
+            metadata: params.metadata,
+          };
+          initialRefunds.push(refund);
+          return refund;
+        },
+        list: async (params) => {
+          calls.push(["list", params]);
+          return { data: initialRefunds.map((refund) => ({ ...refund })), has_more: false };
+        },
+      },
+    }),
+    recordRefundState: async (input) => {
+      calls.push(["record", input]);
+      return { status: input.refund.status };
+    },
+  });
+  const response = makeResponse();
+
+  await controller({ params: { id: "42" }, shopid: 7 }, response);
+
+  assert.deepStrictEqual(calls[0], [
+    "list",
+    { charge: "ch_42", limit: 100 },
+  ]);
+  assert.deepStrictEqual(calls[1], [
+    "create",
+    {
+      payment_intent: "pi_42",
+      reverse_transfer: true,
+      refund_application_fee: true,
+      metadata: {
+        order_id: "42",
+        shop_id: "7",
+        refund_attempt_generation: "0",
+      },
+    },
+    { idempotencyKey: "refund-order-7-42" },
+  ]);
+  assert.deepStrictEqual(calls[2], [
+    "list",
+    { charge: "ch_42", limit: 100 },
+  ]);
+  assert.deepStrictEqual(calls[3], [
+    "record",
+    {
+      orderId: 42,
+      shopId: 7,
+      refund: {
+        id: "re_42",
+        status: "pending",
+        amount: 2300,
+        payment_intent: "pi_42",
+        charge: "ch_42",
+        metadata: {
+          order_id: "42",
+          shop_id: "7",
+          refund_attempt_generation: "0",
+        },
+        cumulative_succeeded_amount: 0,
+      },
+    },
+  ]);
+  assert.strictEqual(response.statusCode, 200);
+  assert.strictEqual(response.payload.message, "Demande de remboursement enregistree.");
+  assert.deepStrictEqual(response.payload.data, {
+    refundId: "re_42",
+    refundStatus: "pending",
+  });
+
+  const cumulativeCalls = [];
+  const cumulativeRows = [{
+    id: "re_partial",
+    status: "succeeded",
+    amount: 1200,
+    payment_intent: "pi_42",
+    charge: "ch_42",
+    metadata: {},
+  }];
+  const cumulativeController = buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => [{
+      id: 42,
+      shopid: 7,
+      payment_status: "paid",
+      payment_record_status: "succeeded",
+      stripe_payment_intent_id: "pi_42",
+      stripe_charge_id: "ch_42",
+      stripe_refund_id: null,
+    }],
+    getStripe: () => ({
+      refunds: {
+        create: async (params) => {
+          cumulativeCalls.push(["create", params]);
+          const refund = {
+            id: "re_remaining",
+            status: "succeeded",
+            amount: 1100,
+            payment_intent: "pi_42",
+            charge: "ch_42",
+            metadata: params.metadata,
+          };
+          cumulativeRows.push(refund);
+          return refund;
+        },
+        list: async (params) => {
+          cumulativeCalls.push(["list", params]);
+          return {
+            data: cumulativeRows.map((refund) => ({ ...refund })),
+            has_more: false,
+          };
+        },
+      },
+    }),
+    recordRefundState: async (input) => {
+      cumulativeCalls.push(["record", input]);
+      return { status: "succeeded" };
+    },
+  });
+  const cumulativeResponse = makeResponse();
+  await cumulativeController(
+    { params: { id: "42" }, shopid: 7 },
+    cumulativeResponse,
+  );
+  assert.deepStrictEqual(cumulativeCalls[0], [
+    "list",
+    { charge: "ch_42", limit: 100 },
+  ]);
+  assert.strictEqual(cumulativeCalls[1][0], "create");
+  assert.strictEqual(
+    Object.prototype.hasOwnProperty.call(cumulativeCalls[1][1], "amount"),
+    false,
+    "Stripe chooses the remaining refundable amount",
+  );
+  assert.deepStrictEqual(cumulativeCalls[2], [
+    "list",
+    { charge: "ch_42", limit: 100 },
+  ]);
+  assert.strictEqual(
+    cumulativeCalls[3][1].refund.cumulative_succeeded_amount,
+    2300,
+  );
+  assert.strictEqual(cumulativeResponse.payload.data.refundStatus, "succeeded");
+
+  for (const terminalStatus of ["failed", "canceled"]) {
+    const associatedHarness = makeRefundLifecycleHarness();
+    const associatedRefund = {
+      id: `re_full_${terminalStatus}_generation_0`,
+      status: "pending",
+      amount: 2300,
+      payment_intent: "pi_42",
+      charge: "ch_42",
+      metadata: {
+        order_id: "42",
+        shop_id: "7",
+        refund_attempt_generation: "0",
+      },
+    };
+    await associatedHarness.payments.recordRefundState({
+      orderId: 42,
+      shopId: 7,
+      refund: associatedRefund,
+    });
+    await associatedHarness.payments.recordRefundState({
+      orderId: 42,
+      shopId: 7,
+      refund: {
+        ...associatedRefund,
+        status: terminalStatus,
+        failure_reason: terminalStatus === "failed" ? "expired_or_canceled_card" : null,
+      },
+    });
+    assert.strictEqual(
+      associatedHarness.state.payment.stripe_refund_id,
+      associatedRefund.id,
+      `${terminalStatus} keeps the terminal attempt associated for audit`,
+    );
+
+    const associatedRows = [{
+      ...associatedRefund,
+      status: terminalStatus,
+      failure_reason: associatedHarness.state.payment.refund_failure_reason,
+    }];
+    const associatedCreates = [];
+    const associatedController = buildRefundPaidOrderController({
+      getPaidOrderForRefund: async () => [{
+        ...associatedHarness.state.order,
+        payment_record_status: associatedHarness.state.payment.status,
+        stripe_charge_id: associatedHarness.state.payment.stripe_charge_id,
+        stripe_refund_id: associatedHarness.state.payment.stripe_refund_id,
+        refund_status: associatedHarness.state.payment.refund_status,
+        refund_failure_reason: associatedHarness.state.payment.refund_failure_reason,
+        amount_cents: associatedHarness.state.payment.amount_cents,
+      }],
+      getStripe: () => ({
+        refunds: {
+          retrieve: async (refundId) => (
+            associatedRows.find((refund) => refund.id === refundId)
+          ),
+          list: async () => ({
+            data: associatedRows.map((refund) => ({ ...refund })),
+            has_more: false,
+          }),
+          create: async (params, options) => {
+            associatedCreates.push([params, options]);
+            const retry = {
+              id: `re_full_${terminalStatus}_generation_1`,
+              status: "pending",
+              amount: 2300,
+              payment_intent: "pi_42",
+              charge: "ch_42",
+              metadata: params.metadata,
+            };
+            associatedRows.push(retry);
+            return retry;
+          },
+        },
+      }),
+      recordRefundState: associatedHarness.payments.recordRefundState,
+    });
+    for (let replay = 0; replay < 2; replay += 1) {
+      const associatedResponse = makeResponse();
+      await associatedController(
+        { params: { id: "42" }, shopid: 7 },
+        associatedResponse,
+      );
+      assert.strictEqual(associatedResponse.statusCode, 200, `${terminalStatus}:${replay}`);
+      assert.strictEqual(
+        associatedResponse.payload.data.refundId,
+        `re_full_${terminalStatus}_generation_1`,
+      );
+      assert.strictEqual(associatedResponse.payload.data.refundStatus, "pending");
+    }
+    assert.strictEqual(associatedCreates.length, 1, terminalStatus);
+    assert.strictEqual(
+      associatedCreates[0][0].metadata.refund_attempt_generation,
+      "1",
+    );
+    assert.deepStrictEqual(associatedCreates[0][1], {
+      idempotencyKey: "refund-order-7-42-g1",
+    });
+  }
+
+  for (const immediateStatus of ["failed", "canceled"]) {
+    const immediateHarness = makeRefundLifecycleHarness();
+    const generationZero = {
+      id: `re_immediate_${immediateStatus}_generation_0`,
+      status: "pending",
+      amount: 2300,
+      payment_intent: "pi_42",
+      charge: "ch_42",
+      metadata: {
+        order_id: "42",
+        shop_id: "7",
+        refund_attempt_generation: "0",
+      },
+    };
+    await immediateHarness.payments.recordRefundState({
+      orderId: 42,
+      shopId: 7,
+      refund: generationZero,
+    });
+    await immediateHarness.payments.recordRefundState({
+      orderId: 42,
+      shopId: 7,
+      refund: {
+        ...generationZero,
+        status: "failed",
+        failure_reason: "original_failure",
+      },
+    });
+
+    const immediateRows = [{
+      ...generationZero,
+      status: "failed",
+      failure_reason: "original_failure",
+    }];
+    const immediateCreates = [];
+    const immediateController = buildRefundPaidOrderController({
+      getPaidOrderForRefund: async () => [{
+        ...immediateHarness.state.order,
+        payment_record_status: immediateHarness.state.payment.status,
+        stripe_charge_id: immediateHarness.state.payment.stripe_charge_id,
+        stripe_refund_id: immediateHarness.state.payment.stripe_refund_id,
+        refund_status: immediateHarness.state.payment.refund_status,
+        refund_failure_reason: immediateHarness.state.payment.refund_failure_reason,
+        amount_cents: immediateHarness.state.payment.amount_cents,
+      }],
+      getStripe: () => ({
+        refunds: {
+          retrieve: async (refundId) => (
+            immediateRows.find((refund) => refund.id === refundId)
+          ),
+          list: async () => ({
+            data: immediateRows.map((refund) => ({ ...refund })),
+            has_more: false,
+          }),
+          create: async (params, options) => {
+            const generation = immediateCreates.length + 1;
+            const refund = {
+              id: `re_immediate_${immediateStatus}_generation_${generation}`,
+              status: generation === 1 ? immediateStatus : "pending",
+              amount: 2300,
+              payment_intent: "pi_42",
+              charge: "ch_42",
+              failure_reason: generation === 1 ? "immediate_failure" : null,
+              metadata: params.metadata,
+            };
+            immediateCreates.push([params, options]);
+            immediateRows.push(refund);
+            return refund;
+          },
+        },
+      }),
+      recordRefundState: immediateHarness.payments.recordRefundState,
+    });
+
+    const terminalResponse = makeResponse();
+    await immediateController(
+      { params: { id: "42" }, shopid: 7 },
+      terminalResponse,
+    );
+    assert.strictEqual(terminalResponse.statusCode, 200, immediateStatus);
+    assert.strictEqual(
+      terminalResponse.payload.data.refundId,
+      `re_immediate_${immediateStatus}_generation_1`,
+    );
+    assert.strictEqual(terminalResponse.payload.data.refundStatus, immediateStatus);
+    assert.strictEqual(
+      immediateHarness.state.payment.stripe_refund_id,
+      `re_immediate_${immediateStatus}_generation_0`,
+      "an immediately-terminal retry does not replace the prior audit association",
+    );
+    assert.strictEqual(immediateHarness.state.payment.refund_status, "failed");
+    assert.strictEqual(
+      immediateHarness.state.payment.refund_failure_reason,
+      "original_failure",
+    );
+
+    for (let replay = 0; replay < 2; replay += 1) {
+      const nextResponse = makeResponse();
+      await immediateController(
+        { params: { id: "42" }, shopid: 7 },
+        nextResponse,
+      );
+      assert.strictEqual(nextResponse.statusCode, 200, `${immediateStatus}:${replay}`);
+      assert.strictEqual(
+        nextResponse.payload.data.refundId,
+        `re_immediate_${immediateStatus}_generation_2`,
+      );
+      assert.strictEqual(nextResponse.payload.data.refundStatus, "pending");
+    }
+    assert.strictEqual(immediateCreates.length, 2, immediateStatus);
+    assert.deepStrictEqual(
+      immediateCreates.map((call) => call[1].idempotencyKey),
+      [
+        "refund-order-7-42-g1",
+        "refund-order-7-42-g2",
+      ],
+    );
+  }
+
+  let associatedRequiresActionCreates = 0;
+  const associatedRequiresActionResponse = makeResponse();
+  await buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => [{
+      id: 42,
+      shopid: 7,
+      payment_status: "paid",
+      payment_record_status: "succeeded",
+      stripe_payment_intent_id: "pi_42",
+      stripe_charge_id: "ch_42",
+      amount_cents: 2300,
+      stripe_refund_id: "re_full_requires_action_generation_0",
+      refund_status: "requires_action",
+    }],
+    getStripe: () => ({
+      refunds: {
+        retrieve: async () => ({
+          id: "re_full_requires_action_generation_0",
+          status: "requires_action",
+          amount: 2300,
+          payment_intent: "pi_42",
+          charge: "ch_42",
+          metadata: {
+            order_id: "42",
+            shop_id: "7",
+            refund_attempt_generation: "0",
+          },
+        }),
+        list: async () => ({
+          data: [{
+            id: "re_full_requires_action_generation_0",
+            status: "requires_action",
+            amount: 2300,
+            payment_intent: "pi_42",
+            charge: "ch_42",
+            metadata: {
+              order_id: "42",
+              shop_id: "7",
+              refund_attempt_generation: "0",
+            },
+          }],
+          has_more: false,
+        }),
+        create: async () => {
+          associatedRequiresActionCreates += 1;
+          throw new Error("associated requires_action refund must be reused");
+        },
+      },
+    }),
+    recordRefundState: async ({ refund }) => ({ status: refund.status }),
+  })(
+    { params: { id: "42" }, shopid: 7 },
+    associatedRequiresActionResponse,
+  );
+  assert.strictEqual(associatedRequiresActionCreates, 0);
+  assert.strictEqual(associatedRequiresActionResponse.statusCode, 200);
+  assert.strictEqual(
+    associatedRequiresActionResponse.payload.data.refundId,
+    "re_full_requires_action_generation_0",
+  );
+  assert.strictEqual(
+    associatedRequiresActionResponse.payload.data.refundStatus,
+    "requires_action",
+  );
+
+  for (const nonFinalStatus of [
+    "pending",
+    "requires_action",
+    "failed",
+    "canceled",
+  ]) {
+    const nonFinalHarness = makeRefundLifecycleHarness();
+    const nonFinalController = buildRefundPaidOrderController({
+      getPaidOrderForRefund: async () => [{
+        ...nonFinalHarness.state.order,
+        payment_record_status: nonFinalHarness.state.payment.status,
+        stripe_charge_id: nonFinalHarness.state.payment.stripe_charge_id,
+        stripe_refund_id: nonFinalHarness.state.payment.stripe_refund_id,
+        refund_status: nonFinalHarness.state.payment.refund_status,
+        amount_cents: nonFinalHarness.state.payment.amount_cents,
+      }],
+      getStripe: () => ({
+        refunds: {
+          create: async () => ({
+            id: `re_remaining_${nonFinalStatus}`,
+            status: nonFinalStatus,
+            amount: 1100,
+            payment_intent: "pi_42",
+            charge: "ch_42",
+            metadata: { order_id: "42", shop_id: "7" },
+          }),
+          list: async () => ({
+            data: [{
+              id: "re_partial_succeeded",
+              status: "succeeded",
+              amount: 1200,
+            }, {
+              id: `re_remaining_${nonFinalStatus}`,
+              status: nonFinalStatus,
+              amount: 1100,
+            }],
+            has_more: false,
+          }),
+        },
+      }),
+      recordRefundState: nonFinalHarness.payments.recordRefundState,
+    });
+    const nonFinalResponse = makeResponse();
+    await nonFinalController(
+      { params: { id: "42" }, shopid: 7 },
+      nonFinalResponse,
+    );
+    assert.strictEqual(nonFinalResponse.statusCode, 200, nonFinalStatus);
+    assert.strictEqual(
+      nonFinalResponse.payload.message,
+      "Demande de remboursement enregistree.",
+      nonFinalStatus,
+    );
+    assert.deepStrictEqual(nonFinalResponse.payload.data, {
+      refundId: `re_remaining_${nonFinalStatus}`,
+      refundStatus: nonFinalStatus,
+      partial_refund: true,
+    });
+    assert.strictEqual(nonFinalHarness.state.payment.stripe_refund_id, null);
+    assert.strictEqual(nonFinalHarness.state.payment.refund_status, null);
+    assert.strictEqual(nonFinalHarness.state.payment.status, "succeeded");
+    assert.strictEqual(nonFinalHarness.state.order.payment_status, "paid");
+  }
+
+  const attemptPayment = {
+    id: 42,
+    shopid: 7,
+    payment_status: "paid",
+    payment_record_status: "succeeded",
+    stripe_payment_intent_id: "pi_42",
+    stripe_charge_id: "ch_42",
+    stripe_refund_id: null,
+    amount_cents: 2300,
+  };
+  const priorSucceeded = {
+    id: "re_prior_partial",
+    status: "succeeded",
+    amount: 1200,
+    payment_intent: "pi_42",
+    charge: "ch_42",
+    metadata: {},
+  };
+
+  for (const activeStatus of ["pending", "requires_action"]) {
+    let activeCreateCalls = 0;
+    const activeMetadata = {
+      order_id: "42",
+      shop_id: "7",
+    };
+    if (activeStatus === "pending") {
+      activeMetadata.refund_attempt_generation = "0";
+    }
+    const activeRows = [priorSucceeded, {
+      id: `re_${activeStatus}_generation_0`,
+      status: activeStatus,
+      amount: 1100,
+      payment_intent: "pi_42",
+      charge: "ch_42",
+      metadata: activeMetadata,
+    }];
+    const activeRetryController = buildRefundPaidOrderController({
+      getPaidOrderForRefund: async () => [attemptPayment],
+      getStripe: () => ({
+        refunds: {
+          list: async () => ({
+            data: activeRows.map((refund) => ({ ...refund })),
+            has_more: false,
+          }),
+          create: async () => {
+            activeCreateCalls += 1;
+            throw new Error(`${activeStatus} attempt must be reused`);
+          },
+        },
+      }),
+      recordRefundState: async () => ({ ignored: true, partial_refund: true }),
+    });
+    const activeRetryResponse = makeResponse();
+    await activeRetryController(
+      { params: { id: "42" }, shopid: 7 },
+      activeRetryResponse,
+    );
+    assert.strictEqual(activeCreateCalls, 0, activeStatus);
+    assert.strictEqual(activeRetryResponse.statusCode, 200, activeStatus);
+    assert.strictEqual(
+      activeRetryResponse.payload.data.refundId,
+      `re_${activeStatus}_generation_0`,
+    );
+    assert.strictEqual(activeRetryResponse.payload.data.refundStatus, activeStatus);
+  }
+
+  const selectorRows = [priorSucceeded, {
+    id: "re_historical_generation_0",
+    status: "failed",
+    amount: 1100,
+    payment_intent: "pi_42",
+    charge: "ch_42",
+    metadata: {
+      order_id: "42",
+      shop_id: "7",
+    },
+  }, {
+    id: "re_wrong_order",
+    status: "pending",
+    amount: 1100,
+    payment_intent: "pi_42",
+    charge: "ch_42",
+    metadata: {
+      order_id: "99",
+      shop_id: "7",
+      refund_attempt_generation: "not-a-generation",
+    },
+  }, {
+    id: "re_wrong_shop",
+    status: "pending",
+    amount: 1100,
+    payment_intent: "pi_42",
+    charge: "ch_42",
+    metadata: {
+      order_id: "42",
+      shop_id: "99",
+      refund_attempt_generation: "98",
+    },
+  }, {
+    id: "re_wrong_payment",
+    status: "pending",
+    amount: 1100,
+    payment_intent: "pi_other",
+    charge: "ch_42",
+    metadata: {
+      order_id: "42",
+      shop_id: "7",
+      refund_attempt_generation: "97",
+    },
+  }];
+  const selectorCreates = [];
+  const selectorController = buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => [attemptPayment],
+    getStripe: () => ({
+      refunds: {
+        list: async () => ({
+          data: selectorRows.map((refund) => ({ ...refund })),
+          has_more: false,
+        }),
+        create: async (params, options) => {
+          selectorCreates.push([params, options]);
+          const refund = {
+            id: "re_selector_generation_1",
+            status: "pending",
+            amount: 1100,
+            payment_intent: "pi_42",
+            charge: "ch_42",
+            metadata: params.metadata,
+          };
+          selectorRows.push(refund);
+          return refund;
+        },
+      },
+    }),
+    recordRefundState: async () => ({ ignored: true, partial_refund: true }),
+  });
+  const selectorResponse = makeResponse();
+  await selectorController(
+    { params: { id: "42" }, shopid: 7 },
+    selectorResponse,
+  );
+  assert.strictEqual(selectorResponse.statusCode, 200);
+  assert.strictEqual(selectorResponse.payload.data.refundId, "re_selector_generation_1");
+  assert.strictEqual(selectorCreates.length, 1);
+  assert.strictEqual(
+    selectorCreates[0][0].metadata.refund_attempt_generation,
+    "1",
+  );
+  assert.deepStrictEqual(selectorCreates[0][1], {
+    idempotencyKey: "refund-order-7-42-g1",
+  });
+
+  for (const terminalStatus of ["failed", "canceled"]) {
+    const rows = [priorSucceeded, {
+      id: `re_${terminalStatus}_generation_0`,
+      status: terminalStatus,
+      amount: 1100,
+      payment_intent: "pi_42",
+      charge: "ch_42",
+      metadata: {
+        order_id: "42",
+        shop_id: "7",
+        refund_attempt_generation: "0",
+      },
+    }];
+    const createCalls = [];
+    const retryController = buildRefundPaidOrderController({
+      getPaidOrderForRefund: async () => [attemptPayment],
+      getStripe: () => ({
+        refunds: {
+          list: async () => ({
+            data: rows.map((refund) => ({ ...refund })),
+            has_more: false,
+          }),
+          create: async (params, options) => {
+            createCalls.push([params, options]);
+            const retry = {
+              id: `re_${terminalStatus}_generation_1`,
+              status: "pending",
+              amount: 1100,
+              payment_intent: "pi_42",
+              charge: "ch_42",
+              metadata: params.metadata,
+            };
+            rows.push(retry);
+            return retry;
+          },
+        },
+      }),
+      recordRefundState: async () => ({ ignored: true, partial_refund: true }),
+    });
+
+    for (let replay = 0; replay < 2; replay += 1) {
+      const retryResponse = makeResponse();
+      await retryController(
+        { params: { id: "42" }, shopid: 7 },
+        retryResponse,
+      );
+      assert.strictEqual(retryResponse.statusCode, 200, `${terminalStatus}:${replay}`);
+      assert.strictEqual(
+        retryResponse.payload.data.refundId,
+        `re_${terminalStatus}_generation_1`,
+      );
+      assert.strictEqual(retryResponse.payload.data.refundStatus, "pending");
+    }
+    assert.strictEqual(createCalls.length, 1, terminalStatus);
+    assert.strictEqual(
+      Object.prototype.hasOwnProperty.call(createCalls[0][0], "amount"),
+      false,
+    );
+    assert.strictEqual(
+      createCalls[0][0].metadata.refund_attempt_generation,
+      "1",
+    );
+    assert.deepStrictEqual(createCalls[0][1], {
+      idempotencyKey: "refund-order-7-42-g1",
+    });
+  }
+
+  const concurrentRows = [{
+    id: "re_failed_concurrent_generation_0",
+    status: "failed",
+    amount: 2300,
+    payment_intent: "pi_42",
+    charge: "ch_42",
+    metadata: {
+      order_id: "42",
+      shop_id: "7",
+      refund_attempt_generation: "0",
+    },
+  }];
+  let concurrentPreflightLists = 0;
+  let releaseConcurrentPreflight;
+  const concurrentPreflightBarrier = new Promise((resolve) => {
+    releaseConcurrentPreflight = resolve;
+  });
+  const concurrentCreatesByKey = new Map();
+  let concurrentProviderCreates = 0;
+  const concurrentStripe = {
+    refunds: {
+      retrieve: async (refundId) => (
+        concurrentRows.find((refund) => refund.id === refundId)
+      ),
+      list: async () => {
+        concurrentPreflightLists += 1;
+        if (concurrentPreflightLists <= 2) {
+          if (concurrentPreflightLists === 2) releaseConcurrentPreflight();
+          await concurrentPreflightBarrier;
+          return {
+            data: concurrentRows.slice(0, 1).map((refund) => ({ ...refund })),
+            has_more: false,
+          };
+        }
+        return {
+          data: concurrentRows.map((refund) => ({ ...refund })),
+          has_more: false,
+        };
+      },
+      create: async (params, options) => {
+        const { idempotencyKey } = options;
+        if (!concurrentCreatesByKey.has(idempotencyKey)) {
+          concurrentProviderCreates += 1;
+          concurrentCreatesByKey.set(idempotencyKey, Promise.resolve().then(() => {
+            const refund = {
+              id: "re_concurrent_generation_1",
+              status: "pending",
+              amount: 2300,
+              payment_intent: "pi_42",
+              charge: "ch_42",
+              metadata: params.metadata,
+            };
+            concurrentRows.push(refund);
+            return refund;
+          }));
+        }
+        return concurrentCreatesByKey.get(idempotencyKey);
+      },
+    },
+  };
+  const concurrentController = buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => [{
+      ...attemptPayment,
+      stripe_refund_id: "re_failed_concurrent_generation_0",
+      refund_status: "failed",
+      refund_failure_reason: "expired_or_canceled_card",
+    }],
+    getStripe: () => concurrentStripe,
+    recordRefundState: async () => ({ ignored: true, partial_refund: true }),
+  });
+  const concurrentResponses = [makeResponse(), makeResponse()];
+  await Promise.all(concurrentResponses.map((concurrentResponse) => (
+    concurrentController(
+      { params: { id: "42" }, shopid: 7 },
+      concurrentResponse,
+    )
+  )));
+  assert.strictEqual(concurrentProviderCreates, 1);
+  assert.deepStrictEqual([...concurrentCreatesByKey.keys()], [
+    "refund-order-7-42-g1",
+  ]);
+  for (const concurrentResponse of concurrentResponses) {
+    assert.strictEqual(concurrentResponse.statusCode, 200);
+    assert.strictEqual(
+      concurrentResponse.payload.data.refundId,
+      "re_concurrent_generation_1",
+    );
+    assert.strictEqual(concurrentResponse.payload.data.refundStatus, "pending");
+  }
+
+  const replayCalls = [];
+  const replayController = buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => [{
+      id: 42,
+      shopid: 7,
+      payment_status: "paid",
+      payment_record_status: "succeeded",
+      stripe_payment_intent_id: "pi_42",
+      stripe_refund_id: "re_existing",
+      refund_status: "pending",
+    }],
+    getStripe: () => ({
+      refunds: {
+        create: async () => {
+          throw new Error("must not create a second refund");
+        },
+        retrieve: async (refundId) => {
+          replayCalls.push(["retrieve", refundId]);
+          return {
+            id: refundId,
+            status: "pending",
+            payment_intent: "pi_42",
+          };
+        },
+      },
+    }),
+    recordRefundState: async (input) => {
+      replayCalls.push(["record", input]);
+      return { status: input.refund.status };
+    },
+  });
+  const replayResponse = makeResponse();
+  await replayController({ params: { id: "42" }, shopid: 7 }, replayResponse);
+  assert.deepStrictEqual(replayCalls, [
+    ["retrieve", "re_existing"],
+    ["record", {
+      orderId: 42,
+      shopId: 7,
+      refund: {
+        id: "re_existing",
+        status: "pending",
+        payment_intent: "pi_42",
+      },
+    }],
+  ]);
+  assert.strictEqual(replayResponse.payload.data.refundId, "re_existing");
+  assert.strictEqual(replayResponse.payload.data.refundStatus, "pending");
+
+  const webhookFirstRefunds = [];
+  const webhookFirstController = buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => [{
+      id: 42,
+      shopid: 7,
+      payment_status: "paid",
+      payment_record_status: "succeeded",
+      stripe_payment_intent_id: "pi_42",
+      stripe_charge_id: "ch_42",
+      stripe_refund_id: null,
+    }],
+    getStripe: () => ({
+      refunds: {
+        list: async () => ({
+          data: webhookFirstRefunds,
+          has_more: false,
+        }),
+        create: async (params) => {
+          const refund = {
+            id: "re_42",
+            status: "pending",
+            amount: 2300,
+            charge: "ch_42",
+            payment_intent: "pi_42",
+            metadata: params.metadata,
+          };
+          webhookFirstRefunds.push(refund);
+          return refund;
+        },
+      },
+    }),
+    recordRefundState: async () => ({
+      status: "succeeded",
+      idempotent_replay: true,
+    }),
+  });
+  const webhookFirstResponse = makeResponse();
+  await webhookFirstController(
+    { params: { id: "42" }, shopid: 7 },
+    webhookFirstResponse,
+  );
+  assert.strictEqual(webhookFirstResponse.payload.message, "Commande remboursee.");
+  assert.strictEqual(webhookFirstResponse.payload.data.refundStatus, "succeeded");
+
+  for (const invalidId of ["42.0", "042", "-42", "0", "not-an-id"]) {
+    let lookups = 0;
+    const invalidResponse = makeResponse();
+    await buildRefundPaidOrderController({
+      getPaidOrderForRefund: async () => {
+        lookups += 1;
+        return [];
+      },
+      getStripe: () => {
+        throw new Error("Stripe must not be called");
+      },
+    })({ params: { id: invalidId }, shopid: 7 }, invalidResponse);
+    assert.strictEqual(invalidResponse.statusCode, 400);
+    assert.strictEqual(lookups, 0);
+  }
+
+  let stripeCalls = 0;
+  const legacyRefundedResponse = makeResponse();
+  await buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => [{
+      id: 42,
+      shopid: 7,
+      payment_status: "refunded",
+      payment_record_status: "refunded",
+      stripe_payment_intent_id: "pi_42",
+      stripe_refund_id: null,
+      refund_status: "succeeded",
+    }],
+    getStripe: () => {
+      stripeCalls += 1;
+      throw new Error("Stripe must not be called for a legacy terminal refund");
+    },
+  })({ params: { id: "42" }, shopid: 7 }, legacyRefundedResponse);
+  assert.strictEqual(stripeCalls, 0);
+  assert.strictEqual(legacyRefundedResponse.statusCode, 200);
+  assert.deepStrictEqual(legacyRefundedResponse.payload.data, {
+    refundId: null,
+    refundStatus: "succeeded",
+    already_refunded: true,
+  });
+
+  const legacyRow = {
+    id: 42,
+    shopid: 7,
+    payment_status: "refunded",
+    payment_record_status: "refunded",
+    stripe_payment_intent_id: "pi_42",
+    stripe_charge_id: null,
+    amount_cents: 2300,
+    stripe_refund_id: null,
+    refund_status: "legacy_unknown",
+  };
+  const legacyIdResponse = makeResponse();
+  let legacyIdCreates = 0;
+  await buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => [{
+      ...legacyRow,
+      stripe_refund_id: "re_legacy",
+    }],
+    getStripe: () => ({
+      refunds: {
+        create: async () => { legacyIdCreates += 1; },
+        retrieve: async () => ({
+          id: "re_legacy",
+          status: "pending",
+          amount: 2300,
+          payment_intent: "pi_42",
+        }),
+      },
+    }),
+    recordRefundState: async ({ refund }) => ({
+      status: refund.status,
+      business_status_unchanged: true,
+      order_status: ORDER_STATUSES.CANCELED,
+    }),
+  })({ params: { id: "42" }, shopid: 7 }, legacyIdResponse);
+  assert.strictEqual(legacyIdCreates, 0);
+  assert.strictEqual(legacyIdResponse.payload.data.refundStatus, "pending");
+  assert.strictEqual(legacyIdResponse.payload.data.business_status_unchanged, true);
+
+  for (const currentStatus of ["failed", "succeeded"]) {
+    const currentResponse = makeResponse();
+    await buildRefundPaidOrderController({
+      getPaidOrderForRefund: async () => [{
+        ...legacyRow,
+        stripe_refund_id: "re_legacy",
+      }],
+      getStripe: () => ({
+        refunds: {
+          create: async () => {
+            throw new Error("legacy_unknown must never create a refund");
+          },
+          retrieve: async () => ({
+            id: "re_legacy",
+            status: currentStatus,
+            amount: 2300,
+            payment_intent: "pi_42",
+          }),
+        },
+      }),
+      recordRefundState: async ({ refund }) => ({ status: refund.status }),
+    })({ params: { id: "42" }, shopid: 7 }, currentResponse);
+    assert.strictEqual(currentResponse.payload.data.refundStatus, currentStatus);
+  }
+
+  const legacyListCalls = [];
+  const legacyListResponse = makeResponse();
+  await buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => [legacyRow],
+    getStripe: () => ({
+      refunds: {
+        create: async () => {
+          throw new Error("legacy_unknown must never create a refund");
+        },
+        list: async (params) => {
+          legacyListCalls.push(params);
+          return {
+            data: [{
+              id: "re_listed",
+              status: "failed",
+              failure_reason: "declined",
+              amount: 2300,
+              payment_intent: "pi_42",
+              metadata: {},
+            }],
+          };
+        },
+      },
+    }),
+    recordRefundState: async ({ refund }) => ({
+      status: refund.status,
+      business_status_unchanged: true,
+      order_status: ORDER_STATUSES.CANCELED,
+    }),
+  })({ params: { id: "42" }, shopid: 7 }, legacyListResponse);
+  assert.deepStrictEqual(legacyListCalls, [{
+    payment_intent: "pi_42",
+    limit: 100,
+  }]);
+  assert.strictEqual(legacyListResponse.payload.data.refundId, "re_listed");
+  assert.strictEqual(legacyListResponse.payload.data.refundStatus, "failed");
+
+  for (const refunds of [
+    [],
+    [
+      { id: "re_1", status: "pending", amount: 2300, payment_intent: "pi_42" },
+      { id: "re_2", status: "pending", amount: 2300, payment_intent: "pi_42" },
+    ],
+  ]) {
+    const ambiguousResponse = makeResponse();
+    await buildRefundPaidOrderController({
+      getPaidOrderForRefund: async () => [legacyRow],
+      getStripe: () => ({
+        refunds: {
+          create: async () => {
+            throw new Error("legacy_unknown must never create a refund");
+          },
+          list: async () => ({ data: refunds }),
+        },
+      }),
+    })({ params: { id: "42" }, shopid: 7 }, ambiguousResponse);
+    assert.strictEqual(ambiguousResponse.statusCode, 409);
+    assert.strictEqual(ambiguousResponse.payload.data.refundStatus, "legacy_unknown");
+    assert.strictEqual(ambiguousResponse.payload.data.manual_review_required, true);
+  }
+
+  for (const listed of [
+    {
+      has_more: true,
+      data: [{ id: "re_visible", status: "pending", amount: 2300, payment_intent: "pi_42" }],
+    },
+    {
+      has_more: false,
+      data: [
+        {
+          id: "re_exact",
+          status: "pending",
+          amount: 2300,
+          payment_intent: "pi_42",
+          metadata: { order_id: "42", shop_id: "7" },
+        },
+        { id: "re_other", status: "pending", amount: 2300, payment_intent: "pi_42" },
+      ],
+    },
+  ]) {
+    const responseWithUnsafeList = makeResponse();
+    await buildRefundPaidOrderController({
+      getPaidOrderForRefund: async () => [legacyRow],
+      getStripe: () => ({
+        refunds: {
+          create: async () => {
+            throw new Error("legacy_unknown must never create a refund");
+          },
+          list: async () => listed,
+        },
+      }),
+    })({ params: { id: "42" }, shopid: 7 }, responseWithUnsafeList);
+    assert.strictEqual(responseWithUnsafeList.statusCode, 409);
+    assert.strictEqual(
+      responseWithUnsafeList.payload.data.manual_review_required,
+      true,
+    );
+  }
+
+  const succeededReplayCalls = [];
+  const succeededReplayResponse = makeResponse();
+  await buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => [{
+      id: 42,
+      shopid: 7,
+      payment_status: "refunded",
+      payment_record_status: "refunded",
+      stripe_payment_intent_id: "pi_42",
+      stripe_refund_id: "re_succeeded",
+      refund_status: "succeeded",
+    }],
+    getStripe: () => ({
+      refunds: {
+        create: async () => {
+          throw new Error("must never recreate an already-succeeded refund");
+        },
+        retrieve: async (refundId) => {
+          succeededReplayCalls.push(["retrieve", refundId]);
+          return { id: refundId, status: "succeeded", payment_intent: "pi_42" };
+        },
+      },
+    }),
+    recordRefundState: async (input) => {
+      succeededReplayCalls.push(["record", input.orderId, input.refund.id]);
+      return { status: "succeeded", idempotent_replay: true };
+    },
+  })({ params: { id: "42" }, shopid: 7 }, succeededReplayResponse);
+  assert.deepStrictEqual(succeededReplayCalls, [
+    ["retrieve", "re_succeeded"],
+    ["record", 42, "re_succeeded"],
+  ]);
+  assert.deepStrictEqual(succeededReplayResponse.payload.data, {
+    refundId: "re_succeeded",
+    refundStatus: "succeeded",
+    already_refunded: true,
+  });
+
+  let stateRead = 0;
+  const failedRaceRefunds = [];
+  const failedRaceResponse = makeResponse();
+  await buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => {
+      stateRead += 1;
+      if (stateRead === 1) {
+        return [{
+          id: 42,
+          shopid: 7,
+          payment_status: "paid",
+          payment_record_status: "succeeded",
+          stripe_payment_intent_id: "pi_42",
+          stripe_charge_id: "ch_42",
+          stripe_refund_id: null,
+        }];
+      }
+      return [{
+        id: 42,
+        shopid: 7,
+        payment_status: "paid",
+        payment_record_status: "succeeded",
+        stripe_payment_intent_id: "pi_42",
+        stripe_refund_id: "re_42",
+        refund_status: "failed",
+        refund_failure_reason: "expired_or_canceled_card",
+      }];
+    },
+    getStripe: () => ({
+      refunds: {
+        list: async () => ({
+          data: failedRaceRefunds,
+          has_more: false,
+        }),
+        create: async (params) => {
+          const refund = {
+            id: "re_42",
+            status: "pending",
+            amount: 2300,
+            charge: "ch_42",
+            payment_intent: "pi_42",
+            metadata: params.metadata,
+          };
+          failedRaceRefunds.push(refund);
+          return refund;
+        },
+      },
+    }),
+    recordRefundState: async () => ({ ignored: true }),
+  })({ params: { id: "42" }, shopid: 7 }, failedRaceResponse);
+  assert.strictEqual(stateRead, 2);
+  assert.strictEqual(failedRaceResponse.payload.data.refundStatus, "failed");
+  assert.notStrictEqual(failedRaceResponse.payload.message, "Commande remboursee.");
+
+  const failureController = buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => [{
+      stripe_payment_intent_id: "pi_42",
+      stripe_refund_id: null,
+    }],
+    getStripe: () => ({
+      refunds: {
+        create: async () => {
+          throw new Error("sk_test_must_not_be_exposed");
+        },
+      },
+    }),
+  });
+  const failureResponse = makeResponse();
+  await failureController({ params: { id: "42" }, shopid: 7 }, failureResponse);
+  assert.strictEqual(failureResponse.statusCode, 500);
+  assert.ok(!JSON.stringify(failureResponse.payload).includes("sk_test"));
+};
+
+const runRefundMigrationContract = async () => {
+  const fs = require("fs");
+  const path = require("path");
+  const migrationPath = path.join(
+    __dirname,
+    "../db/migrations/20260726190000_payment_refund_lifecycle.sql",
+  );
+  assert.strictEqual(fs.existsSync(migrationPath), true);
+  const migration = fs.readFileSync(migrationPath, "utf8");
+  const [up, down] = migration.split("-- migrate:down");
+  assert.match(up, /ADD COLUMN `stripe_refund_id` varchar\(191\) DEFAULT NULL/);
+  assert.match(up, /ADD COLUMN `refund_status` varchar\(32\) DEFAULT NULL/);
+  assert.match(up, /ADD COLUMN `refund_failure_reason` varchar\(191\) DEFAULT NULL/);
+  assert.match(up, /ADD UNIQUE KEY `stripe_refund_id` \(`stripe_refund_id`\)/);
+  assert.match(
+    up,
+    /UPDATE `payments`[\s\S]*SET `refund_status` = 'legacy_unknown'[\s\S]*WHERE `status` = 'refunded'[\s\S]*AND `refunded_at` IS NOT NULL/,
+  );
+  assert.doesNotMatch(up, /SET `refund_status` = 'succeeded'/);
+  assert.match(
+    up,
+    /SET `stripe_refund_id` = `stripe_charge_id`,[\s\S]*`stripe_charge_id` = NULL[\s\S]*`stripe_charge_id` LIKE 're/,
+  );
+  assert.ok(
+    up.indexOf("ADD UNIQUE KEY `stripe_refund_id`")
+      > up.indexOf("SET `stripe_refund_id` = `stripe_charge_id`"),
+  );
+  assert.match(down, /DROP INDEX `stripe_refund_id`/);
+  assert.match(down, /DROP COLUMN `refund_failure_reason`/);
+  assert.match(down, /DROP COLUMN `refund_status`/);
+  assert.match(down, /DROP COLUMN `stripe_refund_id`/);
+  assert.match(
+    down,
+    /SET `stripe_charge_id` = `stripe_refund_id`[\s\S]*`stripe_charge_id` IS NULL/,
+  );
+  const downRestore = down.match(/UPDATE `payments`([\s\S]*?)ALTER TABLE `payments`/);
+  assert.ok(downRestore);
+  assert.doesNotMatch(downRestore[1], /refund_status/);
+  assert.ok(
+    down.indexOf("DROP INDEX `stripe_refund_id`")
+      < down.indexOf("DROP COLUMN `stripe_refund_id`"),
+  );
+  assert.ok(
+    down.indexOf("DROP INDEX `stripe_refund_id`")
+      < down.indexOf("SET `stripe_charge_id` = `stripe_refund_id`"),
+  );
+
+  const paymentSource = fs.readFileSync(
+    require.resolve("../src/modules/m_payments"),
+    "utf8",
+  );
+  assert.doesNotMatch(
+    paymentSource,
+    /stripe_charge_id\s*=\s*COALESCE\(stripe_charge_id,\s*\?\)/,
+  );
+  assert.match(paymentSource, /SET stripe_refund_id = \?/);
+  assert.match(
+    paymentSource,
+    /getPaidOrderForRefund:[\s\S]*payments\.stripe_payment_intent_id = orders\.stripe_payment_intent_id[\s\S]*payments\.status IN \('succeeded', 'refunded'\)/,
+  );
+  assert.match(
+    paymentSource,
+    /\(orders\.payment_status = 'paid' AND payments\.status = 'succeeded'\)[\s\S]*OR \(orders\.payment_status = 'refunded' AND payments\.status = 'refunded'\)/,
+  );
+  assert.match(
+    paymentSource,
+    /findPaymentForOrderRefund:[\s\S]*stripe_payment_intent_id = \?[\s\S]*status IN \('succeeded', 'refunded'\)[\s\S]*FOR UPDATE/,
+  );
+};
+
+const runStripePaymentMaintenanceContracts = async () => {
+  const buildHarness = ({
+    rows,
+    retrieve,
+    cancel,
+    retrieveCharge,
+  }) => {
+    const events = [];
+    const errors = [];
+    let genericReleaseCount = 0;
+    const stripe = {
+      paymentIntents: {
+        retrieve: async (paymentIntentId) => {
+          events.push(["retrieve", paymentIntentId]);
+          return retrieve(paymentIntentId);
+        },
+        cancel: async (paymentIntentId) => {
+          events.push(["cancel", paymentIntentId]);
+          return cancel(paymentIntentId);
+        },
+      },
+      charges: {
+        retrieve: async (chargeId) => {
+          events.push(["retrieve-charge", chargeId]);
+          return retrieveCharge(chargeId);
+        },
+      },
+    };
+    const runMaintenance = buildStripePaymentMaintenance({
+      findExpiredStripePayments: async (now) => {
+        events.push(["scan", now]);
+        return rows;
+      },
+      getStripe: () => stripe,
+      markPaymentSucceeded: async (paymentIntent, charge) => {
+        events.push(["mark-succeeded", paymentIntent.id, charge && charge.id]);
+      },
+      markPaymentCanceled: async (paymentIntentId) => {
+        events.push(["mark-canceled", paymentIntentId]);
+      },
+      cancelOrphanedProvisionalStripeOrder: async (orderId, shopId) => {
+        events.push(["cancel-orphaned", orderId, shopId]);
+      },
+      releaseExpiredReservations: async () => {
+        genericReleaseCount += 1;
+        events.push(["release-generic"]);
+      },
+      logger: {
+        info: (...args) => events.push(["info", ...args]),
+        error: (...args) => errors.push(args),
+      },
+      now: () => "2026-07-24 12:00:00",
+    });
+    return {
+      errors,
+      events,
+      getGenericReleaseCount: () => genericReleaseCount,
+      runMaintenance,
+    };
+  };
+
+  let harness = buildHarness({
+    rows: [{
+      order_id: 41,
+      shop_id: 7,
+      stripe_payment_intent_id: "pi_cancel",
+    }],
+    retrieve: async (paymentIntentId) => ({
+      id: paymentIntentId,
+      status: "requires_payment_method",
+      latest_charge: null,
+    }),
+    cancel: async (paymentIntentId) => ({
+      id: paymentIntentId,
+      status: "canceled",
+    }),
+    retrieveCharge: async () => {
+      throw new Error("unexpected charge retrieval");
+    },
+  });
+  await harness.runMaintenance();
+  assert.deepStrictEqual(harness.events, [
+    ["scan", "2026-07-24 12:00:00"],
+    ["retrieve", "pi_cancel"],
+    ["cancel", "pi_cancel"],
+    ["mark-canceled", "pi_cancel"],
+    ["release-generic"],
+  ]);
+  assert.strictEqual(harness.getGenericReleaseCount(), 1);
+
+  harness = buildHarness({
+    rows: [{
+      order_id: 42,
+      shop_id: 7,
+      stripe_payment_intent_id: "pi_succeeded",
+    }],
+    retrieve: async (paymentIntentId) => ({
+      id: paymentIntentId,
+      status: "succeeded",
+      latest_charge: "ch_succeeded",
+    }),
+    cancel: async () => {
+      throw new Error("succeeded payments must never be canceled");
+    },
+    retrieveCharge: async (chargeId) => ({
+      id: chargeId,
+      payment_method_details: { type: "card" },
+    }),
+  });
+  await harness.runMaintenance();
+  assert.deepStrictEqual(harness.events, [
+    ["scan", "2026-07-24 12:00:00"],
+    ["retrieve", "pi_succeeded"],
+    ["retrieve-charge", "ch_succeeded"],
+    ["mark-succeeded", "pi_succeeded", "ch_succeeded"],
+    ["release-generic"],
+  ]);
+
+  harness = buildHarness({
+    rows: [{
+      order_id: 43,
+      shop_id: 7,
+      stripe_payment_intent_id: "pi_processing",
+    }],
+    retrieve: async (paymentIntentId) => ({
+      id: paymentIntentId,
+      status: "processing",
+      latest_charge: null,
+    }),
+    cancel: async () => {
+      throw new Error("processing payments must never be canceled");
+    },
+    retrieveCharge: async () => {
+      throw new Error("processing payments have no charge");
+    },
+  });
+  await harness.runMaintenance();
+  assert.strictEqual(
+    harness.events.some(([event]) => ["cancel", "mark-canceled", "mark-succeeded"].includes(event)),
+    false,
+  );
+  assert.strictEqual(harness.events.at(-1)[0], "release-generic");
+  assert.strictEqual(harness.getGenericReleaseCount(), 1);
+
+  harness = buildHarness({
+    rows: [
+      {
+        order_id: 44,
+        shop_id: 7,
+        stripe_payment_intent_id: "pi_retrieve_error",
+      },
+      {
+        order_id: 45,
+        shop_id: 7,
+        stripe_payment_intent_id: "pi_cancel_error",
+      },
+      {
+        order_id: 46,
+        shop_id: 8,
+        stripe_payment_intent_id: "pi_already_canceled",
+      },
+    ],
+    retrieve: async (paymentIntentId) => {
+      if (paymentIntentId === "pi_retrieve_error") {
+        const error = new Error("Stripe unavailable");
+        error.secret = "sk_test_must_not_be_logged";
+        throw error;
+      }
+      return {
+        id: paymentIntentId,
+        status: paymentIntentId === "pi_already_canceled"
+          ? "canceled"
+          : "requires_confirmation",
+        latest_charge: null,
+      };
+    },
+    cancel: async (paymentIntentId) => {
+      if (paymentIntentId === "pi_cancel_error") {
+        const error = new Error("Cancellation unavailable");
+        error.secret = "sk_test_must_not_be_logged";
+        throw error;
+      }
+      return { id: paymentIntentId, status: "canceled" };
+    },
+    retrieveCharge: async () => null,
+  });
+  await harness.runMaintenance();
+  assert.deepStrictEqual(
+    harness.events.filter(([event]) => event === "mark-canceled"),
+    [["mark-canceled", "pi_already_canceled"]],
+    "orders after failed Stripe calls are still processed independently",
+  );
+  assert.strictEqual(harness.errors.length, 2);
+  assert.ok(harness.errors.every((args) => !JSON.stringify(args).includes("sk_test")));
+  assert.ok(harness.errors.every((args) => JSON.stringify(args).includes("order_id")));
+  assert.strictEqual(harness.getGenericReleaseCount(), 1);
+
+  harness = buildHarness({
+    rows: [{
+      order_id: 47,
+      shop_id: 8,
+      stripe_payment_intent_id: "pi_bad_cancel_response",
+    }],
+    retrieve: async (paymentIntentId) => ({
+      id: paymentIntentId,
+      status: "requires_action",
+      latest_charge: null,
+    }),
+    cancel: async (paymentIntentId) => ({
+      id: paymentIntentId,
+      status: "requires_action",
+    }),
+    retrieveCharge: async () => null,
+  });
+  await harness.runMaintenance();
+  assert.strictEqual(
+    harness.events.some(([event]) => event === "mark-canceled"),
+    false,
+    "local stock remains reserved until Stripe confirms cancellation",
+  );
+  assert.strictEqual(harness.errors.length, 1);
+  assert.strictEqual(harness.getGenericReleaseCount(), 1);
+
+  harness = buildHarness({
+    rows: [{
+      order_id: 48,
+      shop_id: 8,
+      stripe_payment_intent_id: null,
+    }],
+    retrieve: async () => {
+      throw new Error("Stripe must not be called for an orphan order");
+    },
+    cancel: async () => {
+      throw new Error("Stripe must not be called for an orphan order");
+    },
+    retrieveCharge: async () => null,
+  });
+  await harness.runMaintenance();
+  assert.deepStrictEqual(harness.events, [
+    ["scan", "2026-07-24 12:00:00"],
+    ["cancel-orphaned", 48, 8],
+    ["release-generic"],
+  ]);
+  assert.deepStrictEqual(harness.errors, []);
+};
+
+const runNonOverlappingRunnerContract = async () => {
+  const taskResolvers = [];
+  let taskCalls = 0;
+  const logs = [];
+  const run = buildNonOverlappingRunner(
+    async () => {
+      taskCalls += 1;
+      return new Promise((resolve) => taskResolvers.push(resolve));
+    },
+    { info: (...args) => logs.push(args) },
+  );
+
+  const firstTick = run();
+  const overlappingTick = await run();
+  assert.strictEqual(taskCalls, 1);
+  assert.deepStrictEqual(overlappingTick, { skipped: true });
+  assert.strictEqual(logs.length, 1);
+
+  taskResolvers.shift()("first complete");
+  assert.strictEqual(await firstTick, "first complete");
+
+  const nextTick = run();
+  assert.strictEqual(taskCalls, 2);
+  taskResolvers.shift()("second complete");
+  assert.strictEqual(await nextTick, "second complete");
+};
+
+const runExpiredStripePaymentQueryContract = async () => {
+  const calls = [];
+  const rows = [{
+    order_id: 42,
+    shop_id: 7,
+    stripe_payment_intent_id: "pi_42",
+  }];
+  const payments = buildPaymentModule({
+    repository: {
+      findExpiredStripePayments: async (options) => {
+        calls.push(options);
+        return rows;
+      },
+    },
+    now: () => new Date("2026-07-24T12:00:00.000Z"),
+  });
+
+  assert.deepStrictEqual(await payments.findExpiredStripePayments(), rows);
+  assert.deepStrictEqual(calls[0], { now: "2026-07-24 12:00:00" });
+  await payments.findExpiredStripePayments("2026-07-24 13:00:00");
+  assert.deepStrictEqual(calls[1], { now: "2026-07-24 13:00:00" });
+  await payments.findExpiredStripePayments(new Date("2026-07-24T12:00:00.000Z"));
+  assert.deepStrictEqual(calls[2], { now: "2026-07-24 12:00:00" });
+
+  const source = require("fs").readFileSync(
+    require.resolve("../src/modules/m_payments"),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /SELECT DISTINCT orders\.id AS order_id,[\s\S]*orders\.shopid AS shop_id,[\s\S]*COALESCE\(\s*payments\.stripe_payment_intent_id,\s*orders\.stripe_payment_intent_id\s*\)[\s\S]*LEFT JOIN payments[\s\S]*JOIN order_stock_reservations reservations[\s\S]*payment_provider = 'stripe'[\s\S]*payment_status = 'requires_payment'[\s\S]*reservations\.status = 'reserved'[\s\S]*reservations\.expires_at <= \?[\s\S]*ORDER BY orders\.id/,
+  );
+  assert.match(
+    source,
+    /updateOrderSucceeded:[\s\S]*paymentIntentId[\s\S]*payment_status = 'requires_payment'[\s\S]*stripe_payment_intent_id = \?/,
+  );
+  assert.match(
+    source,
+    /updateOrderTerminal:[\s\S]*paymentIntentId[\s\S]*payment_status = 'requires_payment'[\s\S]*stripe_payment_intent_id = \?/,
+  );
+  assert.match(
+    source,
+    /cancelOrphanedProvisionalOrder:[\s\S]*status = \?[\s\S]*payment_status = 'requires_payment'[\s\S]*payment_provider = 'stripe'[\s\S]*stripe_payment_intent_id IS NULL/,
+  );
+};
+
+const runStaleExpiredStripeIntentContract = async () => {
+  const prepareReplacementHarness = () => {
+    const harness = makeStripeLifecycleHarness();
+    harness.getState().orders[0].stripe_payment_intent_id = "pi_new";
+    harness.getState().payments[0].stripe_payment_intent_id = "pi_old";
+    harness.getState().payments.push({
+      order_id: 42,
+      shop_id: 7,
+      stripe_payment_intent_id: "pi_new",
+      status: "requires_payment_method",
+    });
+    return harness;
+  };
+  const assertReplacementUntouched = (harness) => {
+    assert.strictEqual(harness.getState().orders[0].payment_status, "requires_payment");
+    assert.strictEqual(harness.getState().orders[0].stripe_payment_intent_id, "pi_new");
+    assert.strictEqual(harness.getState().reservations[0].status, "reserved");
+    assert.strictEqual(harness.getState().products.get(10), 8);
+    assert.strictEqual(harness.getState().movements.length, 0);
+    assert.strictEqual(
+      harness.getState().payments.find(
+        (payment) => payment.stripe_payment_intent_id === "pi_new",
+      ).status,
+      "requires_payment_method",
+    );
+  };
+  const runScan = async (harness, stripeStatus) => buildStripePaymentMaintenance({
+    findExpiredStripePayments: async () => [{
+      order_id: 42,
+      shop_id: 7,
+      stripe_payment_intent_id: "pi_old",
+    }],
+    getStripe: () => ({
+      paymentIntents: {
+        retrieve: async () => ({
+          id: "pi_old",
+          status: stripeStatus,
+          latest_charge: null,
+          payment_method_types: ["card"],
+        }),
+      },
+      charges: { retrieve: async () => null },
+    }),
+    markPaymentSucceeded: harness.payments.markPaymentSucceeded,
+    markPaymentCanceled: harness.payments.markPaymentCanceled,
+    releaseExpiredReservations: async () => 0,
+    logger: { error: () => {}, info: () => {} },
+    now: () => "2026-07-24 12:00:00",
+  })();
+
+  let harness = prepareReplacementHarness();
+  await runScan(harness, "canceled");
+  assertReplacementUntouched(harness);
+  assert.strictEqual(
+    harness.getState().payments.find(
+      (payment) => payment.stripe_payment_intent_id === "pi_old",
+    ).status,
+    "requires_payment",
+  );
+
+  harness = prepareReplacementHarness();
+  await runScan(harness, "succeeded");
+  assertReplacementUntouched(harness);
+  assert.strictEqual(
+    harness.getState().payments.find(
+      (payment) => payment.stripe_payment_intent_id === "pi_old",
+    ).status,
+    "requires_payment",
+  );
+};
+
+runStripePaymentMaintenanceContracts()
+  .then(runNonOverlappingRunnerContract)
+  .then(runExpiredStripePaymentQueryContract)
+  .then(runStaleExpiredStripeIntentContract)
+  .then(runSucceededPaymentShopScopeContract)
+  .then(runPendingPaymentShopScopeContract)
+  .then(runStripeWebhookReconciliationContract)
   .then(runCanceledPaymentUsesSuppliedOrderLockContract)
-  .then(runRefundLockOrderContract)
+  .then(runPendingRefundLifecycleContract)
+  .then(runPartialRefundDoesNotClaimAssociationContract)
+  .then(runCumulativeRefundWebhookLifecycleContract)
+  .then(runRefundPaginationContract)
+  .then(runSucceededRefundLifecycleContract)
+  .then(runFailedRefundLifecycleContract)
+  .then(runRefundWebhookLookupContract)
+  .then(runRefundControllerContract)
+  .then(runRefundMigrationContract)
   .then(runPaymentEditRaceContract)
   .then(runStripeReservationContracts)
   .then(runCashRegisterArchiveContract)
   .then(runStripeCheckoutControllerContracts)
   .then(runStripeCancellationControllerContracts)
+  .then(runPayAtCounterIntentRaceContract)
   .then(runReplacementPaymentContracts)
   .then(() => console.log("stripePayment tests passed"))
   .catch((error) => {

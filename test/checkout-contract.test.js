@@ -1662,7 +1662,24 @@ const makeCheckoutHarness = ({
     getProducts: async ({ productIds }) => productIds
       .filter((id) => state.products.has(id))
       .map((id) => ({ id, shopid: 7, name: `Product ${id}`, price: id === 10 ? 10 : 2, stock: state.products.get(id), archived: 0 })),
-    lockExpiredReservations: async () => [],
+    lockExpiredReservations: async ({ now }) => state.reservations
+      .filter((row) => (
+        row.status === "reserved"
+        && row.expires_at != null
+        && row.expires_at <= now
+      ))
+      .map((row) => {
+        const order = state.orders.find((candidate) => candidate.id === row.order_id) || {};
+        return {
+          ...row,
+          payment_provider: order.payment_provider,
+          payment_status: order.payment_status,
+        };
+      })
+      .filter((row) => !(
+        row.payment_provider === "stripe"
+        && row.payment_status === "requires_payment"
+      )),
     lockReservationsByOrder: async ({ orderId }) => state.reservations
       .filter((row) => row.order_id === orderId)
       .sort((left, right) => left.product_id - right.product_id),
@@ -2125,6 +2142,12 @@ const runReservationContracts = async () => {
   assert.ok(releasing.getState().reservations.every((row) => row.status === "released"));
 
   const expired = makeCheckoutHarness();
+  expired.getState().orders.push({
+    id: 1,
+    shopid: 7,
+    payment_provider: null,
+    payment_status: "unpaid",
+  });
   expired.getState().products.set(10, 8);
   expired.getState().reservations.push({
     id: 1,
@@ -2134,11 +2157,29 @@ const runReservationContracts = async () => {
     status: "reserved",
     expires_at: "2026-07-24 11:00:00",
   });
-  expired.repository.lockExpiredReservations = async () => expired.getState().reservations
-    .filter((row) => row.status === "reserved");
   assert.strictEqual(await expired.checkout.releaseExpiredReservations(), 1);
   assert.strictEqual(await expired.checkout.releaseExpiredReservations(), 0);
   assert.strictEqual(expired.getState().products.get(10), 10);
+
+  const pendingStripe = makeCheckoutHarness();
+  pendingStripe.getState().orders.push({
+    id: 2,
+    shopid: 7,
+    payment_provider: "stripe",
+    payment_status: "requires_payment",
+  });
+  pendingStripe.getState().products.set(10, 8);
+  pendingStripe.getState().reservations.push({
+    id: 2,
+    order_id: 2,
+    product_id: 10,
+    quantity: 2,
+    status: "reserved",
+    expires_at: "2026-07-24 11:00:00",
+  });
+  assert.strictEqual(await pendingStripe.checkout.releaseExpiredReservations(), 0);
+  assert.strictEqual(pendingStripe.getState().reservations[0].status, "reserved");
+  assert.strictEqual(pendingStripe.getState().products.get(10), 8);
 
   const legacy = makeCheckoutHarness();
   legacy.getState().orders.push({
@@ -2367,7 +2408,23 @@ const runCheckoutApiSurfaceContracts = async () => {
   assert.ok(orderControllerSource.includes("buildCheckoutController"));
   assert.ok(checkoutModuleSource.includes("client_order_token"));
   assert.ok(checkoutModuleSource.includes("selected_choice_ids"));
-  assert.match(serverSource, /setInterval\([\s\S]*releaseExpiredReservations[\s\S]*60 \* 1000/);
+  assert.match(
+    checkoutModuleSource,
+    /NOT \(\s*COALESCE\(orders\.payment_provider, ''\) = 'stripe'\s*AND COALESCE\(orders\.payment_status, ''\) = 'requires_payment'\s*\)/,
+  );
+  assert.match(
+    serverSource,
+    /const \{\s*buildNonOverlappingRunner,\s*runStripePaymentMaintenance,\s*\} = require\("\.\/src\/services\/stripePaymentMaintenance"\);/,
+  );
+  assert.match(
+    serverSource,
+    /const runScheduledStripePaymentMaintenance = buildNonOverlappingRunner\(\s*runStripePaymentMaintenance,\s*console,\s*\);/,
+  );
+  assert.match(
+    serverSource,
+    /setInterval\([\s\S]*runScheduledStripePaymentMaintenance\(\)[\s\S]*60 \* 1000/,
+  );
+  assert.ok(!serverSource.includes('require("./src/modules/m_checkout")'));
   assert.match(serverSource, /\.unref\(\)/);
   assert.ok(require("../package.json").scripts.test.includes("reservation-lifecycle.test.js"));
 };

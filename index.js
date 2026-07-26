@@ -10,7 +10,10 @@ const routerShop = require("./src/routers/r_shop");
 const routerPrinting = require("./src/routers/r_printing");
 const routerStripe = require("./src/routers/r_stripe");
 const routerCustomizations = require("./src/routers/r_customizations");
-const { releaseExpiredReservations } = require("./src/modules/m_checkout");
+const {
+  buildNonOverlappingRunner,
+  runStripePaymentMaintenance,
+} = require("./src/services/stripePaymentMaintenance");
 const { envPORT, envPUBLICIMAGEPATH } = require("./src/helpers/env");
 const prefix = require("./src/config/prefix");
 
@@ -31,9 +34,13 @@ if (!fs.existsSync(customizationChoicesPath)) {
 }
 
 const app = express();
+const runScheduledStripePaymentMaintenance = buildNonOverlappingRunner(
+  runStripePaymentMaintenance,
+  console,
+);
 const reservationReleaseTimer = setInterval(() => {
-  releaseExpiredReservations().catch((error) => {
-    console.error("Expired reservation release failed", error);
+  runScheduledStripePaymentMaintenance().catch((error) => {
+    console.error("Stripe payment maintenance failed", error);
   });
 }, 60 * 1000);
 reservationReleaseTimer.unref();
