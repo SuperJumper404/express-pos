@@ -672,12 +672,22 @@ const runStripeWebhookReconciliationContract = async () => {
         retrieve: async (id) => ({ ...currentPaymentIntent, id }),
       },
       charges: {
-        retrieve: async (id) => ({ id, amount_refunded: 2300 }),
+        retrieve: async (id) => ({ id }),
       },
       refunds: {
         retrieve: async (id) => {
           actions.push(["retrieve-refund", id]);
           return { ...currentRefund, id };
+        },
+        list: async (params) => {
+          actions.push(["list-refunds", params]);
+          return {
+            data: [
+              { id: "re_previous", status: "succeeded", amount: 1200 },
+              { id: "re_42", status: "succeeded", amount: 1100 },
+            ],
+            has_more: false,
+          };
         },
       },
     }),
@@ -698,7 +708,7 @@ const runStripeWebhookReconciliationContract = async () => {
         "refund",
         refund.id,
         refund.status,
-        refund.cumulative_amount_refunded,
+        refund.cumulative_succeeded_amount,
       ]);
     },
   });
@@ -757,6 +767,7 @@ const runStripeWebhookReconciliationContract = async () => {
   });
   assert.deepStrictEqual(actions, [
     ["retrieve-refund", "re_42"],
+    ["list-refunds", { charge: "ch_42", limit: 100 }],
     ["refund", "re_42", "succeeded", 2300],
   ]);
 
@@ -952,7 +963,7 @@ const runPartialRefundDoesNotClaimAssociationContract = async () => {
     id: "re_partial_succeeded",
     status: "succeeded",
     amount: 1200,
-    cumulative_amount_refunded: 1200,
+    cumulative_succeeded_amount: 1200,
     payment_intent: "pi_42",
     charge: "ch_42",
     metadata: { order_id: "42", shop_id: "7" },
@@ -970,7 +981,7 @@ const runPartialRefundDoesNotClaimAssociationContract = async () => {
     id: "re_remaining_after_partial",
     status: "succeeded",
     amount: 1100,
-    cumulative_amount_refunded: 2300,
+    cumulative_succeeded_amount: 2300,
     payment_intent: "pi_42",
     charge: "ch_42",
     metadata: { order_id: "42", shop_id: "7" },
@@ -980,6 +991,157 @@ const runPartialRefundDoesNotClaimAssociationContract = async () => {
   assert.strictEqual(harness.state.payment.refund_status, "succeeded");
   assert.strictEqual(harness.state.payment.status, "refunded");
   assert.strictEqual(harness.state.order.payment_status, "refunded");
+};
+
+const runCumulativeRefundWebhookLifecycleContract = async () => {
+  const harness = makeRefundLifecycleHarness();
+  const refunds = {
+    re_a: {
+      id: "re_a",
+      status: "succeeded",
+      amount: 1200,
+      payment_intent: "pi_42",
+      charge: "ch_42",
+      metadata: { order_id: "42", shop_id: "7" },
+    },
+    re_b: {
+      id: "re_b",
+      status: "pending",
+      amount: 1100,
+      payment_intent: "pi_42",
+      charge: "ch_42",
+      metadata: { order_id: "42", shop_id: "7" },
+    },
+  };
+  const listCalls = [];
+  const handler = buildStripeWebhookEventHandler({
+    getStripe: () => ({
+      refunds: {
+        retrieve: async (refundId) => ({ ...refunds[refundId] }),
+        list: async (params) => {
+          listCalls.push(params);
+          return {
+            data: Object.values(refunds).map((refund) => ({ ...refund })),
+            has_more: false,
+          };
+        },
+      },
+    }),
+    reconcileStripeRefund: harness.payments.reconcileStripeRefund,
+  });
+
+  await handler({ type: "refund.updated", data: { object: { id: "re_a" } } });
+  assert.strictEqual(harness.state.payment.stripe_refund_id, null);
+  assert.strictEqual(harness.state.payment.status, "succeeded");
+  assert.strictEqual(harness.state.order.payment_status, "paid");
+
+  refunds.re_b.status = "failed";
+  await handler({ type: "refund.failed", data: { object: { id: "re_b" } } });
+  assert.strictEqual(harness.state.payment.stripe_refund_id, null);
+  assert.strictEqual(harness.state.payment.status, "succeeded");
+  assert.strictEqual(harness.state.order.payment_status, "paid");
+
+  refunds.re_b.status = "succeeded";
+  await handler({ type: "refund.updated", data: { object: { id: "re_b" } } });
+  assert.strictEqual(harness.state.payment.stripe_refund_id, "re_b");
+  assert.strictEqual(harness.state.payment.status, "refunded");
+  assert.strictEqual(harness.state.order.payment_status, "refunded");
+  assert.deepStrictEqual(listCalls, [
+    { charge: "ch_42", limit: 100 },
+    { charge: "ch_42", limit: 100 },
+    { charge: "ch_42", limit: 100 },
+  ]);
+};
+
+const runRefundPaginationContract = async () => {
+  const listCalls = [];
+  let reconciled = null;
+  const handler = buildStripeWebhookEventHandler({
+    getStripe: () => ({
+      refunds: {
+        retrieve: async () => ({
+          id: "re_b",
+          status: "succeeded",
+          amount: 1100,
+          charge: "ch_42",
+        }),
+        list: async (params) => {
+          listCalls.push(params);
+          if (!params.starting_after) {
+            return {
+              data: [{ id: "re_a", status: "succeeded", amount: 1200 }],
+              has_more: true,
+            };
+          }
+          return {
+            data: [{ id: "re_b", status: "succeeded", amount: 1100 }],
+            has_more: false,
+          };
+        },
+      },
+    }),
+    reconcileStripeRefund: async (refund) => {
+      reconciled = refund;
+    },
+  });
+  await handler({ type: "refund.updated", data: { object: { id: "re_b" } } });
+  assert.deepStrictEqual(listCalls, [
+    { charge: "ch_42", limit: 100 },
+    { charge: "ch_42", limit: 100, starting_after: "re_a" },
+  ]);
+  assert.strictEqual(reconciled.cumulative_succeeded_amount, 2300);
+
+  const malformedHandler = buildStripeWebhookEventHandler({
+    getStripe: () => ({
+      refunds: {
+        retrieve: async () => ({
+          id: "re_b",
+          status: "succeeded",
+          amount: 1100,
+          charge: "ch_42",
+        }),
+        list: async () => ({ data: [], has_more: true }),
+      },
+    }),
+    reconcileStripeRefund: async () => {
+      throw new Error("malformed pagination must not reconcile");
+    },
+  });
+  await assert.rejects(
+    () => malformedHandler({
+      type: "refund.updated",
+      data: { object: { id: "re_b" } },
+    }),
+    /Stripe refund pagination is incomplete/,
+  );
+
+  let reconciliationsAfterApiError = 0;
+  const apiErrorHandler = buildStripeWebhookEventHandler({
+    getStripe: () => ({
+      refunds: {
+        retrieve: async () => ({
+          id: "re_b",
+          status: "succeeded",
+          amount: 1100,
+          charge: "ch_42",
+        }),
+        list: async () => {
+          throw new Error("Stripe list unavailable");
+        },
+      },
+    }),
+    reconcileStripeRefund: async () => {
+      reconciliationsAfterApiError += 1;
+    },
+  });
+  await assert.rejects(
+    () => apiErrorHandler({
+      type: "refund.updated",
+      data: { object: { id: "re_b" } },
+    }),
+    /Stripe list unavailable/,
+  );
+  assert.strictEqual(reconciliationsAfterApiError, 0);
 };
 
 const runSucceededRefundLifecycleContract = async () => {
@@ -2815,11 +2977,15 @@ const runRefundControllerContract = async () => {
             metadata: { order_id: "42", shop_id: "7" },
           };
         },
-      },
-      charges: {
-        retrieve: async (chargeId) => {
-          cumulativeCalls.push(["charge", chargeId]);
-          return { id: chargeId, amount_refunded: 2300 };
+        list: async (params) => {
+          cumulativeCalls.push(["list", params]);
+          return {
+            data: [
+              { id: "re_partial", status: "succeeded", amount: 1200 },
+              { id: "re_remaining", status: "succeeded", amount: 1100 },
+            ],
+            has_more: false,
+          };
         },
       },
     }),
@@ -2839,9 +3005,12 @@ const runRefundControllerContract = async () => {
     false,
     "Stripe chooses the remaining refundable amount",
   );
-  assert.deepStrictEqual(cumulativeCalls[1], ["charge", "ch_42"]);
+  assert.deepStrictEqual(cumulativeCalls[1], [
+    "list",
+    { charge: "ch_42", limit: 100 },
+  ]);
   assert.strictEqual(
-    cumulativeCalls[2][1].refund.cumulative_amount_refunded,
+    cumulativeCalls[2][1].refund.cumulative_succeeded_amount,
     2300,
   );
   assert.strictEqual(cumulativeResponse.payload.data.refundStatus, "succeeded");
@@ -3689,6 +3858,8 @@ runStripePaymentMaintenanceContracts()
   .then(runCanceledPaymentUsesSuppliedOrderLockContract)
   .then(runPendingRefundLifecycleContract)
   .then(runPartialRefundDoesNotClaimAssociationContract)
+  .then(runCumulativeRefundWebhookLifecycleContract)
+  .then(runRefundPaginationContract)
   .then(runSucceededRefundLifecycleContract)
   .then(runFailedRefundLifecycleContract)
   .then(runRefundWebhookLookupContract)

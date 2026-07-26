@@ -637,6 +637,66 @@ const stripeObjectId = (value) => (
   typeof value === "string" ? value : value && value.id
 );
 
+const getCumulativeSucceededRefundAmount = async (
+  stripe,
+  chargeId,
+  expectedRefundId,
+) => {
+  if (!stripe.refunds || typeof stripe.refunds.list !== "function") {
+    throw new Error("Stripe refund listing is unavailable");
+  }
+  let startingAfter = null;
+  let total = 0;
+  const seenCursors = new Set();
+  const seenRefundIds = new Set();
+  const refundStatuses = new Set([
+    "pending",
+    "requires_action",
+    "succeeded",
+    "failed",
+    "canceled",
+  ]);
+  for (;;) {
+    const params = { charge: chargeId, limit: 100 };
+    if (startingAfter) params.starting_after = startingAfter;
+    const page = await stripe.refunds.list(params);
+    if (!page || !Array.isArray(page.data) || typeof page.has_more !== "boolean") {
+      throw new Error("Stripe refund pagination is malformed");
+    }
+    for (const candidate of page.data) {
+      const refundId = stripeObjectId(candidate);
+      if (!refundId
+        || seenRefundIds.has(refundId)
+        || !refundStatuses.has(candidate.status)) {
+        throw new Error("Stripe refund page contains invalid data");
+      }
+      seenRefundIds.add(refundId);
+      if (candidate.status !== "succeeded") continue;
+      const amount = Number(candidate.amount);
+      if (!Number.isSafeInteger(amount) || amount < 0) {
+        throw new Error("Stripe refund amount is invalid");
+      }
+      total += amount;
+      if (!Number.isSafeInteger(total)) {
+        throw new Error("Stripe cumulative refund amount is invalid");
+      }
+    }
+    if (!page.has_more) {
+      if (expectedRefundId && !seenRefundIds.has(expectedRefundId)) {
+        throw new Error("Stripe refund list does not contain the current refund");
+      }
+      return total;
+    }
+    const lastRefund = page.data[page.data.length - 1];
+    const nextCursor = stripeObjectId(lastRefund);
+    if (!nextCursor || seenCursors.has(nextCursor)) {
+      throw new Error("Stripe refund pagination is incomplete");
+    }
+    seenCursors.add(nextCursor);
+    startingAfter = nextCursor;
+  }
+};
+
 const enrichRefundWithCumulativeAmount = async (
   stripe,
   refund,
@@ -652,21 +712,16 @@ const enrichRefundWithCumulativeAmount = async (
     );
     chargeId = stripeObjectId(paymentIntent && paymentIntent.latest_charge);
   }
-  if (!chargeId
-    || !stripe.charges
-    || typeof stripe.charges.retrieve !== "function") {
-    return refund;
-  }
-
-  const charge = await stripe.charges.retrieve(chargeId);
-  const cumulativeAmount = Number(charge && charge.amount_refunded);
-  if (!Number.isSafeInteger(cumulativeAmount) || cumulativeAmount < 0) {
-    return refund;
-  }
+  if (!chargeId) return refund;
+  const cumulativeAmount = await getCumulativeSucceededRefundAmount(
+    stripe,
+    chargeId,
+    stripeObjectId(refund),
+  );
   return {
     ...refund,
     charge: refund.charge || chargeId,
-    cumulative_amount_refunded: cumulativeAmount,
+    cumulative_succeeded_amount: cumulativeAmount,
   };
 };
 

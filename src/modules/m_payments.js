@@ -1085,8 +1085,8 @@ const buildPaymentModule = ({
       || !matchesRefundReferences(payment, refund)) {
       return { ignored: true };
     }
-    const cumulativeRefunded = Number(refund.cumulative_amount_refunded);
-    const hasAuthoritativeCumulative = refund.cumulative_amount_refunded != null
+    const cumulativeRefunded = Number(refund.cumulative_succeeded_amount);
+    const hasAuthoritativeCumulative = refund.cumulative_succeeded_amount != null
       && Number.isSafeInteger(cumulativeRefunded)
       && cumulativeRefunded >= 0;
     const cumulativeRefundComplete = hasAuthoritativeCumulative
