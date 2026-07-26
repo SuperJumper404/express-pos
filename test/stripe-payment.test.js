@@ -2900,6 +2900,7 @@ const runReplacementPaymentContracts = async () => {
 
 const runRefundControllerContract = async () => {
   const calls = [];
+  const initialRefunds = [];
   const controller = buildRefundPaidOrderController({
     getPaidOrderForRefund: async () => [{
       id: 42,
@@ -2907,13 +2908,27 @@ const runRefundControllerContract = async () => {
       payment_status: "paid",
       payment_record_status: "succeeded",
       stripe_payment_intent_id: "pi_42",
+      stripe_charge_id: "ch_42",
       stripe_refund_id: null,
     }],
     getStripe: () => ({
       refunds: {
         create: async (params, options) => {
           calls.push(["create", params, options]);
-          return { id: "re_42", status: "pending" };
+          const refund = {
+            id: "re_42",
+            status: "pending",
+            amount: 2300,
+            payment_intent: "pi_42",
+            charge: "ch_42",
+            metadata: params.metadata,
+          };
+          initialRefunds.push(refund);
+          return refund;
+        },
+        list: async (params) => {
+          calls.push(["list", params]);
+          return { data: initialRefunds.map((refund) => ({ ...refund })), has_more: false };
         },
       },
     }),
@@ -2927,6 +2942,10 @@ const runRefundControllerContract = async () => {
   await controller({ params: { id: "42" }, shopid: 7 }, response);
 
   assert.deepStrictEqual(calls[0], [
+    "list",
+    { charge: "ch_42", limit: 100 },
+  ]);
+  assert.deepStrictEqual(calls[1], [
     "create",
     {
       payment_intent: "pi_42",
@@ -2935,16 +2954,33 @@ const runRefundControllerContract = async () => {
       metadata: {
         order_id: "42",
         shop_id: "7",
+        refund_attempt_generation: "0",
       },
     },
     { idempotencyKey: "refund-order-7-42" },
   ]);
-  assert.deepStrictEqual(calls[1], [
+  assert.deepStrictEqual(calls[2], [
+    "list",
+    { charge: "ch_42", limit: 100 },
+  ]);
+  assert.deepStrictEqual(calls[3], [
     "record",
     {
       orderId: 42,
       shopId: 7,
-      refund: { id: "re_42", status: "pending" },
+      refund: {
+        id: "re_42",
+        status: "pending",
+        amount: 2300,
+        payment_intent: "pi_42",
+        charge: "ch_42",
+        metadata: {
+          order_id: "42",
+          shop_id: "7",
+          refund_attempt_generation: "0",
+        },
+        cumulative_succeeded_amount: 0,
+      },
     },
   ]);
   assert.strictEqual(response.statusCode, 200);
@@ -2955,6 +2991,14 @@ const runRefundControllerContract = async () => {
   });
 
   const cumulativeCalls = [];
+  const cumulativeRows = [{
+    id: "re_partial",
+    status: "succeeded",
+    amount: 1200,
+    payment_intent: "pi_42",
+    charge: "ch_42",
+    metadata: {},
+  }];
   const cumulativeController = buildRefundPaidOrderController({
     getPaidOrderForRefund: async () => [{
       id: 42,
@@ -2962,28 +3006,28 @@ const runRefundControllerContract = async () => {
       payment_status: "paid",
       payment_record_status: "succeeded",
       stripe_payment_intent_id: "pi_42",
+      stripe_charge_id: "ch_42",
       stripe_refund_id: null,
     }],
     getStripe: () => ({
       refunds: {
         create: async (params) => {
           cumulativeCalls.push(["create", params]);
-          return {
+          const refund = {
             id: "re_remaining",
             status: "succeeded",
             amount: 1100,
             payment_intent: "pi_42",
             charge: "ch_42",
-            metadata: { order_id: "42", shop_id: "7" },
+            metadata: params.metadata,
           };
+          cumulativeRows.push(refund);
+          return refund;
         },
         list: async (params) => {
           cumulativeCalls.push(["list", params]);
           return {
-            data: [
-              { id: "re_partial", status: "succeeded", amount: 1200 },
-              { id: "re_remaining", status: "succeeded", amount: 1100 },
-            ],
+            data: cumulativeRows.map((refund) => ({ ...refund })),
             has_more: false,
           };
         },
@@ -2999,18 +3043,22 @@ const runRefundControllerContract = async () => {
     { params: { id: "42" }, shopid: 7 },
     cumulativeResponse,
   );
-  assert.strictEqual(cumulativeCalls[0][0], "create");
+  assert.deepStrictEqual(cumulativeCalls[0], [
+    "list",
+    { charge: "ch_42", limit: 100 },
+  ]);
+  assert.strictEqual(cumulativeCalls[1][0], "create");
   assert.strictEqual(
-    Object.prototype.hasOwnProperty.call(cumulativeCalls[0][1], "amount"),
+    Object.prototype.hasOwnProperty.call(cumulativeCalls[1][1], "amount"),
     false,
     "Stripe chooses the remaining refundable amount",
   );
-  assert.deepStrictEqual(cumulativeCalls[1], [
+  assert.deepStrictEqual(cumulativeCalls[2], [
     "list",
     { charge: "ch_42", limit: 100 },
   ]);
   assert.strictEqual(
-    cumulativeCalls[2][1].refund.cumulative_succeeded_amount,
+    cumulativeCalls[3][1].refund.cumulative_succeeded_amount,
     2300,
   );
   assert.strictEqual(cumulativeResponse.payload.data.refundStatus, "succeeded");
@@ -3079,6 +3127,131 @@ const runRefundControllerContract = async () => {
     assert.strictEqual(nonFinalHarness.state.order.payment_status, "paid");
   }
 
+  const attemptPayment = {
+    id: 42,
+    shopid: 7,
+    payment_status: "paid",
+    payment_record_status: "succeeded",
+    stripe_payment_intent_id: "pi_42",
+    stripe_charge_id: "ch_42",
+    stripe_refund_id: null,
+    amount_cents: 2300,
+  };
+  const priorSucceeded = {
+    id: "re_prior_partial",
+    status: "succeeded",
+    amount: 1200,
+    payment_intent: "pi_42",
+    charge: "ch_42",
+    metadata: {},
+  };
+
+  let pendingCreateCalls = 0;
+  const pendingRows = [priorSucceeded, {
+    id: "re_pending_generation_0",
+    status: "pending",
+    amount: 1100,
+    payment_intent: "pi_42",
+    charge: "ch_42",
+    metadata: {
+      order_id: "42",
+      shop_id: "7",
+      refund_attempt_generation: "0",
+    },
+  }];
+  const pendingRetryController = buildRefundPaidOrderController({
+    getPaidOrderForRefund: async () => [attemptPayment],
+    getStripe: () => ({
+      refunds: {
+        list: async () => ({
+          data: pendingRows.map((refund) => ({ ...refund })),
+          has_more: false,
+        }),
+        create: async () => {
+          pendingCreateCalls += 1;
+          throw new Error("pending attempt must be reused");
+        },
+      },
+    }),
+    recordRefundState: async () => ({ ignored: true, partial_refund: true }),
+  });
+  const pendingRetryResponse = makeResponse();
+  await pendingRetryController(
+    { params: { id: "42" }, shopid: 7 },
+    pendingRetryResponse,
+  );
+  assert.strictEqual(pendingCreateCalls, 0);
+  assert.strictEqual(pendingRetryResponse.statusCode, 200);
+  assert.strictEqual(pendingRetryResponse.payload.data.refundId, "re_pending_generation_0");
+  assert.strictEqual(pendingRetryResponse.payload.data.refundStatus, "pending");
+
+  for (const terminalStatus of ["failed", "canceled"]) {
+    const rows = [priorSucceeded, {
+      id: `re_${terminalStatus}_generation_0`,
+      status: terminalStatus,
+      amount: 1100,
+      payment_intent: "pi_42",
+      charge: "ch_42",
+      metadata: {
+        order_id: "42",
+        shop_id: "7",
+        refund_attempt_generation: "0",
+      },
+    }];
+    const createCalls = [];
+    const retryController = buildRefundPaidOrderController({
+      getPaidOrderForRefund: async () => [attemptPayment],
+      getStripe: () => ({
+        refunds: {
+          list: async () => ({
+            data: rows.map((refund) => ({ ...refund })),
+            has_more: false,
+          }),
+          create: async (params, options) => {
+            createCalls.push([params, options]);
+            const retry = {
+              id: `re_${terminalStatus}_generation_1`,
+              status: "pending",
+              amount: 1100,
+              payment_intent: "pi_42",
+              charge: "ch_42",
+              metadata: params.metadata,
+            };
+            rows.push(retry);
+            return retry;
+          },
+        },
+      }),
+      recordRefundState: async () => ({ ignored: true, partial_refund: true }),
+    });
+
+    for (let replay = 0; replay < 2; replay += 1) {
+      const retryResponse = makeResponse();
+      await retryController(
+        { params: { id: "42" }, shopid: 7 },
+        retryResponse,
+      );
+      assert.strictEqual(retryResponse.statusCode, 200, `${terminalStatus}:${replay}`);
+      assert.strictEqual(
+        retryResponse.payload.data.refundId,
+        `re_${terminalStatus}_generation_1`,
+      );
+      assert.strictEqual(retryResponse.payload.data.refundStatus, "pending");
+    }
+    assert.strictEqual(createCalls.length, 1, terminalStatus);
+    assert.strictEqual(
+      Object.prototype.hasOwnProperty.call(createCalls[0][0], "amount"),
+      false,
+    );
+    assert.strictEqual(
+      createCalls[0][0].metadata.refund_attempt_generation,
+      "1",
+    );
+    assert.deepStrictEqual(createCalls[0][1], {
+      idempotencyKey: "refund-order-7-42-g1",
+    });
+  }
+
   const replayCalls = [];
   const replayController = buildRefundPaidOrderController({
     getPaidOrderForRefund: async () => [{
@@ -3127,6 +3300,7 @@ const runRefundControllerContract = async () => {
   assert.strictEqual(replayResponse.payload.data.refundId, "re_existing");
   assert.strictEqual(replayResponse.payload.data.refundStatus, "pending");
 
+  const webhookFirstRefunds = [];
   const webhookFirstController = buildRefundPaidOrderController({
     getPaidOrderForRefund: async () => [{
       id: 42,
@@ -3134,11 +3308,27 @@ const runRefundControllerContract = async () => {
       payment_status: "paid",
       payment_record_status: "succeeded",
       stripe_payment_intent_id: "pi_42",
+      stripe_charge_id: "ch_42",
       stripe_refund_id: null,
     }],
     getStripe: () => ({
       refunds: {
-        create: async () => ({ id: "re_42", status: "pending" }),
+        list: async () => ({
+          data: webhookFirstRefunds,
+          has_more: false,
+        }),
+        create: async (params) => {
+          const refund = {
+            id: "re_42",
+            status: "pending",
+            amount: 2300,
+            charge: "ch_42",
+            payment_intent: "pi_42",
+            metadata: params.metadata,
+          };
+          webhookFirstRefunds.push(refund);
+          return refund;
+        },
       },
     }),
     recordRefundState: async () => ({
@@ -3397,6 +3587,7 @@ const runRefundControllerContract = async () => {
   });
 
   let stateRead = 0;
+  const failedRaceRefunds = [];
   const failedRaceResponse = makeResponse();
   await buildRefundPaidOrderController({
     getPaidOrderForRefund: async () => {
@@ -3408,6 +3599,7 @@ const runRefundControllerContract = async () => {
           payment_status: "paid",
           payment_record_status: "succeeded",
           stripe_payment_intent_id: "pi_42",
+          stripe_charge_id: "ch_42",
           stripe_refund_id: null,
         }];
       }
@@ -3424,7 +3616,22 @@ const runRefundControllerContract = async () => {
     },
     getStripe: () => ({
       refunds: {
-        create: async () => ({ id: "re_42", status: "pending" }),
+        list: async () => ({
+          data: failedRaceRefunds,
+          has_more: false,
+        }),
+        create: async (params) => {
+          const refund = {
+            id: "re_42",
+            status: "pending",
+            amount: 2300,
+            charge: "ch_42",
+            payment_intent: "pi_42",
+            metadata: params.metadata,
+          };
+          failedRaceRefunds.push(refund);
+          return refund;
+        },
       },
     }),
     recordRefundState: async () => ({ ignored: true }),

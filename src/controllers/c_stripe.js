@@ -637,7 +637,7 @@ const stripeObjectId = (value) => (
   typeof value === "string" ? value : value && value.id
 );
 
-const getCumulativeSucceededRefundAmount = async (
+const listStripeRefundsByCharge = async (
   stripe,
   chargeId,
   expectedRefundId,
@@ -647,6 +647,7 @@ const getCumulativeSucceededRefundAmount = async (
   }
   let startingAfter = null;
   let total = 0;
+  const refunds = [];
   const seenCursors = new Set();
   const seenRefundIds = new Set();
   const refundStatuses = new Set([
@@ -671,6 +672,7 @@ const getCumulativeSucceededRefundAmount = async (
         throw new Error("Stripe refund page contains invalid data");
       }
       seenRefundIds.add(refundId);
+      refunds.push(candidate);
       if (candidate.status !== "succeeded") continue;
       const amount = Number(candidate.amount);
       if (!Number.isSafeInteger(amount) || amount < 0) {
@@ -685,7 +687,10 @@ const getCumulativeSucceededRefundAmount = async (
       if (expectedRefundId && !seenRefundIds.has(expectedRefundId)) {
         throw new Error("Stripe refund list does not contain the current refund");
       }
-      return total;
+      return {
+        refunds,
+        cumulativeSucceededAmount: total,
+      };
     }
     const lastRefund = page.data[page.data.length - 1];
     const nextCursor = stripeObjectId(lastRefund);
@@ -713,7 +718,7 @@ const enrichRefundWithCumulativeAmount = async (
     chargeId = stripeObjectId(paymentIntent && paymentIntent.latest_charge);
   }
   if (!chargeId) return refund;
-  const cumulativeAmount = await getCumulativeSucceededRefundAmount(
+  const refundSnapshot = await listStripeRefundsByCharge(
     stripe,
     chargeId,
     stripeObjectId(refund),
@@ -721,9 +726,35 @@ const enrichRefundWithCumulativeAmount = async (
   return {
     ...refund,
     charge: refund.charge || chargeId,
-    cumulative_succeeded_amount: cumulativeAmount,
+    cumulative_succeeded_amount: refundSnapshot.cumulativeSucceededAmount,
   };
 };
+
+const getRefundAttemptGeneration = (refund, orderId, shopId, paymentIntentId) => {
+  const metadata = refund.metadata || {};
+  if (String(metadata.order_id || "") !== String(orderId)
+    || String(metadata.shop_id || "") !== String(shopId)) {
+    return null;
+  }
+  const refundPaymentIntentId = stripeObjectId(refund.payment_intent);
+  if (refundPaymentIntentId && refundPaymentIntentId !== paymentIntentId) return null;
+  const rawGeneration = metadata.refund_attempt_generation;
+  if (rawGeneration == null || rawGeneration === "") return 0;
+  if (!/^\d+$/.test(String(rawGeneration))) {
+    throw new Error("Stripe refund attempt generation is invalid");
+  }
+  const generation = Number(rawGeneration);
+  if (!Number.isSafeInteger(generation)) {
+    throw new Error("Stripe refund attempt generation is invalid");
+  }
+  return generation;
+};
+
+const refundIdempotencyKey = (shopId, orderId, generation) => (
+  generation === 0
+    ? `refund-order-${shopId}-${orderId}`
+    : `refund-order-${shopId}-${orderId}-g${generation}`
+);
 
 const buildStripeWebhookEventHandler = ({
   getStripe: getStripeClient = getStripe,
@@ -890,17 +921,59 @@ const buildRefundPaidOrderController = ({
       }
       refund = candidate;
     } else {
-      refund = await stripe.refunds.create({
-        payment_intent: payment.stripe_payment_intent_id,
-        reverse_transfer: true,
-        refund_application_fee: true,
-        metadata: {
-          order_id: String(orderId),
-          shop_id: String(req.shopid),
-        },
-      }, {
-        idempotencyKey: `refund-order-${req.shopid}-${orderId}`,
-      });
+      let chargeId = payment.stripe_charge_id || null;
+      if (!chargeId) {
+        const paymentIntent = await stripe.paymentIntents.retrieve(
+          payment.stripe_payment_intent_id,
+        );
+        chargeId = stripeObjectId(paymentIntent && paymentIntent.latest_charge);
+      }
+      if (!chargeId) throw new Error("Stripe payment charge is unavailable");
+
+      const snapshot = await listStripeRefundsByCharge(stripe, chargeId);
+      const attempts = snapshot.refunds.map((candidate) => ({
+        refund: candidate,
+        generation: getRefundAttemptGeneration(
+          candidate,
+          orderId,
+          req.shopid,
+          payment.stripe_payment_intent_id,
+        ),
+      })).filter(({ generation }) => generation != null);
+      const activeAttempts = attempts.filter(({ refund: candidate }) => (
+        ["pending", "requires_action"].includes(candidate.status)
+      ));
+      if (activeAttempts.length > 1) {
+        throw new Error("Multiple active Stripe refund attempts found");
+      }
+
+      if (snapshot.cumulativeSucceededAmount >= Number(payment.amount_cents)) {
+        const succeededAttempts = attempts.filter(({ refund: candidate }) => (
+          candidate.status === "succeeded"
+        )).sort((left, right) => right.generation - left.generation);
+        if (!succeededAttempts.length) {
+          throw new Error("Completed Stripe refund has no matching attempt");
+        }
+        refund = succeededAttempts[0].refund;
+      } else if (activeAttempts.length === 1) {
+        refund = activeAttempts[0].refund;
+      } else {
+        const generation = attempts.length
+          ? Math.max(...attempts.map((attempt) => attempt.generation)) + 1
+          : 0;
+        refund = await stripe.refunds.create({
+          payment_intent: payment.stripe_payment_intent_id,
+          reverse_transfer: true,
+          refund_application_fee: true,
+          metadata: {
+            order_id: String(orderId),
+            shop_id: String(req.shopid),
+            refund_attempt_generation: String(generation),
+          },
+        }, {
+          idempotencyKey: refundIdempotencyKey(req.shopid, orderId, generation),
+        });
+      }
     }
 
     refund = await enrichRefundWithCumulativeAmount(stripe, refund, {
