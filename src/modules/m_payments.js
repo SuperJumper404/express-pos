@@ -931,17 +931,26 @@ const buildPaymentModule = ({
       ? refund.charge
       : refund.charge && refund.charge.id
   );
-  const validRefundMetadata = (payment, refund) => {
+  const validRefundMetadata = (
+    payment,
+    refund,
+    { requireForNewAssociation = false } = {},
+  ) => {
     const metadata = refund.metadata || {};
+    const alreadyAssociated = Boolean(
+      refund.id && payment.stripe_refund_id === refund.id,
+    );
     const matchesNumber = (key, expected) => {
-      if (metadata[key] == null || metadata[key] === "") return true;
+      if (metadata[key] == null || metadata[key] === "") {
+        return alreadyAssociated || !requireForNewAssociation;
+      }
       return /^\d+$/.test(String(metadata[key]))
         && Number(metadata[key]) === Number(expected);
     };
     return matchesNumber("order_id", payment.order_id)
       && matchesNumber("shop_id", payment.shop_id);
   };
-  const matchesRefundReferences = (payment, refund) => {
+  const matchesRefundReferences = (payment, refund, metadataOptions) => {
     const chargeId = refundChargeId(refund);
     if (payment.stripe_refund_id
       && refund.id
@@ -949,10 +958,14 @@ const buildPaymentModule = ({
     if (refund.payment_intent
       && payment.stripe_payment_intent_id !== refund.payment_intent) return false;
     if (chargeId && payment.stripe_charge_id !== chargeId) return false;
-    return validRefundMetadata(payment, refund);
+    return validRefundMetadata(payment, refund, metadataOptions);
   };
   const selectRefundPayment = (payments, refund) => {
-    const matches = payments.filter((payment) => matchesRefundReferences(payment, refund));
+    const matches = payments.filter((payment) => matchesRefundReferences(
+      payment,
+      refund,
+      { requireForNewAssociation: true },
+    ));
     return matches.length === 1 ? matches[0] : null;
   };
 

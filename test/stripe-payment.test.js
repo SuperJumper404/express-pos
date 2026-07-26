@@ -1003,6 +1003,39 @@ const runRefundWebhookLookupContract = async () => {
   }
 
   let harness = makeRefundLifecycleHarness();
+  harness.state.payment.stripe_refund_id = "re_42";
+  assert.deepStrictEqual(
+    await harness.payments.reconcileStripeRefund({
+      id: "re_42",
+      status: "pending",
+    }),
+    { status: "pending" },
+    "an already-associated refund ID remains reconcilable without metadata",
+  );
+
+  for (const refundReference of [
+    { payment_intent: "pi_42" },
+    { charge: "ch_42" },
+  ]) {
+    harness = makeRefundLifecycleHarness();
+    assert.deepStrictEqual(
+      await harness.payments.reconcileStripeRefund({
+        id: "re_new",
+        status: "pending",
+        ...refundReference,
+      }),
+      { ignored: true },
+      "a new refund association requires order and shop metadata",
+    );
+    assert.strictEqual(harness.state.payment.stripe_refund_id, null);
+    assert.strictEqual(harness.state.payment.refund_status, null);
+    assert.strictEqual(harness.state.payment.status, "succeeded");
+    assert.strictEqual(harness.state.order.payment_status, "paid");
+    assert.strictEqual(harness.state.order.status, 3);
+    assert.deepStrictEqual(harness.events, []);
+  }
+
+  harness = makeRefundLifecycleHarness();
   assert.deepStrictEqual(
     await harness.payments.reconcileStripeRefund({
       id: "re_unknown",
