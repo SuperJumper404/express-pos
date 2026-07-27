@@ -514,6 +514,45 @@ const runProductControllerContracts = async () => {
   assert.deepStrictEqual(removedFiles, [
     path.join("C:\\public-images", "products", "old.webp"),
   ]);
+
+  let createdProduct;
+  handlers = buildProductController({
+    products: {
+      mAddProduct: async (body) => {
+        createdProduct = body;
+      },
+    },
+    logger: { error: () => {} },
+  });
+  res = productResponse();
+  await handlers.addProduct({
+    shopid: 7,
+    file: { filename: "vat.webp" },
+    body: {
+      name: "Canette",
+      categoryid: 3,
+      price: "1.05",
+      stock: 5,
+      vat_rate: "5.5",
+    },
+  }, res);
+  assert.strictEqual(res.statusCode, 201);
+  assert.strictEqual(createdProduct.vat_rate, 5.5);
+
+  res = productResponse();
+  await handlers.addProduct({
+    shopid: 7,
+    file: { filename: "invalid-vat.webp" },
+    body: {
+      name: "Invalid",
+      categoryid: 3,
+      price: "1.05",
+      stock: 5,
+      vat_rate: "8",
+    },
+  }, res);
+  assert.strictEqual(res.statusCode, 422);
+  assert.strictEqual(res.payload.data.code, "VAT_RATE_INVALID");
 };
 
 const grouped = groupResolvedConfigurationRows([{
