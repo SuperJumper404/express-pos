@@ -1,6 +1,7 @@
 const pool = require("../config/dbPool");
 const DomainError = require("../helpers/domainError");
 const { parseMoney } = require("../helpers/money");
+const { buildVatSnapshot } = require("../helpers/vat");
 const { validateConfiguredItem } = require("../helpers/customizationRules");
 const { buildStockRequirements } = require("../helpers/stockRequirements");
 const {
@@ -22,7 +23,7 @@ const queryResult = async (connection, sql, params = []) => {
 const sqlRepository = {
   getProducts: ({ shopId, productIds, connection }) => queryResult(
     connection,
-    `SELECT id, shopid, name, price, stock, archived, is_hidden
+    `SELECT id, shopid, name, price, vat_rate, stock, archived, is_hidden
      FROM products
      WHERE shopid = ? AND id IN (?)
      ORDER BY id`,
@@ -79,12 +80,18 @@ const buildOrderQuoteModule = ({
       }
       const unitPrice = parseMoney(validated.unitPrice);
       const lineTotal = parseMoney(unitPrice * item.quantity);
+      const vatSnapshot = buildVatSnapshot({
+        unitPrice,
+        quantity: item.quantity,
+        vatRate: product.vat_rate,
+      });
       return {
         ...item,
         product,
         steps,
         unitPrice,
         lineTotal,
+        ...vatSnapshot,
         selectedChoices: validated.selectedChoices,
       };
     });
@@ -99,6 +106,11 @@ const buildOrderQuoteModule = ({
         selected_choice_ids: [...item.selectedChoiceIds].sort((a, b) => a - b),
         unit_price: item.unitPrice,
         total: item.lineTotal,
+        vat_rate: item.vatRate,
+        unit_price_ht: item.unitPriceHt,
+        unit_vat: item.unitVat,
+        total_ht: item.totalHt,
+        total_vat: item.totalVat,
       })),
     };
 

@@ -514,6 +514,45 @@ const runProductControllerContracts = async () => {
   assert.deepStrictEqual(removedFiles, [
     path.join("C:\\public-images", "products", "old.webp"),
   ]);
+
+  let createdProduct;
+  handlers = buildProductController({
+    products: {
+      mAddProduct: async (body) => {
+        createdProduct = body;
+      },
+    },
+    logger: { error: () => {} },
+  });
+  res = productResponse();
+  await handlers.addProduct({
+    shopid: 7,
+    file: { filename: "vat.webp" },
+    body: {
+      name: "Canette",
+      categoryid: 3,
+      price: "1.05",
+      stock: 5,
+      vat_rate: "5.5",
+    },
+  }, res);
+  assert.strictEqual(res.statusCode, 201);
+  assert.strictEqual(createdProduct.vat_rate, 5.5);
+
+  res = productResponse();
+  await handlers.addProduct({
+    shopid: 7,
+    file: { filename: "invalid-vat.webp" },
+    body: {
+      name: "Invalid",
+      categoryid: 3,
+      price: "1.05",
+      stock: 5,
+      vat_rate: "8",
+    },
+  }, res);
+  assert.strictEqual(res.statusCode, 422);
+  assert.strictEqual(res.payload.data.code, "VAT_RATE_INVALID");
 };
 
 const grouped = groupResolvedConfigurationRows([{
@@ -1574,6 +1613,7 @@ const runSharedOrderQuoteContract = async () => {
           shopid: 7,
           name: "Menu",
           price: 8,
+          vat_rate: 10,
           stock: 5,
           archived: 0,
           is_hidden: 0,
@@ -1606,6 +1646,18 @@ const runSharedOrderQuoteContract = async () => {
   });
 
   assert.strictEqual(result.total, 19);
+  assert.deepStrictEqual(result.serverQuote.items[0], {
+    product_id: 10,
+    quantity: 2,
+    selected_choice_ids: [101],
+    unit_price: 9.5,
+    total: 19,
+    vat_rate: 10,
+    unit_price_ht: 8.64,
+    unit_vat: 0.86,
+    total_ht: 17.27,
+    total_vat: 1.73,
+  });
   assert.deepStrictEqual([...result.requirements.entries()], [[10, 2], [11, 2]]);
 };
 
@@ -2458,8 +2510,14 @@ const makeArchiveHarness = ({ failAfterActiveDeletion = false } = {}) => {
       created: "2026-07-24 12:00:00",
     }],
     details: [
-      { id: 70, orderid: 42, productid: 10, qty: 2, price: 11.5, total: 23 },
-      { id: 71, orderid: 42, productid: 20, qty: 1, price: 5, total: 5 },
+      {
+        id: 70, orderid: 42, productid: 10, qty: 2, price: 11.5, total: 23,
+        vat_rate: 10, unit_price_ht: 10.45, unit_vat: 1.05, total_ht: 20.91, total_vat: 2.09,
+      },
+      {
+        id: 71, orderid: 42, productid: 20, qty: 1, price: 5, total: 5,
+        vat_rate: 5.5, unit_price_ht: 4.74, unit_vat: 0.26, total_ht: 4.74, total_vat: 0.26,
+      },
     ],
     activeSnapshots: [{
       id: 1,
@@ -2640,6 +2698,19 @@ const runArchiveSnapshotContracts = async () => {
   assert.strictEqual(harness.getState().details.length, 0);
   assert.strictEqual(harness.getState().activeSnapshots.length, 0);
   assert.strictEqual(harness.getState().archiveDetails.length, 2);
+  assert.deepStrictEqual(
+    harness.getState().archiveDetails.map((detail) => ({
+      vat_rate: detail.vat_rate,
+      unit_price_ht: detail.unit_price_ht,
+      unit_vat: detail.unit_vat,
+      total_ht: detail.total_ht,
+      total_vat: detail.total_vat,
+    })),
+    [
+      { vat_rate: 10, unit_price_ht: 10.45, unit_vat: 1.05, total_ht: 20.91, total_vat: 2.09 },
+      { vat_rate: 5.5, unit_price_ht: 4.74, unit_vat: 0.26, total_ht: 4.74, total_vat: 0.26 },
+    ],
+  );
   assert.deepStrictEqual(
     harness.getState().archives.map((archive) => ({
       token: archive.token,

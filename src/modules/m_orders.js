@@ -77,7 +77,12 @@ const archiveSqlRepository = {
   ),
   findActiveOrderDetails: ({ orderId, shopId, connection }) => queryResult(
     connection,
-    `SELECT *, orders.id AS id, orderdetail.id AS orderDetailsId
+    `SELECT *, orders.id AS id, orderdetail.id AS orderDetailsId,
+            orderdetail.vat_rate AS vat_rate,
+            orderdetail.unit_price_ht AS unit_price_ht,
+            orderdetail.unit_vat AS unit_vat,
+            orderdetail.total_ht AS total_ht,
+            orderdetail.total_vat AS total_vat
      FROM orders
      LEFT JOIN orderdetail ON orders.id = orderdetail.orderid
      LEFT JOIN products ON orderdetail.productid = products.id
@@ -105,7 +110,12 @@ const archiveSqlRepository = {
   ),
   findArchivedOrderDetailsById: ({ archiveId, connection }) => queryResult(
     connection,
-    `SELECT *, archives.id AS id, archivesdetail.id AS archiveDetailsId
+    `SELECT *, archives.id AS id, archivesdetail.id AS archiveDetailsId,
+            archivesdetail.vat_rate AS vat_rate,
+            archivesdetail.unit_price_ht AS unit_price_ht,
+            archivesdetail.unit_vat AS unit_vat,
+            archivesdetail.total_ht AS total_ht,
+            archivesdetail.total_vat AS total_vat
      FROM archives
      LEFT JOIN archivesdetail ON archives.id = archivesdetail.orderId
      LEFT JOIN products ON archivesdetail.productid = products.id
@@ -115,7 +125,12 @@ const archiveSqlRepository = {
   ),
   findArchivedOrderDetailsByToken: ({ token, connection }) => queryResult(
     connection,
-    `SELECT *, archives.id AS id, archivesdetail.id AS archiveDetailsId
+    `SELECT *, archives.id AS id, archivesdetail.id AS archiveDetailsId,
+            archivesdetail.vat_rate AS vat_rate,
+            archivesdetail.unit_price_ht AS unit_price_ht,
+            archivesdetail.unit_vat AS unit_vat,
+            archivesdetail.total_ht AS total_ht,
+            archivesdetail.total_vat AS total_vat
      FROM archives
      LEFT JOIN archivesdetail ON archives.id = archivesdetail.orderId
      LEFT JOIN products ON archivesdetail.productid = products.id
@@ -269,6 +284,11 @@ const buildOrderArchiveModule = ({
             qty: detail.qty,
             total: detail.total,
             price: detail.price,
+            vat_rate: detail.vat_rate,
+            unit_price_ht: detail.unit_price_ht,
+            unit_vat: detail.unit_vat,
+            total_ht: detail.total_ht,
+            total_vat: detail.total_vat,
           },
           connection,
         });
@@ -951,6 +971,11 @@ module.exports = {
             archivesdetail.orderId, 
             archivesdetail.qty, 
             archivesdetail.price AS detailPrice, 
+            archivesdetail.vat_rate AS vat_rate,
+            archivesdetail.unit_price_ht AS unit_price_ht,
+            archivesdetail.unit_vat AS unit_vat,
+            archivesdetail.total_ht AS total_ht,
+            archivesdetail.total_vat AS total_vat,
             products.price AS productPrice 
         FROM archivesdetail 
         LEFT JOIN products ON archivesdetail.productid = products.id 

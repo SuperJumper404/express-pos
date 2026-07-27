@@ -709,6 +709,11 @@ const buildCheckoutModule = ({
             price: item.unitPrice,
             qty: item.quantity,
             total: item.lineTotal,
+            vat_rate: item.vatRate,
+            unit_price_ht: item.unitPriceHt,
+            unit_vat: item.unitVat,
+            total_ht: item.totalHt,
+            total_vat: item.totalVat,
           },
           connection,
         });

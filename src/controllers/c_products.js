@@ -4,6 +4,7 @@ const productModule = require("../modules/m_products");
 const DomainError = require("../helpers/domainError");
 const { envPUBLICIMAGEPATH } = require("../helpers/env");
 const { isMissing, parseMoney } = require("../helpers/money");
+const { normalizeVatRate } = require("../helpers/vat");
 const { success, custom, failed } = require("../helpers/response");
 
 const normalizeProductCustomizations = (customizations) =>
@@ -98,6 +99,13 @@ const buildProductController = ({
         throw new DomainError(400, "PRODUCT_PRICE_INVALID", "Requête invalide.");
       }
       body.price = parsedPrice;
+    }
+    if (creation || Object.prototype.hasOwnProperty.call(body, "vat_rate")) {
+      try {
+        body.vat_rate = normalizeVatRate(body.vat_rate, 10);
+      } catch (error) {
+        throw new DomainError(422, "VAT_RATE_INVALID", "Taux de TVA invalide.");
+      }
     }
     if (creation) body.is_hidden = body.is_hidden || 0;
     return body;
