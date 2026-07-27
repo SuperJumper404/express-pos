@@ -1574,6 +1574,7 @@ const runSharedOrderQuoteContract = async () => {
           shopid: 7,
           name: "Menu",
           price: 8,
+          vat_rate: 10,
           stock: 5,
           archived: 0,
           is_hidden: 0,
@@ -1606,6 +1607,18 @@ const runSharedOrderQuoteContract = async () => {
   });
 
   assert.strictEqual(result.total, 19);
+  assert.deepStrictEqual(result.serverQuote.items[0], {
+    product_id: 10,
+    quantity: 2,
+    selected_choice_ids: [101],
+    unit_price: 9.5,
+    total: 19,
+    vat_rate: 10,
+    unit_price_ht: 8.64,
+    unit_vat: 0.86,
+    total_ht: 17.27,
+    total_vat: 1.73,
+  });
   assert.deepStrictEqual([...result.requirements.entries()], [[10, 2], [11, 2]]);
 };
 
