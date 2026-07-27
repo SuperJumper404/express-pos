@@ -269,6 +269,11 @@ const buildOrderArchiveModule = ({
             qty: detail.qty,
             total: detail.total,
             price: detail.price,
+            vat_rate: detail.vat_rate,
+            unit_price_ht: detail.unit_price_ht,
+            unit_vat: detail.unit_vat,
+            total_ht: detail.total_ht,
+            total_vat: detail.total_vat,
           },
           connection,
         });

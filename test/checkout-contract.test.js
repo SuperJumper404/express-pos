@@ -2510,8 +2510,14 @@ const makeArchiveHarness = ({ failAfterActiveDeletion = false } = {}) => {
       created: "2026-07-24 12:00:00",
     }],
     details: [
-      { id: 70, orderid: 42, productid: 10, qty: 2, price: 11.5, total: 23 },
-      { id: 71, orderid: 42, productid: 20, qty: 1, price: 5, total: 5 },
+      {
+        id: 70, orderid: 42, productid: 10, qty: 2, price: 11.5, total: 23,
+        vat_rate: 10, unit_price_ht: 10.45, unit_vat: 1.05, total_ht: 20.91, total_vat: 2.09,
+      },
+      {
+        id: 71, orderid: 42, productid: 20, qty: 1, price: 5, total: 5,
+        vat_rate: 5.5, unit_price_ht: 4.74, unit_vat: 0.26, total_ht: 4.74, total_vat: 0.26,
+      },
     ],
     activeSnapshots: [{
       id: 1,
@@ -2692,6 +2698,19 @@ const runArchiveSnapshotContracts = async () => {
   assert.strictEqual(harness.getState().details.length, 0);
   assert.strictEqual(harness.getState().activeSnapshots.length, 0);
   assert.strictEqual(harness.getState().archiveDetails.length, 2);
+  assert.deepStrictEqual(
+    harness.getState().archiveDetails.map((detail) => ({
+      vat_rate: detail.vat_rate,
+      unit_price_ht: detail.unit_price_ht,
+      unit_vat: detail.unit_vat,
+      total_ht: detail.total_ht,
+      total_vat: detail.total_vat,
+    })),
+    [
+      { vat_rate: 10, unit_price_ht: 10.45, unit_vat: 1.05, total_ht: 20.91, total_vat: 2.09 },
+      { vat_rate: 5.5, unit_price_ht: 4.74, unit_vat: 0.26, total_ht: 4.74, total_vat: 0.26 },
+    ],
+  );
   assert.deepStrictEqual(
     harness.getState().archives.map((archive) => ({
       token: archive.token,
