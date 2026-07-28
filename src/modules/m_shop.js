@@ -43,6 +43,7 @@ module.exports = {
           kitchen_closed: data.kitchen_closed || 0,
           shop_printer_ip: data.shop_printer_ip,
           smart_print_app: data.smart_print_app,
+          auto_print_order_tickets: data.auto_print_order_tickets || 0,
           stripe_commission_percent: normalizeCommissionPercent(
             data.stripe_commission_percent,
           ),
@@ -225,6 +226,7 @@ module.exports = {
     kitchen_closed = ?,
     shop_printer_ip = ?,
     smart_print_app = ?,
+    auto_print_order_tickets = ?,
     qr_payment_mode = ?,
     stripe_commission_percent = ?,
     stripe_account_id = ?,
@@ -248,6 +250,7 @@ module.exports = {
         data.kitchen_closed,
         data.shop_printer_ip,
         data.smart_print_app,
+        data.auto_print_order_tickets,
         normalizeQrPaymentMode(data.qr_payment_mode),
         normalizeCommissionPercent(data.stripe_commission_percent),
         data.stripe_account_id,

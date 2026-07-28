@@ -114,6 +114,7 @@ exports.createAndInitializeShop = async (req, res) => {
       kitchen_closed: 0,
       shop_printer_ip: body.shop_printer_ip || "",
       smart_print_app: 1,
+      auto_print_order_tickets: 0,
       stripe_commission_percent: normalizeCommissionPercent(
         body.stripe_commission_percent,
       ),
@@ -172,6 +173,7 @@ exports.getShopInfoClickAndCollect = async (req, res) => {
       shop_profile_image: response?.[0]?.shop_profile_image,
       shop_printer_ip: response?.[0]?.shop_printer_ip,
       smart_print_app: response?.[0]?.smart_print_app,
+      auto_print_order_tickets: response?.[0]?.auto_print_order_tickets,
       qr_payment_mode: normalizeQrPaymentMode(response?.[0]?.qr_payment_mode),
       stripe_charges_enabled: response?.[0]?.stripe_charges_enabled,
       stripe_onboarding_complete: response?.[0]?.stripe_onboarding_complete,
@@ -259,6 +261,10 @@ exports.updateShopInfo = async (req, res) => {
       kitchen_closed: prefer(req.body.kitchen_closed, shopInfo.kitchen_closed || 0),
       shop_printer_ip: prefer(req.body.shop_printer_ip, shopInfo.shop_printer_ip),
       smart_print_app: prefer(req.body.smart_print_app, shopInfo.smart_print_app),
+      auto_print_order_tickets: prefer(
+        req.body.auto_print_order_tickets,
+        shopInfo.auto_print_order_tickets || 0,
+      ),
       qr_payment_mode: normalizeQrPaymentMode(
         prefer(req.body.qr_payment_mode, shopInfo.qr_payment_mode),
       ),
