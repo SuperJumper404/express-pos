@@ -1124,7 +1124,7 @@ const runRepositoryReadContracts = async () => {
     0,
   );
   assert.strictEqual(
-    crudCalls.find(({ sql }) => /INSERT INTO customization_step_choices/.test(sql)).params[6],
+    crudCalls.find(({ sql }) => /INSERT INTO customization_step_choices/.test(sql)).params[7],
     0,
   );
   assert.ok(require("../package.json").scripts.test.includes("checkout-contract.test.js"));
