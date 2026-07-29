@@ -214,6 +214,7 @@ const LIST_CUSTOMIZATION_STEPS_SQL = `
     linked_product.stock AS linked_stock,
     linked_product.archived AS linked_archived,
     linked_product.is_hidden AS linked_is_hidden,
+    choice.default_extra_price,
     choice.default_position,
     choice.active AS choice_active,
     choice.created AS choice_created,
@@ -259,6 +260,7 @@ const groupCustomizationStepRows = (rows) => {
       name,
       image,
       linked_product_id: row.linked_product_id,
+      default_extra_price: row.default_extra_price,
       default_position: row.default_position,
       active: !isDisabled(row.choice_active),
       available: !isDisabled(row.step_active)
@@ -392,6 +394,7 @@ const getOwnedChoiceRecord = async ({ shopId, choiceId, connection }) => {
       choice.name,
       choice.image,
       choice.linked_product_id,
+      choice.default_extra_price,
       choice.default_position,
       choice.active
     FROM customization_step_choices choice
@@ -451,14 +454,15 @@ const createCustomizationChoice = async ({ shopId, stepId, data, connection }) =
   return queryRows(connection, `
     INSERT INTO customization_step_choices (
       step_id, choice_type, name, image, linked_product_id,
-      default_position, active, created, updated
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NULL)
+      default_extra_price, default_position, active, created, updated
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NULL)
   `, [
     stepId,
     choice.choice_type,
     choice.name,
     choice.image == null ? null : choice.image,
     choice.linked_product_id == null ? null : choice.linked_product_id,
+    choice.default_extra_price == null ? 0 : choice.default_extra_price,
     choice.default_position == null ? 0 : choice.default_position,
     isDisabled(choice.active) ? 0 : 1,
   ]);
@@ -476,6 +480,9 @@ const updateCustomizationChoice = async ({ shopId, choiceId, data, connection })
       linked_product_id: data.linked_product_id === undefined
         ? current.linked_product_id
         : data.linked_product_id,
+      default_extra_price: data.default_extra_price === undefined
+        ? current.default_extra_price
+        : data.default_extra_price,
       default_position: data.default_position === undefined
         ? current.default_position
         : data.default_position,
@@ -486,7 +493,8 @@ const updateCustomizationChoice = async ({ shopId, choiceId, data, connection })
     UPDATE customization_step_choices choice
     JOIN customization_steps step ON step.id = choice.step_id
     SET choice.choice_type = ?, choice.name = ?, choice.image = ?,
-      choice.linked_product_id = ?, choice.default_position = ?,
+      choice.linked_product_id = ?, choice.default_extra_price = ?,
+      choice.default_position = ?,
       choice.active = ?, choice.updated = NOW()
     WHERE choice.id = ? AND step.shop_id = ?
   `, [
@@ -494,6 +502,7 @@ const updateCustomizationChoice = async ({ shopId, choiceId, data, connection })
     choice.name,
     choice.image == null ? null : choice.image,
     choice.linked_product_id == null ? null : choice.linked_product_id,
+    choice.default_extra_price == null ? 0 : choice.default_extra_price,
     choice.default_position == null ? 0 : choice.default_position,
     isDisabled(choice.active) ? 0 : 1,
     choiceId,

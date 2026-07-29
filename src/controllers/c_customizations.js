@@ -85,6 +85,17 @@ const buildCustomizationController = ({
   const normalizeChoiceData = (body, file, partial = false) => {
     const data = { ...body };
     delete data.image;
+    if (
+      Object.prototype.hasOwnProperty.call(data, "default_extra_price")
+      && data.default_extra_price !== ""
+      && !Number.isFinite(Number(data.default_extra_price))
+    ) {
+      throw validationError(
+        "CUSTOMIZATION_CHOICE_DEFAULT_PRICE_INVALID",
+        "Le prix par dÃ©faut du choix est invalide.",
+      );
+    }
+    if (data.default_extra_price === "") data.default_extra_price = 0;
     const isLinkedProduct = data.choice_type === "linked_product";
     const requiresSimpleName = !isLinkedProduct
       && (!partial
