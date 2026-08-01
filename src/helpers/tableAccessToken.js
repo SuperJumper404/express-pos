@@ -3,6 +3,7 @@ const { envJWTKEY } = require("./env");
 
 const TABLE_ACCESS_PURPOSE = "table_access";
 const TABLE_SESSION_EXPIRES_IN = "4h";
+const QR_CLIENT_ACCESSES = [2, 3];
 
 const requireSigningKey = () => {
   if (!envJWTKEY) {
@@ -20,14 +21,15 @@ const numericId = (value, field) => {
 };
 
 const buildTableAccessPayload = (user) => {
-  if (Number(user?.access) !== 2) {
-    throw new Error("table access token requires access 2");
+  const access = Number(user?.access);
+  if (!QR_CLIENT_ACCESSES.includes(access)) {
+    throw new Error("table access token requires client access");
   }
 
   return {
     id: numericId(user.id, "id"),
     shopid: numericId(user.shopid, "shopid"),
-    access: 2,
+    access,
     purpose: TABLE_ACCESS_PURPOSE,
   };
 };
@@ -43,7 +45,7 @@ const verifyTableAccessToken = (token) => {
   if (decoded.purpose !== TABLE_ACCESS_PURPOSE) {
     throw new Error("Invalid table access token purpose");
   }
-  if (Number(decoded.access) !== 2) {
+  if (!QR_CLIENT_ACCESSES.includes(Number(decoded.access))) {
     throw new Error("Invalid table access token access");
   }
   return decoded;
@@ -64,6 +66,7 @@ const signTableSessionToken = (user) =>
 module.exports = {
   TABLE_ACCESS_PURPOSE,
   TABLE_SESSION_EXPIRES_IN,
+  QR_CLIENT_ACCESSES,
   buildTableAccessPayload,
   signTableAccessToken,
   verifyTableAccessToken,

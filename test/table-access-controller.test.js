@@ -40,6 +40,18 @@ assert.deepStrictEqual(loginData[0], {
   updated: undefined,
 });
 
+const clickAndCollectUser = { ...validUser, id: 13, access: 3 };
+const clickAndCollectToken = signTableAccessToken(clickAndCollectUser);
+const decodedClickAndCollect = verifyTableAccessToken(clickAndCollectToken);
+assert.strictEqual(
+  buildTableAccessLoginData({
+    decoded: decodedClickAndCollect,
+    user: clickAndCollectUser,
+    sessionToken: "session-token",
+  })[0].access,
+  3,
+);
+
 assert.throws(
   () =>
     buildTableAccessLoginData({

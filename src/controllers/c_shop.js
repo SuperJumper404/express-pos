@@ -13,6 +13,7 @@ const bcrypt = require("bcrypt");
 const { nanoid } = require("nanoid");
 const { normalizeQrPaymentMode } = require("../helpers/qrPaymentMode");
 const { normalizeCommissionPercent } = require("../helpers/stripePayment");
+const { signTableAccessToken } = require("../helpers/tableAccessToken");
 
 const DEFAULT_SHOP_PAYMENT_METHODS = [
   "Tickets Restaurants",
@@ -179,7 +180,9 @@ exports.getShopInfoClickAndCollect = async (req, res) => {
       stripe_onboarding_complete: response?.[0]?.stripe_onboarding_complete,
       clickAndCollectTable: {
         email: clickAndCollectTable?.email || "",
-        clearpass: clickAndCollectTable?.clearpass || "",
+        table_access_token: clickAndCollectTable
+          ? signTableAccessToken(clickAndCollectTable)
+          : "",
       },
     };
 

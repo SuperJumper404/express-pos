@@ -16,6 +16,12 @@ const tableUser = {
   email: "table-1-shop-8@tables.local",
   access: 2,
 };
+const clickAndCollectUser = {
+  id: 13,
+  shopid: 8,
+  email: "click-and-collect@tables.local",
+  access: 3,
+};
 
 assert.deepStrictEqual(buildTableAccessPayload(tableUser), {
   id: 12,
@@ -37,7 +43,16 @@ assert.strictEqual(decodedQr.purpose, "table_access");
 
 assert.throws(
   () => signTableAccessToken({ ...tableUser, access: 1 }),
-  /access 2/,
+  /client access/,
+);
+
+const clickAndCollectToken = signTableAccessToken(clickAndCollectUser);
+const decodedClickAndCollect = verifyTableAccessToken(clickAndCollectToken);
+assert.strictEqual(decodedClickAndCollect.id, clickAndCollectUser.id);
+assert.strictEqual(decodedClickAndCollect.access, 3);
+assert.ok(
+  !clickAndCollectToken.includes(clickAndCollectUser.email),
+  "QR token must not expose click-and-collect email",
 );
 
 const sessionToken = signTableSessionToken(tableUser);

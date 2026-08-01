@@ -1,8 +1,10 @@
+const { QR_CLIENT_ACCESSES } = require("./tableAccessToken");
+
 const buildTableAccessLoginData = ({ decoded, user, sessionToken }) => {
   if (!decoded || decoded.purpose !== "table_access") {
     throw new Error("Token QR invalide.");
   }
-  if (Number(decoded.access) !== 2) {
+  if (!QR_CLIENT_ACCESSES.includes(Number(decoded.access))) {
     throw new Error("Token QR invalide.");
   }
   if (!user) {
@@ -11,7 +13,7 @@ const buildTableAccessLoginData = ({ decoded, user, sessionToken }) => {
   if (Number(user.status) !== 1) {
     throw new Error("Table inactive.");
   }
-  if (Number(user.access) !== 2) {
+  if (!QR_CLIENT_ACCESSES.includes(Number(user.access))) {
     throw new Error("Acces table invalide.");
   }
   if (Number(user.shopid) !== Number(decoded.shopid)) {

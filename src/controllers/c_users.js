@@ -231,7 +231,7 @@ module.exports = {
     mGetAllUser(req.shopid)
       .then((response) => {
         const users = response.map((user) => {
-          if (Number(user.access) !== 2) return user;
+          if (![2, 3].includes(Number(user.access))) return user;
           return {
             ...user,
             table_access_token: signTableAccessToken(user),
