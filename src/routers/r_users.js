@@ -1,6 +1,7 @@
 const {
   register,
   login,
+  tableAccess,
   logout,
   activation,
   profileMe,
@@ -19,6 +20,7 @@ routers
   .get("/user/me", authentication, profileMe)
   .post("/register", authentication, register)
   .post("/login", login)
+  .post("/table-access", tableAccess)
   .post("/logout", authentication, logout)
   .get("/activate/:token/:email/:position/:access", activation)
   .get("/users", authentication, authAdmin, getAllUser)
