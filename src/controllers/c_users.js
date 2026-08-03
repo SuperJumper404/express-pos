@@ -7,11 +7,18 @@ const {
   mProfileMe,
   mGetAllUser,
   mDetailUser,
+  mDetailUserWithSecretFields,
   mUpdateUser,
   mDeleteUser,
 } = require("../modules/m_users");
 const { custom, success, failed } = require("../helpers/response");
 const { envJWTKEY } = require("../helpers/env");
+const {
+  signTableAccessToken,
+  verifyTableAccessToken,
+  signTableSessionToken,
+} = require("../helpers/tableAccessToken");
+const { buildTableAccessLoginData } = require("../helpers/tableAccessLoginData");
 const mailer = require("../helpers/mailer");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
@@ -152,6 +159,44 @@ module.exports = {
         failed(res, "Erreur serveur.", error.message);
       });
   },
+  tableAccess: async (req, res) => {
+    try {
+      const token = req.body && req.body.token;
+      if (!token) {
+        return custom(res, 422, "Token QR requis.", {}, null);
+      }
+
+      const decoded = verifyTableAccessToken(token);
+      const users = await mDetailUserWithSecretFields(decoded.id);
+      const user = users && users[0];
+      buildTableAccessLoginData({
+        decoded,
+        user,
+        sessionToken: "",
+      });
+      const sessionToken = signTableSessionToken(user);
+      const expired = new Date();
+      expired.setHours(expired.getHours() + 4);
+
+      const data = {
+        token: sessionToken,
+        expired: expired.toISOString().substring(0, 10),
+        updated: new Date(),
+      };
+
+      await mUpdateUser(data, user.id);
+
+      const loginData = buildTableAccessLoginData({
+        decoded,
+        user: { ...user, token: sessionToken, expired: data.expired },
+        sessionToken,
+      });
+
+      return success(res, "Connexion table reussie !", null, loginData);
+    } catch (error) {
+      return custom(res, 401, error.message || "Token QR invalide.", {}, null);
+    }
+  },
   logout: (req, res) => {
     const id = req.body.id;
     const data = {
@@ -185,7 +230,14 @@ module.exports = {
   getAllUser: async (req, res) => {
     mGetAllUser(req.shopid)
       .then((response) => {
-        success(res, "Utilisateurs récupérés.", null, response);
+        const users = response.map((user) => {
+          if (![2, 3].includes(Number(user.access))) return user;
+          return {
+            ...user,
+            table_access_token: signTableAccessToken(user),
+          };
+        });
+        success(res, "Utilisateurs récupérés.", null, users);
       })
       .catch((error) => {
         failed(res, "Erreur serveur.", error.message);

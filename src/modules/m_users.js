@@ -138,6 +138,21 @@ module.exports = {
       );
     });
   },
+  mDetailUserWithSecretFields: (id) => {
+    return new Promise((resolve, reject) => {
+      conn.query(
+        "SELECT * FROM users WHERE id = ?",
+        [id],
+        (err, result) => {
+          if (!err) {
+            resolve(result);
+          } else {
+            reject(new Error(err));
+          }
+        },
+      );
+    });
+  },
   mUpdateUser: (data, id) => {
     return new Promise((resolve, reject) => {
       conn.query(
