@@ -34,12 +34,18 @@ const firstToken = signTableAccessToken(tableUser);
 const secondToken = signTableAccessToken({ ...tableUser });
 assert.strictEqual(firstToken, secondToken, "QR token must be stable");
 assert.ok(!firstToken.includes(tableUser.email), "QR token must not expose email");
+assert.ok(firstToken.length <= 96, "QR token must stay compact for printing");
+assert.ok(!firstToken.startsWith("eyJ"), "QR token must not use verbose JWT format");
 
 const decodedQr = verifyTableAccessToken(firstToken);
 assert.strictEqual(decodedQr.id, tableUser.id);
 assert.strictEqual(decodedQr.shopid, tableUser.shopid);
 assert.strictEqual(decodedQr.access, 2);
 assert.strictEqual(decodedQr.purpose, "table_access");
+assert.throws(
+  () => verifyTableAccessToken(firstToken.replace(/.$/, "x")),
+  /Invalid table access token/,
+);
 
 assert.throws(
   () => signTableAccessToken({ ...tableUser, access: 1 }),

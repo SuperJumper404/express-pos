@@ -1,9 +1,11 @@
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 const { envJWTKEY } = require("./env");
 
 const TABLE_ACCESS_PURPOSE = "table_access";
 const TABLE_SESSION_EXPIRES_IN = "4h";
 const QR_CLIENT_ACCESSES = [2, 3];
+const TABLE_ACCESS_TOKEN_VERSION = "t1";
 
 const requireSigningKey = () => {
   if (!envJWTKEY) {
@@ -34,21 +36,48 @@ const buildTableAccessPayload = (user) => {
   };
 };
 
-const signTableAccessToken = (user, options = {}) =>
-  jwt.sign(buildTableAccessPayload(user), requireSigningKey(), {
-    noTimestamp: true,
-    ...options,
-  });
+const signCompactPayload = (payload) =>
+  crypto
+    .createHmac("sha256", requireSigningKey())
+    .update(payload)
+    .digest("base64url")
+    .slice(0, 22);
+
+const signTableAccessToken = (user) => {
+  const payload = buildTableAccessPayload(user);
+  const tokenPayload = [
+    TABLE_ACCESS_TOKEN_VERSION,
+    payload.id,
+    payload.shopid,
+    payload.access,
+  ].join(".");
+  return `${tokenPayload}.${signCompactPayload(tokenPayload)}`;
+};
 
 const verifyTableAccessToken = (token) => {
-  const decoded = jwt.verify(token, requireSigningKey());
-  if (decoded.purpose !== TABLE_ACCESS_PURPOSE) {
-    throw new Error("Invalid table access token purpose");
+  const parts = String(token || "").split(".");
+  if (parts.length !== 5 || parts[0] !== TABLE_ACCESS_TOKEN_VERSION) {
+    throw new Error("Invalid table access token");
   }
-  if (!QR_CLIENT_ACCESSES.includes(Number(decoded.access))) {
+  const tokenPayload = parts.slice(0, 4).join(".");
+  const expectedSignature = signCompactPayload(tokenPayload);
+  if (parts[4] !== expectedSignature) {
+    throw new Error("Invalid table access token");
+  }
+
+  const id = numericId(parts[1], "id");
+  const shopid = numericId(parts[2], "shopid");
+  const access = Number(parts[3]);
+  if (!QR_CLIENT_ACCESSES.includes(access)) {
     throw new Error("Invalid table access token access");
   }
-  return decoded;
+
+  return {
+    id,
+    shopid,
+    access,
+    purpose: TABLE_ACCESS_PURPOSE,
+  };
 };
 
 const signTableSessionToken = (user) =>
@@ -67,6 +96,7 @@ module.exports = {
   TABLE_ACCESS_PURPOSE,
   TABLE_SESSION_EXPIRES_IN,
   QR_CLIENT_ACCESSES,
+  TABLE_ACCESS_TOKEN_VERSION,
   buildTableAccessPayload,
   signTableAccessToken,
   verifyTableAccessToken,
