@@ -6,6 +6,7 @@ const { custom } = require("../helpers/response");
 const { withTransaction } = require("../helpers/withTransaction");
 const { validateConfiguredItem } = require("../helpers/customizationRules");
 const { buildStockRequirements } = require("../helpers/stockRequirements");
+const { isOrderTakerAccess } = require("../helpers/staffAccess");
 const { nextReservationStatus } = require("../helpers/reservationLifecycle");
 const { envSTRIPESTOCKRESERVATIONMINUTES } = require("../helpers/env");
 const {
@@ -226,6 +227,15 @@ const queryResult = async (connection, sql, params = []) => {
 };
 
 const sqlRepository = {
+  findUserById: ({ userId, shopId, connection }) => queryResult(
+    connection,
+    `SELECT id, shopid, username, access
+     FROM users
+     WHERE id = ? AND shopid = ?
+     LIMIT 1`,
+    [userId, shopId],
+  ).then((rows) => rows[0] || null),
+
   findOrderByToken: ({ shopId, token, connection }) => queryResult(
     connection,
     `SELECT id, shopid, subtotal, payment_status, client_order_payload_hash
@@ -673,6 +683,16 @@ const buildCheckoutModule = ({
       const timestamp = formatDate(timestampDate);
       const paymentState = resolveCheckoutPaymentState(checkout.paymentMode);
       const stripe = paymentState.payment_provider === "stripe";
+      const actor = typeof repository.findUserById === "function"
+        ? await repository.findUserById({
+          userId: checkout.actorId,
+          shopId: checkout.shopId,
+          connection,
+        })
+        : null;
+      const takenBy = actor && isOrderTakerAccess(actor.access)
+        ? { id: Number(actor.id), name: actor.username }
+        : { id: null, name: null };
       const orderResult = await repository.insertOrder({
         order: {
           shopid: checkout.shopId,
@@ -681,6 +701,8 @@ const buildCheckoutModule = ({
           phone: checkout.customer.phone,
           customerID: checkout.customer.id,
           operator: checkout.actorId,
+          taken_by_user_id: takenBy.id,
+          taken_by_name: takenBy.name,
           subtotal: total,
           payment: paymentState.payment,
           payment_status: paymentState.payment_status,

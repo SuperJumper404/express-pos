@@ -1667,6 +1667,7 @@ const makeCheckoutHarness = ({
   duplicateOnInsert = false,
   paymentMode,
   validateConfiguredItem,
+  actor = { id: 9, shopid: 7, username: "Amina", access: 1 },
 } = {}) => {
   const initial = {
     products: new Map([[10, 10], [30, 5]]),
@@ -1693,6 +1694,11 @@ const makeCheckoutHarness = ({
     nextReservationId: source.nextReservationId,
   });
   const repository = {
+    findUserById: async ({ userId, shopId }) => (
+      Number(userId) === Number(actor.id) && Number(shopId) === Number(actor.shopid)
+        ? actor
+        : null
+    ),
     findOrderByToken: async ({ shopId, token }) => state.orders.find(
       (row) => row.shopid === shopId && row.client_order_token === token,
     ) || null,
@@ -1960,6 +1966,31 @@ const runTransactionalCheckoutContracts = async () => {
     payment_status: "unpaid",
   });
   assert.deepStrictEqual(harness.events, ["begin", "commit"]);
+
+  harness = makeCheckoutHarness({
+    actor: { id: 9, shopid: 7, username: "Amina", access: 1 },
+  });
+  await harness.checkout.createCheckout(harness.input);
+  assert.strictEqual(
+    harness.getState().orders[0].taken_by_user_id,
+    9,
+    "a cashier-created order must retain the authenticated staff id",
+  );
+  assert.strictEqual(
+    harness.getState().orders[0].taken_by_name,
+    "Amina",
+    "a cashier-created order must retain the authenticated staff name",
+  );
+
+  harness = makeCheckoutHarness({
+    actor: { id: 9, shopid: 7, username: "Table 1", access: 2 },
+  });
+  await harness.checkout.createCheckout(harness.input);
+  assert.strictEqual(
+    harness.getState().orders[0].taken_by_user_id,
+    null,
+    "a Table QR order must not receive a staff taker",
+  );
 
   harness = makeCheckoutHarness({
     existingOrder: {

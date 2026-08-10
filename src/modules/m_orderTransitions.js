@@ -1,6 +1,7 @@
 const pool = require("../config/dbPool");
 const DomainError = require("../helpers/domainError");
 const { ORDER_STATUSES } = require("../helpers/orderStatus");
+const { isStaffAccess } = require("../helpers/staffAccess");
 const { withTransaction } = require("../helpers/withTransaction");
 
 const ALLOWED_TRANSITIONS = new Set([
@@ -16,6 +17,14 @@ const queryResult = async (connection, sql, params = []) => {
 };
 
 const sqlRepository = {
+  findUserById: ({ userId, shopId, connection }) => queryResult(
+    connection,
+    `SELECT id, shopid, username, access
+     FROM users
+     WHERE id = ? AND shopid = ?
+     LIMIT 1`,
+    [userId, shopId],
+  ).then((rows) => rows[0] || null),
   lockOrder: ({ orderId, shopId, connection }) => queryResult(
     connection,
     `SELECT * FROM orders
@@ -24,13 +33,23 @@ const sqlRepository = {
     [orderId, shopId],
   ).then((rows) => rows[0] || null),
   updateStatus: ({
-    orderId, shopId, operator, nextStatus, finished, connection,
+    orderId, shopId, operator, nextStatus, finished, preparedBy, connection,
   }) => queryResult(
     connection,
     `UPDATE orders
-     SET status = ?, operator = ?, finished = ?
+     SET status = ?, operator = ?, finished = ?,
+         prepared_by_user_id = COALESCE(prepared_by_user_id, ?),
+         prepared_by_name = COALESCE(prepared_by_name, ?)
      WHERE id = ? AND shopid = ?`,
-    [nextStatus, operator, finished, orderId, shopId],
+    [
+      nextStatus,
+      operator,
+      finished,
+      preparedBy ? preparedBy.id : null,
+      preparedBy ? preparedBy.name : null,
+      orderId,
+      shopId,
+    ],
   ),
 };
 
@@ -63,12 +82,25 @@ const buildOrderTransitionModule = ({
       if (beforeTransition) {
         await beforeTransition({ order, connection });
       }
+      const shouldAttributePreparation = Number(order.status) === ORDER_STATUSES.PENDING
+        && Number(nextStatus) === ORDER_STATUSES.PREPARING;
+      const actor = shouldAttributePreparation && typeof repository.findUserById === "function"
+        ? await repository.findUserById({
+          userId: operator,
+          shopId,
+          connection,
+        })
+        : null;
+      const preparedBy = actor && isStaffAccess(actor.access)
+        ? { id: Number(actor.id), name: actor.username }
+        : null;
       const result = await repository.updateStatus({
         orderId,
         shopId,
         operator,
         nextStatus,
         finished: formatDate(now()),
+        preparedBy,
         connection,
       });
       return { order, result };

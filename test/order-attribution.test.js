@@ -1,4 +1,8 @@
 const assert = require("assert");
+const {
+  isOrderTakerAccess,
+  isStaffAccess,
+} = require("../src/helpers/staffAccess");
 
 const callbackDbPath = require.resolve("../src/config/db");
 require.cache[callbackDbPath] = {
@@ -32,5 +36,13 @@ assert.deepStrictEqual(
   },
   "archived orders must keep staff attribution snapshots",
 );
+
+assert.strictEqual(isStaffAccess(0), true);
+assert.strictEqual(isStaffAccess(5), true);
+assert.strictEqual(isStaffAccess(2), false);
+assert.strictEqual(isOrderTakerAccess(0), true);
+assert.strictEqual(isOrderTakerAccess(4), true);
+assert.strictEqual(isOrderTakerAccess(5), false);
+assert.strictEqual(isOrderTakerAccess(2), false);
 
 console.log("order attribution archive tests passed");
