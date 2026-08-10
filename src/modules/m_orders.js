@@ -162,6 +162,10 @@ const ARCHIVE_ORDER_FIELDS = [
   "phone",
   "customerID",
   "operator",
+  "taken_by_user_id",
+  "taken_by_name",
+  "prepared_by_user_id",
+  "prepared_by_name",
   "subtotal",
   "payment",
   "status",
@@ -1008,6 +1012,7 @@ module.exports = {
 
 const legacyAllArchivedOrdersWithDetails = module.exports.mAllArchivedOrdersWithDetails;
 module.exports.buildOrderArchiveModule = buildOrderArchiveModule;
+module.exports.pickArchiveOrderFields = pickArchiveOrderFields;
 module.exports.mArchiveOrder = orderArchiveModule.mArchiveOrder;
 module.exports.mDetailArchivedOrder = orderArchiveModule.mDetailArchivedOrder;
 module.exports.mDetailArchivedOrderByToken = orderArchiveModule.mDetailArchivedOrderByToken;
