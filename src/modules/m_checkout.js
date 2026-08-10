@@ -68,6 +68,38 @@ const canonicalPayloadHash = (input) => crypto
   .update(JSON.stringify(canonicalPayload(input)))
   .digest("hex");
 
+const COUNTER_PAY_BEFORE_PREFIX = "counter_pay_before:";
+
+const resolveCheckoutPaymentState = (paymentMode) => {
+  const normalizedPaymentMode = typeof paymentMode === "string"
+    ? paymentMode.trim()
+    : "";
+  const comparablePaymentMode = normalizedPaymentMode.toLowerCase();
+
+  if (comparablePaymentMode === "stripe") {
+    return {
+      payment: "stripe",
+      payment_status: "requires_payment",
+      payment_provider: "stripe",
+    };
+  }
+
+  if (comparablePaymentMode.startsWith(COUNTER_PAY_BEFORE_PREFIX)) {
+    const method = normalizedPaymentMode.slice(COUNTER_PAY_BEFORE_PREFIX.length).trim();
+    return {
+      payment: method || "Caisse",
+      payment_status: "paid",
+      payment_provider: "counter",
+    };
+  }
+
+  return {
+    payment: comparablePaymentMode,
+    payment_status: "unpaid",
+    payment_provider: null,
+  };
+};
+
 const invalidRequest = (field) => new DomainError(
   400,
   "CHECKOUT_REQUEST_INVALID",
@@ -639,8 +671,8 @@ const buildCheckoutModule = ({
 
       const timestampDate = now();
       const timestamp = formatDate(timestampDate);
-      const stripe = checkout.paymentMode === "stripe";
-      const paymentStatus = stripe ? "requires_payment" : "unpaid";
+      const paymentState = resolveCheckoutPaymentState(checkout.paymentMode);
+      const stripe = paymentState.payment_provider === "stripe";
       const orderResult = await repository.insertOrder({
         order: {
           shopid: checkout.shopId,
@@ -650,9 +682,9 @@ const buildCheckoutModule = ({
           customerID: checkout.customer.id,
           operator: checkout.actorId,
           subtotal: total,
-          payment: checkout.paymentMode,
-          payment_status: paymentStatus,
-          payment_provider: stripe ? "stripe" : null,
+          payment: paymentState.payment,
+          payment_status: paymentState.payment_status,
+          payment_provider: paymentState.payment_provider,
           status: 1,
           created: timestamp,
           finished: timestamp,
@@ -775,7 +807,7 @@ const buildCheckoutModule = ({
         orderId,
         total,
         idempotent_replay: false,
-        payment_status: paymentStatus,
+        payment_status: paymentState.payment_status,
       };
     };
 
@@ -815,4 +847,5 @@ module.exports = {
   finalizeReservations: checkoutModule.finalizeReservations,
   normalizeCheckoutRequestBody,
   releaseExpiredReservations: checkoutModule.releaseExpiredReservations,
+  resolveCheckoutPaymentState,
 };
