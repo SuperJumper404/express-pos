@@ -13,6 +13,11 @@ const queryResult = async (connection, sql, params = []) => {
 };
 
 const archiveSqlRepository = {
+  lockShopForArchive: ({ shopId, connection }) => queryResult(
+    connection,
+    "SELECT id FROM shop WHERE id = ? FOR UPDATE",
+    [shopId],
+  ).then((rows) => rows[0] || null),
   findOrderForArchive: ({ orderId, shopId, connection }) => {
     const shopClause = shopId == null ? "" : " AND shopid = ?";
     const params = shopId == null ? [orderId] : [orderId, shopId];
@@ -250,6 +255,9 @@ const buildOrderArchiveModule = ({
 
   const mArchiveOrder = (id, paymentMethod, shopId) => runInTransaction(
     async (connection) => {
+      if (shopId != null && repository.lockShopForArchive) {
+        await repository.lockShopForArchive({ shopId, connection });
+      }
       const order = await repository.findOrderForArchive({
         orderId: id,
         shopId,

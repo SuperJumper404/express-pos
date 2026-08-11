@@ -92,6 +92,38 @@ assert.deepStrictEqual(
   }
 );
 
+assert.deepStrictEqual(
+  buildCashClosureSnapshot({
+    lastClosure: { closed_at: "2026-08-11T10:00:00.000Z" },
+    archivedOrders: [
+      {
+        id: 20,
+        created: "2026-08-11T09:00:00.000Z",
+        archived_at: "2026-08-11T10:30:00.000Z",
+        subtotal: 15,
+        payment: "Carte",
+      },
+      {
+        id: 21,
+        created: "2026-08-11T09:30:00.000Z",
+        archived_at: "2026-08-11T09:45:00.000Z",
+        subtotal: 8,
+        payment: "Especes",
+      },
+    ],
+    detailRows: [],
+    now: "2026-08-11T11:00:00.000Z",
+  }),
+  {
+    opened_at: "2026-08-11T10:00:00.000Z",
+    closed_at: "2026-08-11T11:00:00.000Z",
+    orders_count: 1,
+    total_revenue: 15,
+    payments_summary: [{ payment: "Carte", orders_count: 1, total: 15 }],
+    vat_summary: [],
+  }
+);
+
 const fs = require("fs");
 const path = require("path");
 
@@ -107,6 +139,36 @@ assert.ok(migration.includes("-- migrate:up"));
 assert.ok(migration.includes("-- migrate:down"));
 assert.ok(migration.includes("DROP TABLE IF EXISTS `cash_closures`"));
 
+const archivalTimestampMigration = fs.readFileSync(
+  path.join(
+    __dirname,
+    "../db/migrations/20260811190000_archive_settlement_timestamp.sql"
+  ),
+  "utf8"
+);
+assert.ok(archivalTimestampMigration.includes("`archived_at` DATETIME(6) NULL"));
+assert.ok(
+  archivalTimestampMigration.includes("UPDATE `archives` SET `archived_at` = `created`")
+);
+assert.ok(
+  archivalTimestampMigration.includes(
+    "`archived_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)"
+  )
+);
+assert.ok(
+  archivalTimestampMigration.includes(
+    "KEY `idx_archives_shop_archived_at` (`shopid`, `archived_at`)"
+  )
+);
+assert.ok(
+  archivalTimestampMigration.includes(
+    "KEY `idx_archivesdetail_orderid` (`orderid`)"
+  )
+);
+assert.ok(
+  archivalTimestampMigration.includes("`closed_at` DATETIME(6) NOT NULL")
+);
+
 const moduleSource = fs.readFileSync(
   path.join(__dirname, "../src/modules/m_cashClosures.js"),
   "utf8"
@@ -119,6 +181,20 @@ assert.ok(moduleSource.includes("orders_count <= 0"));
 assert.ok(moduleSource.includes("La periode ne contient aucune commande a cloturer."));
 assert.ok(moduleSource.includes("JSON.stringify(snapshot.payments_summary)"));
 assert.ok(moduleSource.includes("JSON.stringify(snapshot.vat_summary)"));
+assert.ok(moduleSource.includes("archives.archived_at"));
+assert.ok(moduleSource.includes("ORDER BY archives.archived_at ASC"));
+assert.ok(!moduleSource.includes("archives.created"));
+
+const ordersModuleSource = fs.readFileSync(
+  path.join(__dirname, "../src/modules/m_orders.js"),
+  "utf8"
+);
+assert.ok(ordersModuleSource.includes("lockShopForArchive"));
+assert.ok(ordersModuleSource.includes("SELECT id FROM shop WHERE id = ? FOR UPDATE"));
+assert.ok(
+  ordersModuleSource.indexOf("repository.lockShopForArchive") <
+    ordersModuleSource.indexOf("repository.insertArchive")
+);
 
 const controllerSource = fs.readFileSync(
   path.join(__dirname, "../src/controllers/c_cashClosures.js"),

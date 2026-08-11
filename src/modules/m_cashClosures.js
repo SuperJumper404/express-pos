@@ -65,11 +65,18 @@ const getNextClosureNumber = (shopId, connection) =>
     connection
   ).then((rows) => Number(rows[0] && rows[0].next_number) || 1);
 
+const getDatabaseNow = (connection) =>
+  queryResult(
+    "SELECT CURRENT_TIMESTAMP(6) AS current_time",
+    [],
+    connection
+  ).then((rows) => (rows[0] && rows[0].current_time) || new Date());
+
 const getArchivedOrdersForPeriod = ({ shopId, openedAt, closedAt, connection = pool }) => {
   const params = [shopId];
-  let dateClause = "AND archives.created <= ?";
+  let dateClause = "AND archives.archived_at <= ?";
   if (openedAt) {
-    dateClause = "AND archives.created > ? AND archives.created <= ?";
+    dateClause = "AND archives.archived_at > ? AND archives.archived_at <= ?";
     params.push(openedAt);
   }
   params.push(closedAt);
@@ -79,7 +86,7 @@ const getArchivedOrdersForPeriod = ({ shopId, openedAt, closedAt, connection = p
      FROM archives
      WHERE archives.shopid = ?
        ${dateClause}
-     ORDER BY archives.created ASC`,
+     ORDER BY archives.archived_at ASC`,
     params,
     connection
   );
@@ -126,9 +133,10 @@ const mCloseCurrentCashClosure = ({ shopId, userId }) =>
     await lockShopForCashClosure(shopId, connection);
     await getLastClosureForUpdate(shopId, connection);
     const closureNumber = await getNextClosureNumber(shopId, connection);
+    const now = await getDatabaseNow(connection);
     const snapshot = await buildCurrentSnapshot({
       shopId,
-      now: new Date(),
+      now,
       connection,
     });
 

@@ -11,7 +11,24 @@ const isoOrNull = (value) => {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 };
 
-const getOrderCreatedIso = (order) => isoOrNull(order && order.created);
+const getOrderArchivedIso = (order) => isoOrNull(
+  order && (order.archived_at || order.created)
+);
+
+const filterArchivedOrdersForPeriod = ({
+  lastClosure,
+  archivedOrders = [],
+  now,
+}) => {
+  const openedAt = isoOrNull(lastClosure && lastClosure.closed_at);
+  const closedAt = isoOrNull(now) || new Date().toISOString();
+
+  return archivedOrders.filter((order) => {
+    const archivedAt = getOrderArchivedIso(order);
+    if (!archivedAt || archivedAt > closedAt) return false;
+    return !openedAt || archivedAt > openedAt;
+  });
+};
 
 const getClosurePeriodBounds = ({ lastClosure, archivedOrders = [], now }) => {
   const closedAt = isoOrNull(now) || new Date().toISOString();
@@ -21,7 +38,7 @@ const getClosurePeriodBounds = ({ lastClosure, archivedOrders = [], now }) => {
   }
 
   const firstArchivedOrderDate = archivedOrders
-    .map(getOrderCreatedIso)
+    .map(getOrderArchivedIso)
     .filter(Boolean)
     .sort()[0] || null;
 
@@ -75,18 +92,27 @@ const buildCashClosureSnapshot = ({
   detailRows = [],
   now,
 }) => {
-  const bounds = getClosurePeriodBounds({ lastClosure, archivedOrders, now });
+  const periodOrders = filterArchivedOrdersForPeriod({
+    lastClosure,
+    archivedOrders,
+    now,
+  });
+  const bounds = getClosurePeriodBounds({
+    lastClosure,
+    archivedOrders: periodOrders,
+    now,
+  });
 
   return {
     ...bounds,
-    orders_count: archivedOrders.length,
+    orders_count: periodOrders.length,
     total_revenue: roundMoney(
-      archivedOrders.reduce(
+      periodOrders.reduce(
         (total, order) => total + moneyOrZero(order && order.subtotal),
         0
       )
     ),
-    payments_summary: buildPaymentSummary(archivedOrders),
+    payments_summary: buildPaymentSummary(periodOrders),
     vat_summary: buildVatSummary(detailRows),
   };
 };
@@ -95,5 +121,6 @@ module.exports = {
   buildCashClosureSnapshot,
   buildPaymentSummary,
   buildVatSummary,
+  filterArchivedOrdersForPeriod,
   getClosurePeriodBounds,
 };
