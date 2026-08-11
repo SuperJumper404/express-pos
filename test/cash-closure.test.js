@@ -92,4 +92,47 @@ assert.deepStrictEqual(
   }
 );
 
+const fs = require("fs");
+const path = require("path");
+
+const migration = fs.readFileSync(
+  path.join(__dirname, "../db/migrations/20260811170000_cash_closures.sql"),
+  "utf8"
+);
+assert.ok(migration.includes("CREATE TABLE IF NOT EXISTS `cash_closures`"));
+assert.ok(migration.includes("`closure_number` INT NOT NULL"));
+assert.ok(migration.includes("`payments_summary` JSON NOT NULL"));
+assert.ok(migration.includes("`vat_summary` JSON NOT NULL"));
+
+const moduleSource = fs.readFileSync(
+  path.join(__dirname, "../src/modules/m_cashClosures.js"),
+  "utf8"
+);
+assert.ok(moduleSource.includes("mGetCurrentCashClosure"));
+assert.ok(moduleSource.includes("mCloseCurrentCashClosure"));
+assert.ok(moduleSource.includes("FOR UPDATE"));
+assert.ok(moduleSource.includes("orders_count <= 0"));
+assert.ok(moduleSource.includes("La periode ne contient aucune commande a cloturer."));
+assert.ok(moduleSource.includes("JSON.stringify(snapshot.payments_summary)"));
+assert.ok(moduleSource.includes("JSON.stringify(snapshot.vat_summary)"));
+
+const controllerSource = fs.readFileSync(
+  path.join(__dirname, "../src/controllers/c_cashClosures.js"),
+  "utf8"
+);
+assert.ok(controllerSource.includes("currentCashClosure"));
+assert.ok(controllerSource.includes("closeCashClosure"));
+assert.ok(controllerSource.includes("allCashClosures"));
+assert.ok(controllerSource.includes("cashClosureById"));
+
+const routerSource = fs.readFileSync(
+  path.join(__dirname, "../src/routers/r_orders.js"),
+  "utf8"
+);
+assert.ok(routerSource.includes('require("../controllers/c_cashClosures")'));
+assert.ok(routerSource.includes('"/reports/z/current"'));
+assert.ok(routerSource.includes('"/reports/z/close"'));
+assert.ok(routerSource.includes('"/reports/z"'));
+assert.ok(routerSource.includes('"/reports/z/:id"'));
+
 console.log("cash closure helper tests passed");
