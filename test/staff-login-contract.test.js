@@ -17,10 +17,15 @@ const router = fs.readFileSync(
 )
 
 assert.match(controller, /verifyStaffPin/)
-assert.match(controller, /regenerate_login_id/)
+assert.match(controller, /createStaffPin/)
+assert.match(controller, /module_permissions/)
+assert.match(controller, /staff_pin:\s*staffPin/)
+assert.doesNotMatch(controller, /regenerate_login_id/)
 assert.match(controller, /Number\(user\.access\)\s*===\s*0/)
 assert.match(moduleSource, /WHERE staff_login_id = \?/)
 assert.match(moduleSource, /staff_login_id/)
+assert.match(moduleSource, /module_permissions/)
+assert.match(moduleSource, /is_primary_admin/)
 assert.doesNotMatch(moduleSource, /SELECT \* FROM users WHERE shopid = \?/)
 assert.doesNotMatch(moduleSource, /staff_pin_hash.*mGetAllUser/)
 

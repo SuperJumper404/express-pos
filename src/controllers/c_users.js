@@ -29,16 +29,27 @@ const jwt = require("jsonwebtoken");
 const fs = require("fs");
 const {
   createStaffLoginId,
+  createStaffPin,
   normalizeStaffLoginId,
-  isValidStaffPin,
   hashStaffPin,
   verifyStaffPin,
 } = require("../helpers/staffCredentials");
+const {
+  normalizeModulePermissions,
+  parseModulePermissions,
+} = require("../helpers/staffPermissions");
 
 const STAFF_ACCESS_VALUES = new Set([0, 1, 4, 5]);
 const isStaffAccess = (access) => STAFF_ACCESS_VALUES.has(Number(access));
 const invalidCredentials = (res) =>
   custom(res, 422, "Identifiant ou code incorrect.", {}, null);
+const withModulePermissions = (user) => ({
+  ...user,
+  module_permissions: parseModulePermissions(
+    user.module_permissions,
+    user.access,
+  ),
+});
 const findActiveAdminByPassword = async (users, password) => {
   let legacyUser = null;
   for (const user of users) {
@@ -78,7 +89,8 @@ const createSession = async (user) => {
     },
     user.id,
   );
-  return mSessionUser(user.id);
+  const sessionUsers = await mSessionUser(user.id);
+  return sessionUsers.map(withModulePermissions);
 };
 
 const createInternalPassword = () =>
@@ -91,10 +103,6 @@ const registerWithStaffCredentials = async (req, res) => {
     const staffAccount = isStaffAccess(access);
     const email = String(body.email || "").trim();
 
-    if (staffAccount && !isValidStaffPin(body.pin)) {
-      return custom(res, 422, "Le PIN doit contenir 4 chiffres.", {}, null);
-    }
-
     if (!staffAccount) {
       const existingUsers = await mFindUserByEmail(email);
       if (existingUsers.length >= 1) {
@@ -104,10 +112,10 @@ const registerWithStaffCredentials = async (req, res) => {
 
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const staffLoginId = staffAccount ? createStaffLoginId() : null;
-      const passwordInput =
-        staffAccount && access !== 0
-          ? createInternalPassword()
-          : body.password || createInternalPassword();
+      const staffPin = staffAccount ? createStaffPin() : null;
+      const passwordInput = staffAccount
+        ? createInternalPassword()
+        : body.password || createInternalPassword();
       const data = {
         username: body.username,
         phone: body.phone || "",
@@ -123,7 +131,10 @@ const registerWithStaffCredentials = async (req, res) => {
 
       if (staffAccount) {
         data.staff_login_id = staffLoginId;
-        data.staff_pin_hash = await hashStaffPin(body.pin);
+        data.staff_pin_hash = await hashStaffPin(staffPin);
+        data.module_permissions = JSON.stringify(
+          normalizeModulePermissions(body.module_permissions, access),
+        );
       }
 
       try {
@@ -132,7 +143,9 @@ const registerWithStaffCredentials = async (req, res) => {
           res,
           "Compte cree avec succes.",
           {},
-          staffAccount ? { staff_login_id: staffLoginId } : null,
+          staffAccount
+            ? { staff_login_id: staffLoginId, staff_pin: staffPin }
+            : null,
         );
       } catch (error) {
         if (!(staffAccount && error.code === "ER_DUP_ENTRY" && attempt < 4)) {
@@ -149,34 +162,31 @@ const registerWithStaffCredentials = async (req, res) => {
 
 const setStaffCredentials = async (req, res) => {
   try {
-    const body = req.body || {};
-    if (!isValidStaffPin(body.pin)) {
-      return custom(res, 422, "Le PIN doit contenir 4 chiffres.", {}, null);
-    }
-
     const users = await mFindUserByIdAndShop(req.params.id, req.shopid);
     const user = users[0];
-    if (!user || !isStaffAccess(user.access)) {
+    if (
+      !user ||
+      !isStaffAccess(user.access) ||
+      Number(user.is_primary_admin) === 1
+    ) {
       return custom(res, 404, "Utilisateur introuvable.", {}, null);
     }
 
-    const regenerateLoginId = Boolean(body.regenerate_login_id);
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      const staffLoginId =
-        regenerateLoginId || !user.staff_login_id
-          ? createStaffLoginId()
-          : user.staff_login_id;
+      const staffLoginId = user.staff_login_id || createStaffLoginId();
+      const staffPin = createStaffPin();
       try {
         await mUpdateUser(
           {
             staff_login_id: staffLoginId,
-            staff_pin_hash: await hashStaffPin(body.pin),
+            staff_pin_hash: await hashStaffPin(staffPin),
             updated: new Date(),
           },
           user.id,
         );
         return success(res, "Identifiants caisse mis a jour.", {}, {
           staff_login_id: staffLoginId,
+          staff_pin: staffPin,
         });
       } catch (error) {
         if (!(error.code === "ER_DUP_ENTRY" && attempt < 4)) {
@@ -447,7 +457,8 @@ module.exports = {
   getAllUser: async (req, res) => {
     mGetAllUser(req.shopid)
       .then((response) => {
-        const users = response.map((user) => {
+        const users = response.map((rawUser) => {
+          const user = withModulePermissions(rawUser);
           if (![2, 3].includes(Number(user.access))) return user;
           return {
             ...user,
@@ -464,7 +475,12 @@ module.exports = {
     const id = req.params.id;
     mDetailUser(id)
       .then((response) => {
-        success(res, "Détail utilisateur récupéré.", null, response);
+        success(
+          res,
+          "Détail utilisateur récupéré.",
+          null,
+          response.map(withModulePermissions),
+        );
       })
       .catch((error) => {
         failed(res, "Erreur serveur.", error.message);
@@ -475,6 +491,13 @@ module.exports = {
     body.updated = new Date();
     const id = req.params.id;
     const detail = await mDetailUser(id);
+    if (Object.prototype.hasOwnProperty.call(body, "module_permissions")) {
+      const access =
+        body.access === undefined ? detail[0].access : Number(body.access);
+      body.module_permissions = JSON.stringify(
+        normalizeModulePermissions(body.module_permissions, access),
+      );
+    }
     if (req.file) {
       if (detail[0].image === "defaultuser.png") {
         body.image = req.file.filename;

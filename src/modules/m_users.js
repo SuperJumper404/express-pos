@@ -43,7 +43,7 @@ module.exports = {
   mFindUserByIdAndShop: (id, shopid) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        "SELECT id, shopid, access, staff_login_id FROM users WHERE id = ? AND shopid = ?",
+        "SELECT users.id, users.shopid, users.access, users.staff_login_id, CASE WHEN shop.admin_user = users.id THEN 1 ELSE 0 END AS is_primary_admin FROM users LEFT JOIN shop ON shop.id = users.shopid WHERE users.id = ? AND users.shopid = ?",
         [id, shopid],
         (err, result) => {
           if (!err) {
@@ -141,7 +141,7 @@ module.exports = {
   mGetAllUser: (shopid) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        "SELECT id, shopid, username, email, phone, gender, position, image, status, access, staff_login_id, created, updated FROM users WHERE shopid = ?",
+        "SELECT users.id, users.shopid, users.username, users.email, users.phone, users.gender, users.position, users.image, users.status, users.access, users.staff_login_id, users.module_permissions, users.created, users.updated, CASE WHEN shop.admin_user = users.id THEN 1 ELSE 0 END AS is_primary_admin FROM users LEFT JOIN shop ON shop.id = users.shopid WHERE users.shopid = ?",
         [shopid],
         (err, result) => {
           if (!err) {
@@ -168,7 +168,7 @@ module.exports = {
   mDetailUser: (id) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        "SELECT id, shopid, username, email, phone, gender, position, image, status, access, staff_login_id, created, updated FROM users WHERE id = ?",
+        "SELECT users.id, users.shopid, users.username, users.email, users.phone, users.gender, users.position, users.image, users.status, users.access, users.staff_login_id, users.module_permissions, users.created, users.updated, CASE WHEN shop.admin_user = users.id THEN 1 ELSE 0 END AS is_primary_admin FROM users LEFT JOIN shop ON shop.id = users.shopid WHERE users.id = ?",
         [id],
         (err, result) => {
           if (!err) {
@@ -183,7 +183,7 @@ module.exports = {
   mSessionUser: (id) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        "SELECT id, shopid, username, email, token, expired, phone, gender, position, image, status, access, staff_login_id, created, updated FROM users WHERE id = ?",
+        "SELECT users.id, users.shopid, users.username, users.email, users.token, users.expired, users.phone, users.gender, users.position, users.image, users.status, users.access, users.staff_login_id, users.module_permissions, users.created, users.updated, CASE WHEN shop.admin_user = users.id THEN 1 ELSE 0 END AS is_primary_admin FROM users LEFT JOIN shop ON shop.id = users.shopid WHERE users.id = ?",
         [id],
         (err, result) => {
           if (!err) {

@@ -37,9 +37,22 @@ const normalizeModulePermissions = (value, access) => {
   return [...new Set(source.filter((key) => STAFF_MODULE_KEYS.includes(key)))];
 };
 
+const parseModulePermissions = (value, access) => {
+  if (Array.isArray(value)) return normalizeModulePermissions(value, access);
+  if (typeof value !== "string" || !value) {
+    return getDefaultModulePermissions(access);
+  }
+  try {
+    return normalizeModulePermissions(JSON.parse(value), access);
+  } catch (error) {
+    return getDefaultModulePermissions(access);
+  }
+};
+
 module.exports = {
   ACCESS,
   STAFF_MODULE_KEYS,
   getDefaultModulePermissions,
   normalizeModulePermissions,
+  parseModulePermissions,
 };
