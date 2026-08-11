@@ -29,7 +29,9 @@ const normalizeClosureRow = (row) => {
 
 const getLastClosure = (shopId, connection = pool) =>
   queryResult(
-    `SELECT * FROM cash_closures
+    `SELECT cash_closures.*,
+            DATE_FORMAT(closed_at, '%Y-%m-%d %H:%i:%s.%f') AS closed_at
+     FROM cash_closures
      WHERE shopid = ?
      ORDER BY closed_at DESC, id DESC
      LIMIT 1`,
@@ -39,7 +41,9 @@ const getLastClosure = (shopId, connection = pool) =>
 
 const getLastClosureForUpdate = (shopId, connection) =>
   queryResult(
-    `SELECT * FROM cash_closures
+    `SELECT cash_closures.*,
+            DATE_FORMAT(closed_at, '%Y-%m-%d %H:%i:%s.%f') AS closed_at
+     FROM cash_closures
      WHERE shopid = ?
      ORDER BY closed_at DESC, id DESC
      LIMIT 1
@@ -67,10 +71,11 @@ const getNextClosureNumber = (shopId, connection) =>
 
 const getDatabaseNow = (connection) =>
   queryResult(
-    "SELECT CURRENT_TIMESTAMP(6) AS current_time",
+    `SELECT DATE_FORMAT(CURRENT_TIMESTAMP(6), '%Y-%m-%d %H:%i:%s.%f')
+            AS current_time`,
     [],
     connection
-  ).then((rows) => (rows[0] && rows[0].current_time) || new Date());
+  ).then((rows) => rows[0].current_time);
 
 const getArchivedOrdersForPeriod = ({ shopId, openedAt, closedAt, connection = pool }) => {
   const params = [shopId];
@@ -82,7 +87,8 @@ const getArchivedOrdersForPeriod = ({ shopId, openedAt, closedAt, connection = p
   params.push(closedAt);
 
   return queryResult(
-    `SELECT archives.*
+    `SELECT archives.*,
+            DATE_FORMAT(archives.archived_at, '%Y-%m-%d %H:%i:%s.%f') AS archived_at
      FROM archives
      WHERE archives.shopid = ?
        ${dateClause}
@@ -103,10 +109,10 @@ const getArchiveDetailsForOrders = ({ orderIds, connection = pool }) => {
   );
 };
 
-const buildCurrentSnapshot = async ({ shopId, now = new Date(), connection = pool }) => {
+const buildCurrentSnapshot = async ({ shopId, now, connection = pool }) => {
   const lastClosure = await getLastClosure(shopId, connection);
   const openedAt = lastClosure && lastClosure.closed_at ? lastClosure.closed_at : null;
-  const closedAt = now;
+  const closedAt = now || await getDatabaseNow(connection);
   const archivedOrders = await getArchivedOrdersForPeriod({
     shopId,
     openedAt,
@@ -160,8 +166,8 @@ const mCloseCurrentCashClosure = ({ shopId, userId }) =>
       [
         shopId,
         closureNumber,
-        snapshot.opened_at ? new Date(snapshot.opened_at) : null,
-        new Date(snapshot.closed_at),
+        snapshot.opened_at || null,
+        snapshot.closed_at,
         userId || null,
         snapshot.orders_count,
         snapshot.total_revenue,

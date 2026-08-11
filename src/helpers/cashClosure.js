@@ -5,13 +5,27 @@ const moneyOrZero = (value) => {
 
 const roundMoney = (value) => Number(moneyOrZero(value).toFixed(2));
 
-const isoOrNull = (value) => {
+const TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z)?$/;
+
+const timestampOrNull = (value) => {
   if (!value) return null;
+  if (typeof value === "string") {
+    const timestamp = value.trim();
+    if (TIMESTAMP_PATTERN.test(timestamp)) return timestamp;
+  }
   const date = value instanceof Date ? value : new Date(value);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 };
 
-const getOrderArchivedIso = (order) => isoOrNull(
+const timestampSortKey = (value) => {
+  const timestamp = timestampOrNull(value);
+  const match = timestamp && timestamp.match(TIMESTAMP_PATTERN);
+  if (!match) return null;
+  const fraction = (match[7] || "").padEnd(6, "0");
+  return `${match.slice(1, 7).join("")}${fraction}`;
+};
+
+const getOrderArchivedTimestamp = (order) => timestampOrNull(
   order && (order.archived_at || order.created)
 );
 
@@ -20,27 +34,31 @@ const filterArchivedOrdersForPeriod = ({
   archivedOrders = [],
   now,
 }) => {
-  const openedAt = isoOrNull(lastClosure && lastClosure.closed_at);
-  const closedAt = isoOrNull(now) || new Date().toISOString();
+  const openedAt = timestampOrNull(lastClosure && lastClosure.closed_at);
+  const closedAt = timestampOrNull(now) || new Date().toISOString();
+  const openedAtKey = timestampSortKey(openedAt);
+  const closedAtKey = timestampSortKey(closedAt);
 
   return archivedOrders.filter((order) => {
-    const archivedAt = getOrderArchivedIso(order);
-    if (!archivedAt || archivedAt > closedAt) return false;
-    return !openedAt || archivedAt > openedAt;
+    const archivedAtKey = timestampSortKey(getOrderArchivedTimestamp(order));
+    if (!archivedAtKey || archivedAtKey > closedAtKey) return false;
+    return !openedAtKey || archivedAtKey > openedAtKey;
   });
 };
 
 const getClosurePeriodBounds = ({ lastClosure, archivedOrders = [], now }) => {
-  const closedAt = isoOrNull(now) || new Date().toISOString();
-  const previousClosedAt = isoOrNull(lastClosure && lastClosure.closed_at);
+  const closedAt = timestampOrNull(now) || new Date().toISOString();
+  const previousClosedAt = timestampOrNull(lastClosure && lastClosure.closed_at);
   if (previousClosedAt) {
     return { opened_at: previousClosedAt, closed_at: closedAt };
   }
 
   const firstArchivedOrderDate = archivedOrders
-    .map(getOrderArchivedIso)
+    .map(getOrderArchivedTimestamp)
     .filter(Boolean)
-    .sort()[0] || null;
+    .sort((left, right) => (
+      timestampSortKey(left).localeCompare(timestampSortKey(right))
+    ))[0] || null;
 
   return { opened_at: firstArchivedOrderDate, closed_at: closedAt };
 };

@@ -77,6 +77,36 @@ assert.deepStrictEqual(
 
 assert.deepStrictEqual(
   buildCashClosureSnapshot({
+    lastClosure: { closed_at: "2026-08-11 10:00:00.123900" },
+    archivedOrders: [
+      {
+        id: 30,
+        archived_at: "2026-08-11 10:00:00.123925",
+        subtotal: 9,
+        payment: "Carte",
+      },
+      {
+        id: 31,
+        archived_at: "2026-08-11 10:00:00.123975",
+        subtotal: 11,
+        payment: "Especes",
+      },
+    ],
+    detailRows: [],
+    now: "2026-08-11 10:00:00.123950",
+  }),
+  {
+    opened_at: "2026-08-11 10:00:00.123900",
+    closed_at: "2026-08-11 10:00:00.123950",
+    orders_count: 1,
+    total_revenue: 9,
+    payments_summary: [{ payment: "Carte", orders_count: 1, total: 9 }],
+    vat_summary: [],
+  }
+);
+
+assert.deepStrictEqual(
+  buildCashClosureSnapshot({
     lastClosure: null,
     archivedOrders: [],
     detailRows: [],
@@ -184,6 +214,23 @@ assert.ok(moduleSource.includes("JSON.stringify(snapshot.vat_summary)"));
 assert.ok(moduleSource.includes("archives.archived_at"));
 assert.ok(moduleSource.includes("ORDER BY archives.archived_at ASC"));
 assert.ok(!moduleSource.includes("archives.created"));
+assert.ok(
+  moduleSource.includes(
+    "DATE_FORMAT(CURRENT_TIMESTAMP(6), '%Y-%m-%d %H:%i:%s.%f')"
+  )
+);
+assert.ok(
+  moduleSource.includes(
+    "DATE_FORMAT(closed_at, '%Y-%m-%d %H:%i:%s.%f') AS closed_at"
+  )
+);
+assert.ok(
+  moduleSource.includes(
+    "DATE_FORMAT(archives.archived_at, '%Y-%m-%d %H:%i:%s.%f') AS archived_at"
+  )
+);
+assert.ok(!moduleSource.includes("new Date(snapshot.opened_at)"));
+assert.ok(!moduleSource.includes("new Date(snapshot.closed_at)"));
 
 const ordersModuleSource = fs.readFileSync(
   path.join(__dirname, "../src/modules/m_orders.js"),
