@@ -188,11 +188,17 @@ const buildQrTablePaymentIntentController = ({
       );
     }
 
-    const checkoutResult = await createStripeCheckout({
+    const checkoutInput = {
       shopId: req.shopid,
       actorId: req.id,
       ...normalizeCheckoutRequestBody(body, { paymentModeOverride: "stripe" }),
-    });
+    };
+    if (req.sessionSubject === "service_point") {
+      checkoutInput.sessionSubject = "service_point";
+      checkoutInput.servicePointId = req.servicePointId;
+      checkoutInput.orderSource = req.orderSource;
+    }
+    const checkoutResult = await createStripeCheckout(checkoutInput);
     provisionalOrderId = checkoutResult.orderId;
     if (checkoutResult.payment_status !== "requires_payment") {
       provisionalOrderId = null;
