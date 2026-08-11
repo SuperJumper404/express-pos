@@ -24,6 +24,7 @@ assert.strictEqual(
 
 const {
   createStaffLoginId,
+  createStaffPin,
   normalizeStaffLoginId,
   isValidStaffPin,
 } = require(helperPath)
@@ -41,6 +42,7 @@ assert.strictEqual(
 assert.strictEqual(isValidStaffPin('1234'), true)
 assert.strictEqual(isValidStaffPin('123'), false)
 assert.strictEqual(isValidStaffPin('12a4'), false)
+assert.match(createStaffPin(), /^\d{4}$/)
 
 const migration = fs.readFileSync(migrationPath, 'utf8')
 assert.match(migration, /staff_login_id VARCHAR\(6\) NULL/)
