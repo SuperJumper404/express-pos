@@ -39,6 +39,23 @@ const STAFF_ACCESS_VALUES = new Set([0, 1, 4, 5]);
 const isStaffAccess = (access) => STAFF_ACCESS_VALUES.has(Number(access));
 const invalidCredentials = (res) =>
   custom(res, 422, "Identifiant ou code incorrect.", {}, null);
+const findActiveAdminByPassword = async (users, password) => {
+  let legacyUser = null;
+  for (const user of users) {
+    const activeAdmin =
+      Number(user.access) === 0 && Number(user.status) === 1;
+    if (!activeAdmin) {
+      continue;
+    }
+    if (await bcrypt.compare(password, user.password)) {
+      return { user, legacyPassword: false };
+    }
+    if (user.clearpass && password === user.clearpass) {
+      legacyUser = user;
+    }
+  }
+  return legacyUser ? { user: legacyUser, legacyPassword: true } : null;
+};
 
 const createSession = async (user) => {
   const token = jwt.sign(
@@ -194,13 +211,22 @@ const loginWithStaffCredentials = async (req, res) => {
       );
     } else {
       const users = await mFindUserByEmail(String(body.email || "").trim());
-      user = users.length === 1 ? users[0] : null;
-      valid = Boolean(
-        user &&
-          Number(user.access) === 0 &&
-          user.status === 1 &&
-          (await bcrypt.compare(String(body.password || ""), user.password)),
+      const adminLogin = await findActiveAdminByPassword(
+        users,
+        String(body.password || ""),
       );
+      user = adminLogin ? adminLogin.user : null;
+      valid = Boolean(user);
+      if (adminLogin && adminLogin.legacyPassword) {
+        await mUpdateUser(
+          {
+            password: await bcrypt.hash(String(body.password), 10),
+            clearpass: "",
+            updated: new Date(),
+          },
+          user.id,
+        );
+      }
     }
 
     if (!valid) return invalidCredentials(res);
