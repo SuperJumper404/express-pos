@@ -1,4 +1,8 @@
 const { custom, failed, success } = require("../helpers/response");
+const {
+  signServicePointSessionToken,
+  verifyServicePointAccessToken,
+} = require("../helpers/servicePointAccessToken");
 
 const parseServicePointId = (value) => {
   const id = Number(value);
@@ -118,6 +122,88 @@ const buildServicePointsController = (repository) => {
         return custom(res, 404, "Table introuvable.", null, null);
       }
       return success(res, "Table supprimee.", null, null);
+    } catch (error) {
+      return failed(res, "Erreur serveur.", error.message);
+    }
+  },
+
+  createTableAccessSession: async (req, res) => {
+    try {
+      const token = req.body && req.body.token;
+      if (!token) {
+        return custom(res, 422, "Token QR requis.", null, null);
+      }
+
+      const access = verifyServicePointAccessToken(token);
+      if (access.source !== "table_qr") {
+        return custom(res, 401, "Token QR invalide.", null, null);
+      }
+
+      const point = await getRepository().findServicePoint({
+        servicePointId: access.servicePointId,
+        shopId: access.shopId,
+      });
+      if (
+        !point ||
+        point.type !== "table" ||
+        Number(point.is_active) !== 1 ||
+        Number(point.public_access_version) !== access.version
+      ) {
+        return custom(res, 401, "Token QR invalide.", null, null);
+      }
+
+      const sessionToken = signServicePointSessionToken({
+        servicePointId: point.id,
+        shopId: point.shopid,
+        source: "table_qr",
+      });
+      return success(res, "Connexion table reussie.", null, {
+        session_subject: "service_point",
+        service_point_id: point.id,
+        shopid: point.shopid,
+        username: point.name,
+        access: 2,
+        source: "table_qr",
+        token: sessionToken,
+      });
+    } catch (error) {
+      return custom(res, 401, error.message || "Token QR invalide.", null, null);
+    }
+  },
+
+  createClickAndCollectSession: async (req, res) => {
+    const shopId = parseServicePointId(req.params.shopid);
+    if (!shopId) {
+      return custom(res, 422, "Boutique invalide.", null, null);
+    }
+
+    try {
+      const point = await getRepository().findSystemPoint({
+        shopId,
+        systemKey: "click_collect",
+      });
+      if (
+        !point ||
+        point.type !== "click_collect" ||
+        Number(point.is_active) !== 1
+      ) {
+        return custom(res, 404, "Click & Collect indisponible.", null, null);
+      }
+
+      const sessionToken = signServicePointSessionToken({
+        servicePointId: point.id,
+        shopId: point.shopid,
+        source: "web",
+      });
+      return success(res, "Session Click & Collect creee.", null, {
+        session_subject: "service_point",
+        service_point_id: point.id,
+        shopid: point.shopid,
+        username: point.name,
+        access: 2,
+        source: "web",
+        token: sessionToken,
+      });
     } catch (error) {
       return failed(res, "Erreur serveur.", error.message);
     }

@@ -9,6 +9,7 @@ const controllerPath = path.join(
 assert.ok(fs.existsSync(controllerPath), "service points controller must exist");
 
 const { buildServicePointsController } = require(controllerPath);
+const { signServicePointAccessToken } = require("../src/helpers/servicePointAccessToken");
 
 const response = () => ({
   statusCode: null,
@@ -25,8 +26,23 @@ const response = () => ({
 
 const points = [
   { id: 1, name: "Comptoir", type: "counter", is_system: 1 },
-  { id: 2, name: "Click & Collect", type: "click_collect", is_system: 1 },
-  { id: 3, name: "Table 8", type: "table", is_system: 0 },
+  {
+    id: 2,
+    shopid: 8,
+    name: "Click & Collect",
+    type: "click_collect",
+    is_system: 1,
+    is_active: 1,
+  },
+  {
+    id: 3,
+    shopid: 8,
+    name: "Table 8",
+    type: "table",
+    is_system: 0,
+    is_active: 1,
+    public_access_version: 1,
+  },
 ];
 const calls = [];
 const controller = buildServicePointsController({
@@ -37,6 +53,8 @@ const controller = buildServicePointsController({
   },
   findServicePoint: async ({ servicePointId }) =>
     points.find((point) => point.id === servicePointId) || null,
+  findSystemPoint: async ({ systemKey }) =>
+    systemKey === "click_collect" ? points[1] : null,
   updateTablePoint: async () => ({ affectedRows: 1 }),
   deleteTablePoint: async () => ({ affectedRows: 1 }),
 });
@@ -67,6 +85,34 @@ const controller = buildServicePointsController({
     listResponse.payload.data.map((point) => point.name),
     ["Comptoir", "Click & Collect", "Table 8"],
   );
+
+  const tableAccessResponse = response();
+  await controller.createTableAccessSession(
+    {
+      body: {
+        token: signServicePointAccessToken({
+          servicePointId: 3,
+          shopId: 8,
+          source: "table_qr",
+          version: 1,
+        }),
+      },
+    },
+    tableAccessResponse,
+  );
+  assert.strictEqual(tableAccessResponse.statusCode, 200);
+  assert.strictEqual(tableAccessResponse.payload.data.session_subject, "service_point");
+  assert.strictEqual(tableAccessResponse.payload.data.service_point_id, 3);
+  assert.strictEqual(tableAccessResponse.payload.data.source, "table_qr");
+
+  const clickAndCollectResponse = response();
+  await controller.createClickAndCollectSession(
+    { params: { shopid: "8" } },
+    clickAndCollectResponse,
+  );
+  assert.strictEqual(clickAndCollectResponse.statusCode, 200);
+  assert.strictEqual(clickAndCollectResponse.payload.data.service_point_id, 2);
+  assert.strictEqual(clickAndCollectResponse.payload.data.source, "web");
 
   console.log("service points controller tests passed");
 })().catch((error) => {

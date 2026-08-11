@@ -5,12 +5,14 @@ const {
   createTable,
   updateTable,
   deleteTable,
+  createTableAccessSession,
 } = require("../controllers/c_servicePoints");
 const { authentication, authAdmin } = require("../helpers/middleware/auth");
 
 const routers = express.Router();
 
 routers
+  .post("/table-access", createTableAccessSession)
   .get("/service-points", authentication, listPoints)
   .get("/service-points/tables", authentication, listTables)
   .post("/service-points/tables", authentication, authAdmin, createTable)

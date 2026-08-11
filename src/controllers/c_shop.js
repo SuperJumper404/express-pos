@@ -3,17 +3,15 @@ const {
   mUpdateShopInfo,
   mCreateAndInitializeShop,
 } = require("../modules/m_shop");
-const { mGetAllUser } = require("../modules/m_users");
+const { findSystemPoint } = require("../modules/m_servicePoints");
 
 const { custom, success, failed } = require("../helpers/response");
 const response = require("../helpers/response");
 const fs = require("fs");
 const path = require("path");
 const bcrypt = require("bcrypt");
-const { nanoid } = require("nanoid");
 const { normalizeQrPaymentMode } = require("../helpers/qrPaymentMode");
 const { normalizeCommissionPercent } = require("../helpers/stripePayment");
-const { signTableAccessToken } = require("../helpers/tableAccessToken");
 
 const DEFAULT_SHOP_PAYMENT_METHODS = [
   "Tickets Restaurants",
@@ -87,8 +85,6 @@ exports.createAndInitializeShop = async (req, res) => {
       );
     }
 
-    const shopNameWithoutSpaces = String(body.shop_name).replace(/\s+/g, "");
-    const clickAndCollectEmail = `${nanoid()}@${shopNameWithoutSpaces}.fr`;
     const salt = bcrypt.genSaltSync(10);
     const hashedPassword = bcrypt.hashSync(body.admin_password, salt);
     const created = new Date();
@@ -103,11 +99,9 @@ exports.createAndInitializeShop = async (req, res) => {
       shop_siret: body.shop_siret || null,
       admin_mail: body.admin_mail,
       admin_phone: body.admin_phone,
+      admin_username: body.admin_username || "Administrateur",
       admin_password: hashedPassword,
       admin_password_clear: body.admin_password,
-      click_and_collect_email: clickAndCollectEmail,
-      click_and_collect_password: hashedPassword,
-      click_and_collect_clearpass: body.admin_password,
       hours: DEFAULT_SHOP_HOURS,
       shop_social_media: DEFAULT_SHOP_SOCIAL_MEDIA,
       shop_profile_image: body.shop_profile_image || "",
@@ -150,14 +144,11 @@ exports.getShopInfo = async (req, res) => {
 exports.getShopInfoClickAndCollect = async (req, res) => {
   try {
     const shopid = req.params.shopid;
-
-    // 1) appel users
-    const users = await mGetAllUser(shopid);
-    console.log("Users", users);
-    const clickAndCollectTable = users.find((user) => user.access === 3);
-    console.log("clickAndCollectTable", clickAndCollectTable);
-    // 2) appel shop info
     const response = await mGetShopInfo(shopid);
+    const clickAndCollectServicePoint = await findSystemPoint({
+      shopId: shopid,
+      systemKey: "click_collect",
+    });
 
     const data = {
       shop_name: response?.[0]?.shop_name,
@@ -178,12 +169,12 @@ exports.getShopInfoClickAndCollect = async (req, res) => {
       qr_payment_mode: normalizeQrPaymentMode(response?.[0]?.qr_payment_mode),
       stripe_charges_enabled: response?.[0]?.stripe_charges_enabled,
       stripe_onboarding_complete: response?.[0]?.stripe_onboarding_complete,
-      clickAndCollectTable: {
-        email: clickAndCollectTable?.email || "",
-        table_access_token: clickAndCollectTable
-          ? signTableAccessToken(clickAndCollectTable)
-          : "",
-      },
+      clickAndCollectServicePoint: clickAndCollectServicePoint
+        ? {
+            id: clickAndCollectServicePoint.id,
+            name: clickAndCollectServicePoint.name,
+          }
+        : null,
     };
 
     // Une seule réponse HTTP

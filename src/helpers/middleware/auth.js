@@ -11,8 +11,17 @@ module.exports = {
         if (!error) {
           req.access = decoded.access;
           req.shopid = decoded.shopid;
-          req.id = decoded.id;
-          req.email = decoded.email;
+          if (decoded.subject_type === "service_point") {
+            req.sessionSubject = "service_point";
+            req.servicePointId = decoded.service_point_id;
+            req.orderSource = decoded.source;
+            req.id = null;
+            req.email = null;
+          } else {
+            req.sessionSubject = "staff";
+            req.id = decoded.id;
+            req.email = decoded.email;
+          }
           next();
         } else {
           failed(res, "Session expirée, veuillez vous reconnecter.", error.message, 401);
@@ -26,7 +35,7 @@ module.exports = {
     // console.log("Incomiing rqg ",req)
 
     const access = req.access;
-    if (access === 0) {
+    if (req.sessionSubject !== "service_point" && access === 0) {
       next();
     } else {
       custom(res, 403, "Accès refusé, réservé aux administrateurs.", {}, null);
