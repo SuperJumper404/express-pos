@@ -48,6 +48,13 @@ const getLastClosureForUpdate = (shopId, connection) =>
     connection
   ).then((rows) => rows[0] || null);
 
+const lockShopForCashClosure = (shopId, connection) =>
+  queryResult(
+    "SELECT id FROM shop WHERE id = ? FOR UPDATE",
+    [shopId],
+    connection
+  ).then((rows) => rows[0] || null);
+
 const getNextClosureNumber = (shopId, connection) =>
   queryResult(
     `SELECT COALESCE(MAX(closure_number), 0) + 1 AS next_number
@@ -116,6 +123,7 @@ const mGetCurrentCashClosure = (shopId) => buildCurrentSnapshot({ shopId });
 
 const mCloseCurrentCashClosure = ({ shopId, userId }) =>
   runInTransaction(async (connection) => {
+    await lockShopForCashClosure(shopId, connection);
     await getLastClosureForUpdate(shopId, connection);
     const closureNumber = await getNextClosureNumber(shopId, connection);
     const snapshot = await buildCurrentSnapshot({

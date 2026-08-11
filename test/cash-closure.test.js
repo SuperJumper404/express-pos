@@ -103,6 +103,9 @@ assert.ok(migration.includes("CREATE TABLE IF NOT EXISTS `cash_closures`"));
 assert.ok(migration.includes("`closure_number` INT NOT NULL"));
 assert.ok(migration.includes("`payments_summary` JSON NOT NULL"));
 assert.ok(migration.includes("`vat_summary` JSON NOT NULL"));
+assert.ok(migration.includes("-- migrate:up"));
+assert.ok(migration.includes("-- migrate:down"));
+assert.ok(migration.includes("DROP TABLE IF EXISTS `cash_closures`"));
 
 const moduleSource = fs.readFileSync(
   path.join(__dirname, "../src/modules/m_cashClosures.js"),
@@ -111,6 +114,7 @@ const moduleSource = fs.readFileSync(
 assert.ok(moduleSource.includes("mGetCurrentCashClosure"));
 assert.ok(moduleSource.includes("mCloseCurrentCashClosure"));
 assert.ok(moduleSource.includes("FOR UPDATE"));
+assert.ok(moduleSource.includes("SELECT id FROM shop WHERE id = ? FOR UPDATE"));
 assert.ok(moduleSource.includes("orders_count <= 0"));
 assert.ok(moduleSource.includes("La periode ne contient aucune commande a cloturer."));
 assert.ok(moduleSource.includes("JSON.stringify(snapshot.payments_summary)"));
@@ -124,6 +128,7 @@ assert.ok(controllerSource.includes("currentCashClosure"));
 assert.ok(controllerSource.includes("closeCashClosure"));
 assert.ok(controllerSource.includes("allCashClosures"));
 assert.ok(controllerSource.includes("cashClosureById"));
+assert.ok(controllerSource.includes("userId: req.id"));
 
 const routerSource = fs.readFileSync(
   path.join(__dirname, "../src/routers/r_orders.js"),

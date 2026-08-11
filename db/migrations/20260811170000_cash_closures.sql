@@ -1,3 +1,5 @@
+-- migrate:up
+
 CREATE TABLE IF NOT EXISTS `cash_closures` (
   `id` INT NOT NULL AUTO_INCREMENT,
   `shopid` INT NOT NULL,
@@ -15,3 +17,7 @@ CREATE TABLE IF NOT EXISTS `cash_closures` (
   UNIQUE KEY `uniq_cash_closures_shop_number` (`shopid`, `closure_number`),
   KEY `idx_cash_closures_shop_closed_at` (`shopid`, `closed_at`)
 );
+
+-- migrate:down
+
+DROP TABLE IF EXISTS `cash_closures`;

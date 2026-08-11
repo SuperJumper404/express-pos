@@ -19,7 +19,7 @@ exports.closeCashClosure = async (req, res) => {
   try {
     const data = await mCloseCurrentCashClosure({
       shopId: req.shopid,
-      userId: req.user && req.user.id,
+      userId: req.id,
     });
     return custom(res, 201, "Ticket Z cree.", null, data);
   } catch (error) {
