@@ -19,10 +19,10 @@ const router = fs.readFileSync(
 assert.match(controller, /verifyStaffPin/)
 assert.match(controller, /regenerate_login_id/)
 assert.match(controller, /Number\(user\.access\)\s*===\s*0/)
-assert.match(moduleSource, /WHERE staff_login_id = \?/) 
+assert.match(moduleSource, /WHERE staff_login_id = \?/)
 assert.match(moduleSource, /staff_login_id/)
-assert.doesNotMatch(moduleSource, /SELECT \* FROM users WHERE shopid = \?/) 
-assert.doesNotMatch(moduleSource, /staff_pin_hash.*mGetAllUser/) 
+assert.doesNotMatch(moduleSource, /SELECT \* FROM users WHERE shopid = \?/)
+assert.doesNotMatch(moduleSource, /staff_pin_hash.*mGetAllUser/)
 
 const credentialRoute = router.indexOf('/user/:id/staff-credentials')
 const genericUpdateRoute = router.indexOf('.patch("/user/:id"')
