@@ -14,6 +14,47 @@ module.exports = {
       );
     });
   },
+  mFindUserByEmail: (email) => {
+    return new Promise((resolve, reject) => {
+      conn.query("SELECT * FROM users WHERE email = ?", [email], (err, result) => {
+        if (!err) {
+          resolve(result);
+        } else {
+          reject(err);
+        }
+      });
+    });
+  },
+  mFindUserByStaffLoginId: (staffLoginId) => {
+    return new Promise((resolve, reject) => {
+      conn.query(
+        "SELECT * FROM users WHERE staff_login_id = ?",
+        [staffLoginId],
+        (err, result) => {
+          if (!err) {
+            resolve(result);
+          } else {
+            reject(err);
+          }
+        },
+      );
+    });
+  },
+  mFindUserByIdAndShop: (id, shopid) => {
+    return new Promise((resolve, reject) => {
+      conn.query(
+        "SELECT id, shopid, access, staff_login_id FROM users WHERE id = ? AND shopid = ?",
+        [id, shopid],
+        (err, result) => {
+          if (!err) {
+            resolve(result);
+          } else {
+            reject(err);
+          }
+        },
+      );
+    });
+  },
   mRegister: (data) => {
     return new Promise((resolve, reject) => {
       conn.query("INSERT INTO users SET ?", data, (err, result) => {
@@ -22,7 +63,7 @@ module.exports = {
           resolve(result);
         } else {
           console.log("Error Ajout Nouveau User", err);
-          reject(new Error(err));
+          reject(err);
         }
       });
     });
@@ -100,7 +141,7 @@ module.exports = {
   mGetAllUser: (shopid) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        `SELECT * FROM users WHERE shopid = ?`,
+        "SELECT id, shopid, username, email, phone, gender, position, image, status, access, staff_login_id, created, updated FROM users WHERE shopid = ?",
         [shopid],
         (err, result) => {
           if (!err) {
@@ -127,12 +168,28 @@ module.exports = {
   mDetailUser: (id) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        `SELECT id, shopid, username, email, token, expired, phone, gender, position, image, status, access, created, updated FROM users WHERE id='${id}'`,
+        "SELECT id, shopid, username, email, phone, gender, position, image, status, access, staff_login_id, created, updated FROM users WHERE id = ?",
+        [id],
         (err, result) => {
           if (!err) {
             resolve(result);
           } else {
             reject(new Error(err));
+          }
+        },
+      );
+    });
+  },
+  mSessionUser: (id) => {
+    return new Promise((resolve, reject) => {
+      conn.query(
+        "SELECT id, shopid, username, email, token, expired, phone, gender, position, image, status, access, staff_login_id, created, updated FROM users WHERE id = ?",
+        [id],
+        (err, result) => {
+          if (!err) {
+            resolve(result);
+          } else {
+            reject(err);
           }
         },
       );

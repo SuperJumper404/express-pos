@@ -1,5 +1,8 @@
 const {
   mCheckEmail,
+  mFindUserByEmail,
+  mFindUserByStaffLoginId,
+  mFindUserByIdAndShop,
   mRegister,
   mActivation,
   mActivationUser,
@@ -7,6 +10,7 @@ const {
   mProfileMe,
   mGetAllUser,
   mDetailUser,
+  mSessionUser,
   mDetailUserWithSecretFields,
   mUpdateUser,
   mDeleteUser,
@@ -23,8 +27,195 @@ const mailer = require("../helpers/mailer");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const fs = require("fs");
+const {
+  createStaffLoginId,
+  normalizeStaffLoginId,
+  isValidStaffPin,
+  hashStaffPin,
+  verifyStaffPin,
+} = require("../helpers/staffCredentials");
+
+const STAFF_ACCESS_VALUES = new Set([0, 1, 4, 5]);
+const isStaffAccess = (access) => STAFF_ACCESS_VALUES.has(Number(access));
+const invalidCredentials = (res) =>
+  custom(res, 422, "Identifiant ou code incorrect.", {}, null);
+
+const createSession = async (user) => {
+  const token = jwt.sign(
+    {
+      id: user.id,
+      email: user.email,
+      access: user.access,
+      shopid: user.shopid,
+    },
+    envJWTKEY,
+    { expiresIn: "1d" },
+  );
+  const expired = new Date();
+  expired.setDate(expired.getDate() + 1);
+  await mUpdateUser(
+    {
+      token,
+      expired: expired.toISOString().substring(0, 10),
+      updated: new Date(),
+    },
+    user.id,
+  );
+  return mSessionUser(user.id);
+};
+
+const createInternalPassword = () =>
+  `${createStaffLoginId()}${createStaffLoginId()}`;
+
+const registerWithStaffCredentials = async (req, res) => {
+  try {
+    const body = req.body || {};
+    const access = Number(body.access);
+    const staffAccount = isStaffAccess(access);
+    const email = String(body.email || "").trim();
+
+    if (staffAccount && !isValidStaffPin(body.pin)) {
+      return custom(res, 422, "Le PIN doit contenir 4 chiffres.", {}, null);
+    }
+
+    if (!staffAccount) {
+      const existingUsers = await mFindUserByEmail(email);
+      if (existingUsers.length >= 1) {
+        return custom(res, 422, "Cet email est deja enregistre.", {}, null);
+      }
+    }
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const staffLoginId = staffAccount ? createStaffLoginId() : null;
+      const passwordInput =
+        staffAccount && access !== 0
+          ? createInternalPassword()
+          : body.password || createInternalPassword();
+      const data = {
+        username: body.username,
+        phone: body.phone || "",
+        email,
+        password: await bcrypt.hash(passwordInput, 10),
+        clearpass: "",
+        access,
+        status: body.status == null ? 1 : Number(body.status),
+        token: null,
+        shopid: req.shopid,
+        created: new Date(),
+      };
+
+      if (staffAccount) {
+        data.staff_login_id = staffLoginId;
+        data.staff_pin_hash = await hashStaffPin(body.pin);
+      }
+
+      try {
+        await mRegister(data);
+        return success(
+          res,
+          "Compte cree avec succes.",
+          {},
+          staffAccount ? { staff_login_id: staffLoginId } : null,
+        );
+      } catch (error) {
+        if (!(staffAccount && error.code === "ER_DUP_ENTRY" && attempt < 4)) {
+          throw error;
+        }
+      }
+    }
+
+    return failed(res, "Erreur serveur.", "Impossible de generer un ID unique.");
+  } catch (error) {
+    return failed(res, "Erreur serveur.", error.message);
+  }
+};
+
+const setStaffCredentials = async (req, res) => {
+  try {
+    const body = req.body || {};
+    if (!isValidStaffPin(body.pin)) {
+      return custom(res, 422, "Le PIN doit contenir 4 chiffres.", {}, null);
+    }
+
+    const users = await mFindUserByIdAndShop(req.params.id, req.shopid);
+    const user = users[0];
+    if (!user || !isStaffAccess(user.access)) {
+      return custom(res, 404, "Utilisateur introuvable.", {}, null);
+    }
+
+    const regenerateLoginId = Boolean(body.regenerate_login_id);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const staffLoginId =
+        regenerateLoginId || !user.staff_login_id
+          ? createStaffLoginId()
+          : user.staff_login_id;
+      try {
+        await mUpdateUser(
+          {
+            staff_login_id: staffLoginId,
+            staff_pin_hash: await hashStaffPin(body.pin),
+            updated: new Date(),
+          },
+          user.id,
+        );
+        return success(res, "Identifiants caisse mis a jour.", {}, {
+          staff_login_id: staffLoginId,
+        });
+      } catch (error) {
+        if (!(error.code === "ER_DUP_ENTRY" && attempt < 4)) {
+          throw error;
+        }
+      }
+    }
+
+    return failed(res, "Erreur serveur.", "Impossible de generer un ID unique.");
+  } catch (error) {
+    return failed(res, "Erreur serveur.", error.message);
+  }
+};
+
+const loginWithStaffCredentials = async (req, res) => {
+  try {
+    const body = req.body || {};
+    let user;
+    let valid = false;
+
+    if (body.staff_login_id) {
+      const users = await mFindUserByStaffLoginId(
+        normalizeStaffLoginId(body.staff_login_id),
+      );
+      user = users.length === 1 ? users[0] : null;
+      valid = Boolean(
+        user &&
+          isStaffAccess(user.access) &&
+          user.status === 1 &&
+          user.staff_pin_hash &&
+          (await verifyStaffPin(String(body.pin || ""), user.staff_pin_hash)),
+      );
+    } else {
+      const users = await mFindUserByEmail(String(body.email || "").trim());
+      user = users.length === 1 ? users[0] : null;
+      valid = Boolean(
+        user &&
+          Number(user.access) === 0 &&
+          user.status === 1 &&
+          (await bcrypt.compare(String(body.password || ""), user.password)),
+      );
+    }
+
+    if (!valid) return invalidCredentials(res);
+
+    const sessionUser = await createSession(user);
+    return success(res, "Connexion reussie !", null, sessionUser);
+  } catch (error) {
+    return failed(res, "Erreur serveur.", error.message);
+  }
+};
 
 module.exports = {
+  registerWithStaffCredentials,
+  loginWithStaffCredentials,
+  setStaffCredentials,
   register: (req, res) => {
     const body = req.body;
     mCheckEmail(body.email)

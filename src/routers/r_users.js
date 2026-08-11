@@ -1,6 +1,7 @@
 const {
-  register,
-  login,
+  registerWithStaffCredentials,
+  loginWithStaffCredentials,
+  setStaffCredentials,
   tableAccess,
   logout,
   activation,
@@ -18,13 +19,14 @@ const routers = express.Router();
 
 routers
   .get("/user/me", authentication, profileMe)
-  .post("/register", authentication, register)
-  .post("/login", login)
+  .post("/register", authentication, registerWithStaffCredentials)
+  .post("/login", loginWithStaffCredentials)
   .post("/table-access", tableAccess)
   .post("/logout", authentication, logout)
   .get("/activate/:token/:email/:position/:access", activation)
   .get("/users", authentication, authAdmin, getAllUser)
   .get("/user/:id", authentication, getDetailUser)
+  .patch("/user/:id/staff-credentials", authentication, setStaffCredentials)
   .patch("/user/:id", authentication, singleUploadProject, updateUser)
   .delete("/user/:id", authentication, authAdmin, deleteUser);
 
