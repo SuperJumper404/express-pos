@@ -49,6 +49,8 @@ const canonicalPayload = (input) => {
   ));
   const customer = input.customer || {};
   return stableValue({
+    service_point_id: input.servicePointId == null ? null : Number(input.servicePointId),
+    order_source: input.orderSource || "pos",
     customer: {
       id: Number(customer.id),
       name: typeof customer.name === "string" ? customer.name.trim() : customer.name,
@@ -158,6 +160,9 @@ const normalizeCheckoutRequestBody = (body = {}, { paymentModeOverride } = {}) =
 
   return {
     customer,
+    ...(body.service_point_id === undefined
+      ? {}
+      : { servicePointId: body.service_point_id }),
     items,
     expectedTotal: body.expected_total,
     isTakeaway: normalizeBoolean(body.is_takeaway, "is_takeaway"),
@@ -170,9 +175,29 @@ const normalizeCheckoutRequestBody = (body = {}, { paymentModeOverride } = {}) =
 
 const validateCheckoutInput = (input = {}) => {
   if (!isPositiveId(input.shopId)) throw invalidRequest("shop_id");
-  if (!isPositiveId(input.actorId)) throw invalidRequest("actor_id");
+  const publicServicePointSession = input.sessionSubject === "service_point";
+  if (!publicServicePointSession && !isPositiveId(input.actorId)) {
+    throw invalidRequest("actor_id");
+  }
+  if (publicServicePointSession && !isPositiveId(input.servicePointId)) {
+    throw invalidRequest("service_point_id");
+  }
+  if (
+    input.servicePointId !== undefined &&
+    input.servicePointId !== null &&
+    !isPositiveId(input.servicePointId)
+  ) {
+    throw invalidRequest("service_point_id");
+  }
   if (!input.customer || typeof input.customer !== "object") throw invalidRequest("customer");
-  if (!isPositiveId(input.customer.id)) throw invalidRequest("customer.id");
+  if (
+    input.customer.id !== undefined &&
+    input.customer.id !== null &&
+    input.customer.id !== "" &&
+    !isPositiveId(input.customer.id)
+  ) {
+    throw invalidRequest("customer.id");
+  }
   if (typeof input.customer.name !== "string" || !input.customer.name.trim()) {
     throw invalidRequest("customer.name");
   }
@@ -206,9 +231,14 @@ const validateCheckoutInput = (input = {}) => {
 
   return {
     shopId: Number(input.shopId),
-    actorId: Number(input.actorId),
+    actorId: publicServicePointSession ? null : Number(input.actorId),
+    sessionSubject: publicServicePointSession ? "service_point" : "staff",
+    servicePointId: input.servicePointId == null ? null : Number(input.servicePointId),
+    orderSource: publicServicePointSession ? input.orderSource : "pos",
     customer: {
-      id: Number(input.customer.id),
+      id: input.customer.id == null || input.customer.id === ""
+        ? 0
+        : Number(input.customer.id),
       name: input.customer.name.trim(),
       phone: input.customer.phone == null ? null : String(input.customer.phone).trim(),
       remark: input.customer.remark == null ? null : String(input.customer.remark).trim(),
@@ -234,6 +264,24 @@ const sqlRepository = {
      WHERE id = ? AND shopid = ?
      LIMIT 1`,
     [userId, shopId],
+  ).then((rows) => rows[0] || null),
+
+  findServicePoint: ({ servicePointId, shopId, connection }) => queryResult(
+    connection,
+    `SELECT id, shopid, name, type, system_key, is_active
+     FROM service_points
+     WHERE id = ? AND shopid = ?
+     LIMIT 1`,
+    [servicePointId, shopId],
+  ).then((rows) => rows[0] || null),
+
+  findSystemPoint: ({ shopId, systemKey, connection }) => queryResult(
+    connection,
+    `SELECT id, shopid, name, type, system_key, is_active
+     FROM service_points
+     WHERE shopid = ? AND system_key = ?
+     LIMIT 1`,
+    [shopId, systemKey],
   ).then((rows) => rows[0] || null),
 
   findOrderByToken: ({ shopId, token, connection }) => queryResult(
@@ -388,11 +436,17 @@ const buildCheckoutController = ({ checkout, logger = console }) => async (req, 
 
   try {
     const normalized = normalizeCheckoutRequestBody(body);
-    const result = await checkout.createCheckout({
+    const checkoutInput = {
       shopId: req.shopid,
       actorId: req.id,
       ...normalized,
-    });
+    };
+    if (req.sessionSubject === "service_point") {
+      checkoutInput.sessionSubject = "service_point";
+      checkoutInput.servicePointId = req.servicePointId;
+      checkoutInput.orderSource = req.orderSource;
+    }
+    const result = await checkout.createCheckout(checkoutInput);
     return custom(
       res,
       result.idempotent_replay ? 200 : 201,
@@ -473,7 +527,7 @@ const buildCheckoutModule = ({
     if (!Object.prototype.hasOwnProperty.call({ commit: true, release: true }, action)) {
       return Promise.reject(invalidRequest("status"));
     }
-    if (action === "commit" && !isPositiveId(operator)) {
+    if (action === "commit" && !isPositiveId(operator) && Number(operator) !== 0) {
       return Promise.reject(invalidRequest("operator"));
     }
 
@@ -683,7 +737,7 @@ const buildCheckoutModule = ({
       const timestamp = formatDate(timestampDate);
       const paymentState = resolveCheckoutPaymentState(checkout.paymentMode);
       const stripe = paymentState.payment_provider === "stripe";
-      const actor = typeof repository.findUserById === "function"
+      const actor = checkout.actorId && typeof repository.findUserById === "function"
         ? await repository.findUserById({
           userId: checkout.actorId,
           shopId: checkout.shopId,
@@ -693,6 +747,35 @@ const buildCheckoutModule = ({
       const takenBy = actor && isOrderTakerAccess(actor.access)
         ? { id: Number(actor.id), name: actor.username }
         : { id: null, name: null };
+      const servicePoint = checkout.sessionSubject === "service_point"
+        ? await repository.findServicePoint({
+          servicePointId: checkout.servicePointId,
+          shopId: checkout.shopId,
+          connection,
+        })
+        : checkout.servicePointId
+          ? await repository.findServicePoint({
+            servicePointId: checkout.servicePointId,
+            shopId: checkout.shopId,
+            connection,
+          })
+          : await repository.findSystemPoint({
+            shopId: checkout.shopId,
+            systemKey: "counter",
+            connection,
+          });
+      const validPublicPoint = checkout.orderSource === "table_qr"
+        ? servicePoint && servicePoint.type === "table"
+        : checkout.orderSource === "web"
+          ? servicePoint && servicePoint.type === "click_collect"
+          : true;
+      if (!servicePoint || Number(servicePoint.is_active) !== 1 || !validPublicPoint) {
+        throw new DomainError(
+          422,
+          "SERVICE_POINT_INVALID",
+          "Point de service indisponible.",
+        );
+      }
       const orderResult = await repository.insertOrder({
         order: {
           shopid: checkout.shopId,
@@ -700,7 +783,9 @@ const buildCheckoutModule = ({
           customer: checkout.customer.name,
           phone: checkout.customer.phone,
           customerID: checkout.customer.id,
-          operator: checkout.actorId,
+          service_point_id: servicePoint.id,
+          order_source: checkout.orderSource,
+          operator: checkout.actorId || 0,
           taken_by_user_id: takenBy.id,
           taken_by_name: takenBy.name,
           subtotal: total,

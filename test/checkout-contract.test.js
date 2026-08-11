@@ -1699,6 +1699,21 @@ const makeCheckoutHarness = ({
         ? actor
         : null
     ),
+    findServicePoint: async ({ servicePointId, shopId }) => {
+      const points = [
+        { id: 1, shopid: 7, type: "counter", system_key: "counter", is_active: 1 },
+        { id: 2, shopid: 7, type: "click_collect", system_key: "click_collect", is_active: 1 },
+        { id: 3, shopid: 7, type: "table", is_active: 1 },
+      ];
+      return points.find((point) => (
+        point.id === Number(servicePointId) && point.shopid === Number(shopId)
+      )) || null;
+    },
+    findSystemPoint: async ({ shopId, systemKey }) => (
+      Number(shopId) === 7 && systemKey === "counter"
+        ? { id: 1, shopid: 7, type: "counter", system_key: "counter", is_active: 1 }
+        : null
+    ),
     findOrderByToken: async ({ shopId, token }) => state.orders.find(
       (row) => row.shopid === shopId && row.client_order_token === token,
     ) || null,
@@ -1838,6 +1853,13 @@ const makeConcurrentClaimHarness = () => {
   const events = [];
   const reservations = [];
   const repository = {
+    findSystemPoint: async () => ({
+      id: 1,
+      shopid: 7,
+      type: "counter",
+      system_key: "counter",
+      is_active: 1,
+    }),
     findOrderByToken: async ({ connection }) => {
       if (!connection) {
         await winnerCommitted;
@@ -1991,6 +2013,19 @@ const runTransactionalCheckoutContracts = async () => {
     null,
     "a Table QR order must not receive a staff taker",
   );
+
+  harness = makeCheckoutHarness();
+  await harness.checkout.createCheckout({
+    ...harness.input,
+    actorId: null,
+    sessionSubject: "service_point",
+    servicePointId: 3,
+    orderSource: "table_qr",
+    customer: { name: "Marie", phone: "0102", remark: "" },
+  });
+  assert.strictEqual(harness.getState().orders[0].service_point_id, 3);
+  assert.strictEqual(harness.getState().orders[0].order_source, "table_qr");
+  assert.strictEqual(harness.getState().orders[0].taken_by_user_id, null);
 
   harness = makeCheckoutHarness({
     existingOrder: {

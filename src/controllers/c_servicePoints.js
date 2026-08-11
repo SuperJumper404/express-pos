@@ -1,5 +1,6 @@
 const { custom, failed, success } = require("../helpers/response");
 const {
+  signServicePointAccessToken,
   signServicePointSessionToken,
   verifyServicePointAccessToken,
 } = require("../helpers/servicePointAccessToken");
@@ -36,7 +37,20 @@ const buildServicePointsController = (repository) => {
         activeOnly: false,
         tablesOnly: true,
       });
-      return success(res, "Tables recuperees.", null, points);
+      return success(
+        res,
+        "Tables recuperees.",
+        null,
+        points.map((point) => ({
+          ...point,
+          table_access_token: signServicePointAccessToken({
+            servicePointId: point.id,
+            shopId: point.shopid,
+            source: "table_qr",
+            version: point.public_access_version,
+          }),
+        })),
+      );
     } catch (error) {
       return failed(res, "Erreur serveur.", error.message);
     }

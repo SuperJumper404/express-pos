@@ -166,6 +166,8 @@ const ARCHIVE_ORDER_FIELDS = [
   "customer",
   "phone",
   "customerID",
+  "service_point_id",
+  "order_source",
   "operator",
   "taken_by_user_id",
   "taken_by_name",
@@ -362,7 +364,11 @@ module.exports = {
   mAllOrder: (shopid) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        `SELECT orders.*, users.username FROM orders JOIN users ON orders.customerID = users.id WHERE orders.shopid = ? AND orders.status <> 0 ORDER BY orders.created DESC`,
+        `SELECT orders.*, service_points.name AS service_point_name
+         FROM orders
+         LEFT JOIN service_points ON service_points.id = orders.service_point_id
+         WHERE orders.shopid = ? AND orders.status <> 0
+         ORDER BY orders.created DESC`,
         [shopid],
         (err, result) => {
           if (!err) {
@@ -849,7 +855,11 @@ module.exports = {
   mAllArchivedOrders: (shopid) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        `SELECT archives.*, users.username FROM archives JOIN users ON archives.customerID = users.id WHERE archives.shopid = ? ORDER BY archives.created DESC`,
+        `SELECT archives.*, service_points.name AS service_point_name
+         FROM archives
+         LEFT JOIN service_points ON service_points.id = archives.service_point_id
+         WHERE archives.shopid = ?
+         ORDER BY archives.created DESC`,
         [shopid],
         (err, result) => {
           if (!err) {
@@ -961,9 +971,9 @@ module.exports = {
     return new Promise((resolve, reject) => {
       // Étape 1 : Récupérer les commandes archivées dans la plage de dates
       const query1 = `
-      SELECT archives.*, users.username 
+      SELECT archives.*, service_points.name AS service_point_name
       FROM archives 
-      JOIN users ON archives.customerID = users.id 
+      LEFT JOIN service_points ON service_points.id = archives.service_point_id
       WHERE archives.shopid = ? 
         AND DATE(archives.created) BETWEEN ? AND ? 
       ORDER BY archives.created DESC`;
