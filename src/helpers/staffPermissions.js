@@ -39,13 +39,11 @@ const normalizeModulePermissions = (value, access) => {
 
 const parseModulePermissions = (value, access) => {
   if (Array.isArray(value)) return normalizeModulePermissions(value, access);
-  if (typeof value !== "string" || !value) {
-    return getDefaultModulePermissions(access);
-  }
+  if (typeof value !== "string" || !value) return null;
   try {
     return normalizeModulePermissions(JSON.parse(value), access);
   } catch (error) {
-    return getDefaultModulePermissions(access);
+    return null;
   }
 };
 
