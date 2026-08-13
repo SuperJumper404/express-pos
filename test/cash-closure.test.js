@@ -219,6 +219,8 @@ assert.ok(
     "DATE_FORMAT(CURRENT_TIMESTAMP(6), '%Y-%m-%d %H:%i:%s.%f')"
   )
 );
+assert.ok(!moduleSource.includes("AS current_time"));
+assert.ok(moduleSource.includes("AS database_now"));
 assert.ok(
   moduleSource.includes(
     "DATE_FORMAT(closed_at, '%Y-%m-%d %H:%i:%s.%f') AS closed_at"

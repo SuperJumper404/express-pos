@@ -13,6 +13,7 @@ const {
   getResolvedProductConfigurations,
 } = require("./m_customizations");
 const { buildOrderQuoteModule } = require("./m_orderQuote");
+const { calculateDiscount } = require("../helpers/discount");
 
 const RESERVATION_TTL_MS = envSTRIPESTOCKRESERVATIONMINUTES * 60 * 1000;
 
@@ -58,6 +59,8 @@ const canonicalPayload = (input) => {
       remark: customer.remark == null ? null : String(customer.remark).trim(),
     },
     expected_total: parseMoney(input.expectedTotal),
+    discount_type: input.discountType || "none",
+    discount_value: parseMoney(input.discountValue) || 0,
     is_takeaway: input.isTakeaway === true,
     items,
     payment_mode: typeof input.paymentMode === "string"
@@ -165,6 +168,12 @@ const normalizeCheckoutRequestBody = (body = {}, { paymentModeOverride } = {}) =
       : { servicePointId: body.service_point_id }),
     items,
     expectedTotal: body.expected_total,
+    ...(body.discount_type === undefined
+      ? {}
+      : { discountType: body.discount_type }),
+    ...(body.discount_value === undefined
+      ? {}
+      : { discountValue: body.discount_value }),
     isTakeaway: normalizeBoolean(body.is_takeaway, "is_takeaway"),
     clientOrderToken: body.client_order_token,
     paymentMode: paymentModeOverride !== undefined
@@ -219,6 +228,19 @@ const validateCheckoutInput = (input = {}) => {
 
   const expectedTotal = parseMoney(input.expectedTotal);
   if (expectedTotal === null || expectedTotal < 0) throw invalidRequest("expected_total");
+  const discountType = input.discountType == null || input.discountType === ""
+    ? "none"
+    : String(input.discountType).trim().toLowerCase();
+  if (!["none", "percent", "amount"].includes(discountType)) {
+    throw invalidRequest("discount_type");
+  }
+  const discountValue = input.discountValue == null || input.discountValue === ""
+    ? 0
+    : parseMoney(input.discountValue);
+  if (discountValue === null || discountValue < 0
+    || (discountType === "percent" && discountValue > 100)) {
+    throw invalidRequest("discount_value");
+  }
   if (typeof input.clientOrderToken !== "string"
     || !input.clientOrderToken.trim()
     || input.clientOrderToken.trim().length > 64) {
@@ -245,6 +267,8 @@ const validateCheckoutInput = (input = {}) => {
     },
     items,
     expectedTotal,
+    discountType: discountValue > 0 ? discountType : "none",
+    discountValue: discountValue > 0 ? discountValue : 0,
     isTakeaway,
     clientOrderToken: input.clientOrderToken.trim(),
     paymentMode: input.paymentMode.trim().toLowerCase(),
@@ -295,7 +319,8 @@ const sqlRepository = {
 
   getProducts: ({ shopId, productIds, connection }) => queryResult(
     connection,
-    `SELECT id, shopid, name, price, stock, archived, is_hidden
+    `SELECT id, shopid, name, price, vat_rate, vat_rate_dine_in, vat_rate_takeaway,
+            stock, archived, is_hidden
      FROM products
      WHERE shopid = ? AND id IN (?)
      ORDER BY id`,
@@ -427,6 +452,44 @@ const replayResult = (order) => ({
   idempotent_replay: true,
   payment_status: order.payment_status,
 });
+
+const applyDiscountToItems = (items, discountAmount) => {
+  const discountCents = Math.round(Number(discountAmount || 0) * 100);
+  if (discountCents <= 0) return items.map((item) => ({
+    ...item,
+    discountedTotal: item.lineTotal,
+    discountAmount: 0,
+  }));
+
+  const grossCents = items.reduce((sum, item) => sum + cents(item.lineTotal), 0);
+  let remainingDiscount = discountCents;
+  return items.map((item, index) => {
+    const lineCents = cents(item.lineTotal);
+    const lineDiscount = index === items.length - 1
+      ? remainingDiscount
+      : Math.min(
+        lineCents,
+        Math.round((discountCents * lineCents) / grossCents),
+      );
+    remainingDiscount -= lineDiscount;
+    const discountedCents = lineCents - lineDiscount;
+    const rate = Number(item.vatRate);
+    const divisor = 10000 + Math.round(rate * 100);
+    const totalHtCents = Math.round((discountedCents * 10000) / divisor);
+    const unitPriceHt = Number((totalHtCents / 100 / item.quantity).toFixed(2));
+    const totalHt = Number((totalHtCents / 100).toFixed(2));
+    const totalVat = Number(((discountedCents - totalHtCents) / 100).toFixed(2));
+    return {
+      ...item,
+      discountedTotal: Number((discountedCents / 100).toFixed(2)),
+      discountAmount: Number((lineDiscount / 100).toFixed(2)),
+      unitPriceHt,
+      unitVat: Number((totalVat / item.quantity).toFixed(2)),
+      totalHt,
+      totalVat,
+    };
+  });
+};
 const isDuplicateKeyError = (error) => error && (
   error.code === "ER_DUP_ENTRY" || error.errno === 1062
 );
@@ -716,14 +779,41 @@ const buildCheckoutModule = ({
 
       const {
         resolvedItems,
-        total,
-        serverQuote,
+        total: subtotalBeforeDiscount,
+        serverQuote: quote,
         requirements,
       } = await quoteOrderItems({
         shopId: checkout.shopId,
         items: checkout.items,
+        isTakeaway: checkout.isTakeaway,
         connection,
       });
+      const discount = calculateDiscount({
+        subtotal: subtotalBeforeDiscount,
+        type: checkout.discountType,
+        value: checkout.discountValue,
+      });
+      const discountedItems = applyDiscountToItems(
+        resolvedItems,
+        discount.amount,
+      );
+      const total = discount.total;
+      const serverQuote = {
+        ...quote,
+        total,
+        subtotal_before_discount: subtotalBeforeDiscount,
+        discount_type: discount.type,
+        discount_value: discount.value,
+        discount_amount: discount.amount,
+        items: discountedItems.map((item, itemIndex) => ({
+          ...quote.items[itemIndex],
+          total: item.discountedTotal,
+          total_ht: item.totalHt,
+          total_vat: item.totalVat,
+          unit_price_ht: item.unitPriceHt,
+          unit_vat: item.unitVat,
+        })),
+      };
       if (cents(total) !== cents(checkout.expectedTotal)) {
         throw new DomainError(
           409,
@@ -789,6 +879,10 @@ const buildCheckoutModule = ({
           taken_by_user_id: takenBy.id,
           taken_by_name: takenBy.name,
           subtotal: total,
+          subtotal_before_discount: subtotalBeforeDiscount,
+          discount_type: discount.type,
+          discount_value: discount.value,
+          discount_amount: discount.amount,
           payment: paymentState.payment,
           payment_status: paymentState.payment_status,
           payment_provider: paymentState.payment_provider,
@@ -840,14 +934,14 @@ const buildCheckoutModule = ({
         }
       }
 
-      for (const item of resolvedItems) {
+      for (const item of discountedItems) {
         const detailResult = await repository.insertOrderDetail({
           detail: {
             orderid: orderId,
             productid: item.productId,
             price: item.unitPrice,
             qty: item.quantity,
-            total: item.lineTotal,
+            total: item.discountedTotal,
             vat_rate: item.vatRate,
             unit_price_ht: item.unitPriceHt,
             unit_vat: item.unitVat,

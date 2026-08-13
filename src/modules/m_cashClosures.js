@@ -72,10 +72,10 @@ const getNextClosureNumber = (shopId, connection) =>
 const getDatabaseNow = (connection) =>
   queryResult(
     `SELECT DATE_FORMAT(CURRENT_TIMESTAMP(6), '%Y-%m-%d %H:%i:%s.%f')
-            AS current_time`,
+            AS database_now`,
     [],
     connection
-  ).then((rows) => rows[0].current_time);
+  ).then((rows) => rows[0].database_now);
 
 const getArchivedOrdersForPeriod = ({ shopId, openedAt, closedAt, connection = pool }) => {
   const params = [shopId];

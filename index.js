@@ -15,6 +15,8 @@ const {
   buildNonOverlappingRunner,
   runStripePaymentMaintenance,
 } = require("./src/services/stripePaymentMaintenance");
+const dbPool = require("./src/config/dbPool");
+const { waitForDatabase } = require("./src/helpers/waitForDatabase");
 const { envPORT, envPUBLICIMAGEPATH } = require("./src/helpers/env");
 const prefix = require("./src/config/prefix");
 
@@ -39,12 +41,6 @@ const runScheduledStripePaymentMaintenance = buildNonOverlappingRunner(
   runStripePaymentMaintenance,
   console,
 );
-const reservationReleaseTimer = setInterval(() => {
-  runScheduledStripePaymentMaintenance().catch((error) => {
-    console.error("Stripe payment maintenance failed", error);
-  });
-}, 60 * 1000);
-reservationReleaseTimer.unref();
 
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
@@ -95,6 +91,25 @@ app.use(
   "/api/v1/imgcustomizations",
   express.static(customizationChoicesPath),
 );
-app.listen(envPORT, "0.0.0.0" || 5005, () => {
-  console.log(`Server is running onn  http://localhosst:${envPORT || 5005}`);
+const startServer = async () => {
+  await waitForDatabase({
+    checkConnection: () => dbPool.query("SELECT 1"),
+    logger: console,
+  });
+
+  const reservationReleaseTimer = setInterval(() => {
+    runScheduledStripePaymentMaintenance().catch((error) => {
+      console.error("Stripe payment maintenance failed", error);
+    });
+  }, 60 * 1000);
+  reservationReleaseTimer.unref();
+
+  app.listen(envPORT, "0.0.0.0", () => {
+    console.log(`Server is running onn  http://localhosst:${envPORT || 5005}`);
+  });
+};
+
+startServer().catch((error) => {
+  console.error("Database startup failed:", error);
+  process.exitCode = 1;
 });

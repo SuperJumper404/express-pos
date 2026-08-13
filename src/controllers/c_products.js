@@ -100,9 +100,18 @@ const buildProductController = ({
       }
       body.price = parsedPrice;
     }
-    if (creation || Object.prototype.hasOwnProperty.call(body, "vat_rate")) {
+    const hasLegacyVat = Object.prototype.hasOwnProperty.call(body, "vat_rate");
+    const hasDineInVat = Object.prototype.hasOwnProperty.call(body, "vat_rate_dine_in");
+    const hasTakeawayVat = Object.prototype.hasOwnProperty.call(body, "vat_rate_takeaway");
+    if (creation || hasLegacyVat || hasDineInVat || hasTakeawayVat) {
       try {
-        body.vat_rate = normalizeVatRate(body.vat_rate, 10);
+        const legacyVat = normalizeVatRate(body.vat_rate, 10);
+        body.vat_rate = legacyVat;
+        body.vat_rate_dine_in = normalizeVatRate(body.vat_rate_dine_in, legacyVat);
+        body.vat_rate_takeaway = normalizeVatRate(
+          body.vat_rate_takeaway,
+          body.vat_rate_dine_in,
+        );
       } catch (error) {
         throw new DomainError(422, "VAT_RATE_INVALID", "Taux de TVA invalide.");
       }

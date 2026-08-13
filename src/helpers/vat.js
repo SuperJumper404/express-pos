@@ -34,8 +34,16 @@ const buildVatSnapshot = ({ unitPrice, quantity, vatRate }) => {
   };
 };
 
+const resolveProductVatRate = (product = {}, isTakeaway = false) => {
+  const fallback = product.vat_rate === undefined ? 10 : product.vat_rate;
+  const dineInRate = normalizeVatRate(product.vat_rate_dine_in, fallback);
+  const takeawayRate = normalizeVatRate(product.vat_rate_takeaway, dineInRate);
+  return isTakeaway ? takeawayRate : dineInRate;
+};
+
 module.exports = {
   ALLOWED_VAT_RATES,
   buildVatSnapshot,
   normalizeVatRate,
+  resolveProductVatRate,
 };

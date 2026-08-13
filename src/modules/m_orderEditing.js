@@ -533,11 +533,15 @@ const buildOrderEditingModule = ({
         serverQuote: { total: 0, items: [] },
         requirements: new Map(),
       };
+      const nextIsTakeaway = amendment.isTakeaway === undefined
+        ? [true, 1, "1"].includes(order.is_takeaway)
+        : amendment.isTakeaway;
       if (amendment.items.length) {
         try {
           quote = await quoteItems({
             shopId: amendment.shopId,
             items: amendment.items,
+            isTakeaway: nextIsTakeaway,
             connection,
           });
         } catch (error) {
@@ -667,11 +671,12 @@ const buildOrderEditingModule = ({
       }
 
       const canceled = amendment.items.length === 0;
-      const nextIsTakeaway = amendment.isTakeaway === undefined
-        ? [true, 1, "1"].includes(order.is_takeaway)
-        : amendment.isTakeaway;
       const orderChanges = {
         subtotal: quote.total,
+        subtotal_before_discount: quote.total,
+        discount_type: "none",
+        discount_value: 0,
+        discount_amount: 0,
         finished: timestamp,
         is_takeaway: nextIsTakeaway ? 1 : 0,
         ...(canceled && { status: 4 }),

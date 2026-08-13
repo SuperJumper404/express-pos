@@ -1,6 +1,7 @@
 const conn = require("../config/db");
 const { normalizeQrPaymentMode } = require("../helpers/qrPaymentMode");
 const { normalizeCommissionPercent } = require("../helpers/stripePayment");
+const { normalizeDiscountPercentages } = require("../helpers/discount");
 
 const transactionError = (conn, reject, error) =>
   conn.rollback(() => reject(new Error(error.message)));
@@ -28,6 +29,9 @@ const mCreateAndInitializeShop = (data) =>
         shop_phone: data.shop_phone,
         shop_description: data.shop_description,
         shop_payment_methods: JSON.stringify(data.shop_payment_methods),
+        discount_percentages: JSON.stringify(
+          normalizeDiscountPercentages(data.discount_percentages),
+        ),
         shop_adress: data.shop_adress,
         shop_siret: data.shop_siret,
         admin_user: 0,
@@ -147,6 +151,7 @@ const mUpdateShopInfo = (data, id) =>
       SET shop_name = ?, shop_description = ?, shop_phone = ?, shop_adress = ?,
           shop_siret = ?, activate_tva = ?, hours = ?, shop_social_media = ?,
           shop_payment_methods = ?, shop_profile_image = ?, shop_status = ?,
+          discount_percentages = ?,
           kitchen_closed = ?, shop_printer_ip = ?, smart_print_app = ?,
           auto_print_order_tickets = ?, qr_payment_mode = ?, stripe_commission_percent = ?,
           stripe_account_id = ?, stripe_onboarding_complete = ?, stripe_charges_enabled = ?,
@@ -164,6 +169,7 @@ const mUpdateShopInfo = (data, id) =>
       JSON.stringify(data.shop_payment_methods),
       data.shop_profile_image,
       data.shop_status,
+      JSON.stringify(normalizeDiscountPercentages(data.discount_percentages)),
       data.kitchen_closed,
       data.shop_printer_ip,
       data.smart_print_app,

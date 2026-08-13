@@ -364,9 +364,16 @@ module.exports = {
   mAllOrder: (shopid) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        `SELECT orders.*, service_points.name AS service_point_name
+        `SELECT orders.*,
+                service_points.name AS service_point_name,
+                stock_reservations.stock_reservation_status
          FROM orders
          LEFT JOIN service_points ON service_points.id = orders.service_point_id
+         LEFT JOIN (
+           SELECT order_id, MAX(status) AS stock_reservation_status
+           FROM order_stock_reservations
+           GROUP BY order_id
+         ) stock_reservations ON stock_reservations.order_id = orders.id
          WHERE orders.shopid = ? AND orders.status <> 0
          ORDER BY orders.created DESC`,
         [shopid],
@@ -396,11 +403,18 @@ module.exports = {
       });
     });
   },
-  mOrdersbyUserId: (userId) => {
+  mOrdersbyUserId: (servicePointId, shopid) => {
     return new Promise((resolve, reject) => {
-      // const query = `SELECT * FROM orders WHERE customerID = ${userId} ORDER BY orders.created DESC`;
-      const query = `SELECT orders.*, users.username FROM orders JOIN users ON orders.customerID = users.id WHERE orders.customerID =  ${userId} ORDER BY orders.created DESC`;
-      conn.query(query, (err, result) => {
+      const query = `SELECT orders.*, users.username
+        FROM orders
+        LEFT JOIN users ON orders.customerID = users.id
+        WHERE orders.shopid = ?
+          AND (
+            orders.service_point_id = ?
+            OR (orders.service_point_id IS NULL AND orders.customerID = ?)
+          )
+        ORDER BY orders.created DESC`;
+      conn.query(query, [shopid, servicePointId, servicePointId], (err, result) => {
         if (!err) {
           resolve(result);
         } else {
@@ -425,7 +439,7 @@ module.exports = {
   mDetailOrder: (id) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        `SELECT *, orders.id as id, orderdetail.id as orderDetailsId FROM orders LEFT JOIN orderdetail ON orders.id=orderdetail.orderId LEFT JOIN products ON orderdetail.productid=products.id WHERE orders.id='${id}' ORDER BY orders.created DESC`,
+        `SELECT *, orders.id as id, service_points.name AS service_point_name, orderdetail.id as orderDetailsId FROM orders LEFT JOIN orderdetail ON orders.id=orderdetail.orderId LEFT JOIN products ON orderdetail.productid=products.id LEFT JOIN service_points ON service_points.id=orders.service_point_id WHERE orders.id='${id}' ORDER BY orders.created DESC`,
         (err, result) => {
           if (!err) {
             const customizationPromises = [];

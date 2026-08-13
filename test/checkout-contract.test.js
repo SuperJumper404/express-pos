@@ -10,6 +10,10 @@ const {
   canonicalPayloadHash,
 } = require("../src/modules/m_checkout");
 const { buildOrderQuoteModule } = require("../src/modules/m_orderQuote");
+const checkoutSource = fs.readFileSync(
+  require.resolve("../src/modules/m_checkout"),
+  "utf8",
+);
 
 const routerSource = fs.readFileSync(
   require.resolve("../src/routers/r_customizations"),
@@ -61,6 +65,13 @@ assert.match(
   indexSource,
   /"\/api\/v1\/imgcustomizations"[\s\S]*express\.static\(customizationChoicesPath\)/,
 );
+assert.ok(
+  checkoutSource.includes("vat_rate, vat_rate_dine_in, vat_rate_takeaway"),
+  "checkout product quote query must load dine-in and takeaway VAT columns",
+);
+assert.ok(checkoutSource.includes("discount_type"));
+assert.ok(checkoutSource.includes("subtotal_before_discount"));
+assert.ok(checkoutSource.includes("applyDiscountToItems"));
 const {
   createCustomizationChoice,
   createCustomizationStep,
@@ -1614,6 +1625,8 @@ const runSharedOrderQuoteContract = async () => {
           name: "Menu",
           price: 8,
           vat_rate: 10,
+          vat_rate_dine_in: 10,
+          vat_rate_takeaway: 5.5,
           stock: 5,
           archived: 0,
           is_hidden: 0,
@@ -1659,6 +1672,26 @@ const runSharedOrderQuoteContract = async () => {
     total_vat: 1.73,
   });
   assert.deepStrictEqual([...result.requirements.entries()], [[10, 2], [11, 2]]);
+
+  const takeawayResult = await quote.quoteOrderItems({
+    shopId: 7,
+    items: [{ productId: 10, quantity: 2, selectedChoiceIds: [101] }],
+    isTakeaway: true,
+    connection: { transaction: true },
+  });
+  assert.strictEqual(takeawayResult.total, 19);
+  assert.deepStrictEqual(takeawayResult.serverQuote.items[0], {
+    product_id: 10,
+    quantity: 2,
+    selected_choice_ids: [101],
+    unit_price: 9.5,
+    total: 19,
+    vat_rate: 5.5,
+    unit_price_ht: 9,
+    unit_vat: 0.5,
+    total_ht: 18.01,
+    total_vat: 0.99,
+  });
 };
 
 const makeCheckoutHarness = ({

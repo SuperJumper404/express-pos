@@ -139,8 +139,8 @@ exports.allOrder = async (req, res) => {
     });
 };
 exports.ordersbyUserId = async (req, res) => {
-  const userId = req.query.userId;
-  mOrdersbyUserId(userId)
+  const servicePointId = req.query.servicePointId || req.query.userId;
+  mOrdersbyUserId(servicePointId, req.shopid)
     .then((response) => {
       success(res, "Commandes récupérées.", null, response);
     })

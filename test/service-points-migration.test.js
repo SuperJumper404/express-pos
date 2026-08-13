@@ -21,6 +21,7 @@ for (const pattern of [
   /ADD COLUMN `order_source` VARCHAR\(32\) NOT NULL DEFAULT 'pos'/,
   /INSERT IGNORE INTO `service_points`[\s\S]*'counter'/,
   /INSERT IGNORE INTO `service_points`[\s\S]*'click_collect'/,
+  /COALESCE\(NULLIF\(CAST\(`created` AS CHAR\), '0000-00-00 00:00:00'\), NOW\(\)\)/,
   /UPDATE `orders`[\s\S]*`service_point_id`/,
   /UPDATE `archives`[\s\S]*`service_point_id`/,
 ]) {

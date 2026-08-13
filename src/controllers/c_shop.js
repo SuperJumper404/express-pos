@@ -12,12 +12,14 @@ const path = require("path");
 const bcrypt = require("bcrypt");
 const { normalizeQrPaymentMode } = require("../helpers/qrPaymentMode");
 const { normalizeCommissionPercent } = require("../helpers/stripePayment");
+const { normalizeDiscountPercentages } = require("../helpers/discount");
 
 const DEFAULT_SHOP_PAYMENT_METHODS = [
   "Tickets Restaurants",
   "Cheques",
   "Especes",
 ];
+const DEFAULT_DISCOUNT_PERCENTAGES = [5, 10, 15, 20];
 
 const DEFAULT_SHOP_HOURS = [
   { dayName: "Lundi", isOpen: true, from: 8, to: 20 },
@@ -95,6 +97,7 @@ exports.createAndInitializeShop = async (req, res) => {
       shop_phone: body.shop_phone,
       shop_description: body.shop_description || "",
       shop_payment_methods: DEFAULT_SHOP_PAYMENT_METHODS,
+      discount_percentages: DEFAULT_DISCOUNT_PERCENTAGES,
       shop_adress: body.shop_adress,
       shop_siret: body.shop_siret || null,
       admin_mail: body.admin_mail,
@@ -157,6 +160,7 @@ exports.getShopInfoClickAndCollect = async (req, res) => {
       shop_adress: response?.[0]?.shop_adress,
       shop_description: response?.[0]?.shop_description,
       shop_payment_methods: response?.[0]?.shop_payment_methods,
+      discount_percentages: response?.[0]?.discount_percentages,
       shop_siret: response?.[0]?.shop_siret,
       hours: response?.[0]?.hours,
       shop_social_media: response?.[0]?.shop_social_media,
@@ -249,6 +253,12 @@ exports.updateShopInfo = async (req, res) => {
       shop_payment_methods: prefer(
         req.body.shop_payment_methods,
         parseStoredJson(shopInfo.shop_payment_methods, DEFAULT_SHOP_PAYMENT_METHODS),
+      ),
+      discount_percentages: normalizeDiscountPercentages(
+        parseStoredJson(
+          prefer(req.body.discount_percentages, shopInfo.discount_percentages),
+          DEFAULT_DISCOUNT_PERCENTAGES,
+        ),
       ),
       shop_profile_image: req.file?.filename || shopInfo.shop_profile_image,
       shop_status: prefer(req.body.shop_status, shopInfo.shop_status),

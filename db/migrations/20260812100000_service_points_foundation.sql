@@ -50,7 +50,9 @@ INSERT INTO `service_points` (
   `legacy_user_id`, `public_access_version`, `created`, `updated`
 )
 SELECT
-  `shopid`, `username`, 'table', 0, `status` = 1, `id`, `id`, 1, `created`, `updated`
+  `shopid`, `username`, 'table', 0, `status` = 1, `id`, `id`, 1,
+  COALESCE(NULLIF(CAST(`created` AS CHAR), '0000-00-00 00:00:00'), NOW()),
+  NULLIF(CAST(`updated` AS CHAR), '0000-00-00 00:00:00')
 FROM `users`
 WHERE `access` = 2;
 
