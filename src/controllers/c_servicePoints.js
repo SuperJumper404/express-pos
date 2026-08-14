@@ -13,6 +13,8 @@ const parseServicePointId = (value) => {
 const normalizeName = (value) => String(value || "").trim();
 const isEditableTable = (point) =>
   point && point.type === "table" && Number(point.is_system) !== 1;
+const isEditableKiosk = (point) =>
+  point && point.type === "kiosk" && Number(point.is_system) !== 1;
 
 const buildServicePointsController = (repository) => {
   const getRepository = () => repository || require("../modules/m_servicePoints");
@@ -56,6 +58,19 @@ const buildServicePointsController = (repository) => {
     }
   },
 
+  listKiosks: async (req, res) => {
+    try {
+      const points = await getRepository().listServicePoints({
+        shopId: req.shopid,
+        activeOnly: false,
+        kiosksOnly: true,
+      });
+      return success(res, "Bornes recuperees.", null, points);
+    } catch (error) {
+      return failed(res, "Erreur serveur.", error.message);
+    }
+  },
+
   createTable: async (req, res) => {
     const name = normalizeName(req.body && req.body.name);
     if (!name) {
@@ -70,6 +85,23 @@ const buildServicePointsController = (repository) => {
       };
       const created = await getRepository().createTablePoint(data);
       return custom(res, 201, "Table creee avec succes.", null, created);
+    } catch (error) {
+      return failed(res, "Erreur serveur.", error.message);
+    }
+  },
+
+  createKiosk: async (req, res) => {
+    const name = normalizeName(req.body && req.body.name);
+    if (!name) {
+      return custom(res, 422, "Le nom de la borne est requis.", null, null);
+    }
+
+    try {
+      const created = await getRepository().createKioskPoint({
+        shopId: req.shopid,
+        name,
+      });
+      return custom(res, 201, "Borne creee avec succes.", null, created);
     } catch (error) {
       return failed(res, "Erreur serveur.", error.message);
     }
@@ -113,6 +145,44 @@ const buildServicePointsController = (repository) => {
     }
   },
 
+  updateKiosk: async (req, res) => {
+    const servicePointId = parseServicePointId(req.params.id);
+    if (!servicePointId) {
+      return custom(res, 422, "Borne invalide.", null, null);
+    }
+
+    try {
+      const point = await getRepository().findServicePoint({
+        servicePointId,
+        shopId: req.shopid,
+      });
+      if (!isEditableKiosk(point)) {
+        return custom(res, 422, "Seules les bornes peuvent etre modifiees.", null, null);
+      }
+
+      const body = req.body || {};
+      const hasName = Object.prototype.hasOwnProperty.call(body, "name");
+      const hasActive = Object.prototype.hasOwnProperty.call(body, "is_active");
+      const name = hasName ? normalizeName(body.name) : undefined;
+      if ((hasName && !name) || (!hasName && !hasActive)) {
+        return custom(res, 422, "Modification de borne invalide.", null, null);
+      }
+
+      const result = await getRepository().updateKioskPoint({
+        servicePointId,
+        shopId: req.shopid,
+        name,
+        isActive: hasActive ? (Number(body.is_active) ? 1 : 0) : undefined,
+      });
+      if (!result.affectedRows) {
+        return custom(res, 404, "Borne introuvable.", null, null);
+      }
+      return success(res, "Borne mise a jour.", null, null);
+    } catch (error) {
+      return failed(res, "Erreur serveur.", error.message);
+    }
+  },
+
   deleteTable: async (req, res) => {
     const servicePointId = parseServicePointId(req.params.id);
     if (!servicePointId) {
@@ -136,6 +206,34 @@ const buildServicePointsController = (repository) => {
         return custom(res, 404, "Table introuvable.", null, null);
       }
       return success(res, "Table supprimee.", null, null);
+    } catch (error) {
+      return failed(res, "Erreur serveur.", error.message);
+    }
+  },
+
+  deleteKiosk: async (req, res) => {
+    const servicePointId = parseServicePointId(req.params.id);
+    if (!servicePointId) {
+      return custom(res, 422, "Borne invalide.", null, null);
+    }
+
+    try {
+      const point = await getRepository().findServicePoint({
+        servicePointId,
+        shopId: req.shopid,
+      });
+      if (!isEditableKiosk(point)) {
+        return custom(res, 422, "Seules les bornes peuvent etre supprimees.", null, null);
+      }
+
+      const result = await getRepository().deleteKioskPoint({
+        servicePointId,
+        shopId: req.shopid,
+      });
+      if (!result.affectedRows) {
+        return custom(res, 404, "Borne introuvable.", null, null);
+      }
+      return success(res, "Borne supprimee.", null, null);
     } catch (error) {
       return failed(res, "Erreur serveur.", error.message);
     }

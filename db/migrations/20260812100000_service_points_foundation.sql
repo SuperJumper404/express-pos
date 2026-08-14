@@ -4,7 +4,7 @@ CREATE TABLE `service_points` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `shopid` int(11) NOT NULL,
   `name` varchar(255) NOT NULL,
-  `type` enum('counter', 'click_collect', 'table') NOT NULL,
+  `type` enum('counter', 'click_collect', 'table', 'kiosk') NOT NULL,
   `system_key` varchar(32) DEFAULT NULL,
   `is_system` tinyint(1) NOT NULL DEFAULT '0',
   `is_active` tinyint(1) NOT NULL DEFAULT '1',

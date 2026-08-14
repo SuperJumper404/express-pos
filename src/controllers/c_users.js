@@ -31,6 +31,7 @@ const {
   normalizeModulePermissions,
   parseModulePermissions,
 } = require("../helpers/staffPermissions");
+const { findServicePoint } = require("../modules/m_servicePoints");
 
 const STAFF_ACCESS_VALUES = new Set([0, 1, 4, 5]);
 const isStaffAccess = (access) => STAFF_ACCESS_VALUES.has(Number(access));
@@ -43,6 +44,20 @@ const withModulePermissions = (user) => ({
     user.access,
   ),
 });
+const normalizeStaffServicePointId = (value) => {
+  const id = Number(value);
+  return Number.isInteger(id) && id > 0 ? id : null;
+};
+const validateStaffServicePoint = async ({ value, shopid }) => {
+  const servicePointId = normalizeStaffServicePointId(value);
+  if (!servicePointId) return null;
+
+  const point = await findServicePoint({ servicePointId, shopId: shopid });
+  if (!point || point.type !== "kiosk" || Number(point.is_active) !== 1) {
+    throw new Error("Borne associee invalide.");
+  }
+  return servicePointId;
+};
 const findActiveAdminByPassword = async (users, password) => {
   let legacyUser = null;
   for (const user of users) {
@@ -128,6 +143,10 @@ const registerWithStaffCredentials = async (req, res) => {
         data.module_permissions = JSON.stringify(
           normalizeModulePermissions(body.module_permissions, access),
         );
+        data.service_point_id = await validateStaffServicePoint({
+          value: body.service_point_id,
+          shopid: req.shopid,
+        });
       }
 
       try {
@@ -445,6 +464,12 @@ module.exports = {
       body.module_permissions = JSON.stringify(
         normalizeModulePermissions(body.module_permissions, access),
       );
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "service_point_id")) {
+      body.service_point_id = await validateStaffServicePoint({
+        value: body.service_point_id,
+        shopid: req.shopid,
+      });
     }
     if (req.file) {
       if (detail[0].image === "defaultuser.png") {

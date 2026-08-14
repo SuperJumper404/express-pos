@@ -41,6 +41,7 @@ assert.deepStrictEqual(
     "tables",
     "reports",
     "website",
+    "borne",
   ],
 );
 assert.deepStrictEqual(getDefaultModulePermissions(ACCESS.CASHIER), [

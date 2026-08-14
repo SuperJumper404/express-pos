@@ -17,6 +17,7 @@ const STAFF_MODULE_KEYS = [
   "tables",
   "reports",
   "website",
+  "borne",
 ];
 
 const DEFAULT_MODULES_BY_ACCESS = {

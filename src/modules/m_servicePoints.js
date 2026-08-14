@@ -4,6 +4,7 @@ const SERVICE_POINT_TYPES = Object.freeze({
   COUNTER: "counter",
   CLICK_COLLECT: "click_collect",
   TABLE: "table",
+  KIOSK: "kiosk",
 });
 
 const query = (sql, values) =>
@@ -14,12 +15,18 @@ const query = (sql, values) =>
     });
   });
 
-const listServicePoints = async ({ shopId, activeOnly = true, tablesOnly = false }) => {
+const listServicePoints = async ({
+  shopId,
+  activeOnly = true,
+  tablesOnly = false,
+  kiosksOnly = false,
+}) => {
   const clauses = ["`shopid` = ?"];
   const values = [shopId];
 
   if (activeOnly) clauses.push("`is_active` = 1");
   if (tablesOnly) clauses.push("`type` = 'table'");
+  if (kiosksOnly) clauses.push("`type` = 'kiosk'");
 
   return query(
     `SELECT \`id\`, \`shopid\`, \`name\`, \`type\`, \`system_key\`, \`is_system\`, \`is_active\`, \`sort_order\`, \`public_access_version\`, \`created\`, \`updated\`
@@ -57,6 +64,21 @@ const createTablePoint = ({ shopId, name }) =>
     }],
   );
 
+const createKioskPoint = ({ shopId, name }) =>
+  query(
+    "INSERT INTO `service_points` SET ?",
+    [{
+      shopid: shopId,
+      name,
+      type: SERVICE_POINT_TYPES.KIOSK,
+      is_system: 0,
+      is_active: 1,
+      sort_order: 900,
+      public_access_version: 1,
+      created: new Date(),
+    }],
+  );
+
 const updateTablePoint = ({ servicePointId, shopId, name, isActive }) => {
   const updates = { updated: new Date() };
   if (name !== undefined) updates.name = name;
@@ -74,12 +96,32 @@ const deleteTablePoint = ({ servicePointId, shopId }) =>
     [servicePointId, shopId],
   );
 
+const updateKioskPoint = ({ servicePointId, shopId, name, isActive }) => {
+  const updates = { updated: new Date() };
+  if (name !== undefined) updates.name = name;
+  if (isActive !== undefined) updates.is_active = isActive;
+
+  return query(
+    "UPDATE `service_points` SET ? WHERE `id` = ? AND `shopid` = ? AND `type` = 'kiosk' AND `is_system` = 0",
+    [updates, servicePointId, shopId],
+  );
+};
+
+const deleteKioskPoint = ({ servicePointId, shopId }) =>
+  query(
+    "DELETE FROM `service_points` WHERE `id` = ? AND `shopid` = ? AND `type` = 'kiosk' AND `is_system` = 0",
+    [servicePointId, shopId],
+  );
+
 module.exports = {
   SERVICE_POINT_TYPES,
   listServicePoints,
   findServicePoint,
   findSystemPoint,
   createTablePoint,
+  createKioskPoint,
   updateTablePoint,
+  updateKioskPoint,
   deleteTablePoint,
+  deleteKioskPoint,
 };

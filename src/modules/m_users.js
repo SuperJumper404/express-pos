@@ -43,7 +43,7 @@ module.exports = {
   mFindUserByIdAndShop: (id, shopid) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        "SELECT users.id, users.shopid, users.access, users.staff_login_id, CASE WHEN shop.admin_user = users.id THEN 1 ELSE 0 END AS is_primary_admin FROM users LEFT JOIN shop ON shop.id = users.shopid WHERE users.id = ? AND users.shopid = ?",
+        "SELECT users.id, users.shopid, users.access, users.staff_login_id, users.service_point_id, CASE WHEN shop.admin_user = users.id THEN 1 ELSE 0 END AS is_primary_admin FROM users LEFT JOIN shop ON shop.id = users.shopid WHERE users.id = ? AND users.shopid = ?",
         [id, shopid],
         (err, result) => {
           if (!err) {
@@ -141,7 +141,7 @@ module.exports = {
   mGetAllUser: (shopid) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        "SELECT users.id, users.shopid, users.username, users.email, users.phone, users.gender, users.position, users.image, users.status, users.access, users.staff_login_id, users.module_permissions, users.created, users.updated, CASE WHEN shop.admin_user = users.id THEN 1 ELSE 0 END AS is_primary_admin FROM users LEFT JOIN shop ON shop.id = users.shopid WHERE users.shopid = ?",
+        "SELECT users.id, users.shopid, users.username, users.email, users.phone, users.gender, users.position, users.image, users.status, users.access, users.staff_login_id, users.module_permissions, users.service_point_id, service_points.name AS service_point_name, service_points.type AS service_point_type, users.created, users.updated, CASE WHEN shop.admin_user = users.id THEN 1 ELSE 0 END AS is_primary_admin FROM users LEFT JOIN shop ON shop.id = users.shopid LEFT JOIN service_points ON service_points.id = users.service_point_id AND service_points.shopid = users.shopid WHERE users.shopid = ?",
         [shopid],
         (err, result) => {
           if (!err) {
@@ -168,7 +168,7 @@ module.exports = {
   mDetailUser: (id) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        "SELECT users.id, users.shopid, users.username, users.email, users.phone, users.gender, users.position, users.image, users.status, users.access, users.staff_login_id, users.module_permissions, users.created, users.updated, CASE WHEN shop.admin_user = users.id THEN 1 ELSE 0 END AS is_primary_admin FROM users LEFT JOIN shop ON shop.id = users.shopid WHERE users.id = ?",
+        "SELECT users.id, users.shopid, users.username, users.email, users.phone, users.gender, users.position, users.image, users.status, users.access, users.staff_login_id, users.module_permissions, users.service_point_id, service_points.name AS service_point_name, service_points.type AS service_point_type, users.created, users.updated, CASE WHEN shop.admin_user = users.id THEN 1 ELSE 0 END AS is_primary_admin FROM users LEFT JOIN shop ON shop.id = users.shopid LEFT JOIN service_points ON service_points.id = users.service_point_id AND service_points.shopid = users.shopid WHERE users.id = ?",
         [id],
         (err, result) => {
           if (!err) {
@@ -183,7 +183,7 @@ module.exports = {
   mSessionUser: (id) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        "SELECT users.id, users.shopid, users.username, users.email, users.token, users.expired, users.phone, users.gender, users.position, users.image, users.status, users.access, users.staff_login_id, users.module_permissions, users.created, users.updated, CASE WHEN shop.admin_user = users.id THEN 1 ELSE 0 END AS is_primary_admin, counter.id AS service_point_id FROM users LEFT JOIN shop ON shop.id = users.shopid LEFT JOIN service_points AS counter ON counter.shopid = users.shopid AND counter.system_key = 'counter' AND counter.is_active = 1 WHERE users.id = ?",
+        "SELECT users.id, users.shopid, users.username, users.email, users.token, users.expired, users.phone, users.gender, users.position, users.image, users.status, users.access, users.staff_login_id, users.module_permissions, users.created, users.updated, CASE WHEN shop.admin_user = users.id THEN 1 ELSE 0 END AS is_primary_admin, assigned_point.id AS service_point_id, assigned_point.name AS service_point_name, assigned_point.type AS service_point_type FROM users LEFT JOIN shop ON shop.id = users.shopid LEFT JOIN service_points AS assigned_point ON assigned_point.id = users.service_point_id AND assigned_point.shopid = users.shopid AND assigned_point.is_active = 1 WHERE users.id = ?",
         [id],
         (err, result) => {
           if (!err) {
