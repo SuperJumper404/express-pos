@@ -183,7 +183,7 @@ module.exports = {
   mSessionUser: (id) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        "SELECT users.id, users.shopid, users.username, users.email, users.token, users.expired, users.phone, users.gender, users.position, users.image, users.status, users.access, users.staff_login_id, users.module_permissions, users.created, users.updated, CASE WHEN shop.admin_user = users.id THEN 1 ELSE 0 END AS is_primary_admin FROM users LEFT JOIN shop ON shop.id = users.shopid WHERE users.id = ?",
+        "SELECT users.id, users.shopid, users.username, users.email, users.token, users.expired, users.phone, users.gender, users.position, users.image, users.status, users.access, users.staff_login_id, users.module_permissions, users.created, users.updated, CASE WHEN shop.admin_user = users.id THEN 1 ELSE 0 END AS is_primary_admin, counter.id AS service_point_id FROM users LEFT JOIN shop ON shop.id = users.shopid LEFT JOIN service_points AS counter ON counter.shopid = users.shopid AND counter.system_key = 'counter' AND counter.is_active = 1 WHERE users.id = ?",
         [id],
         (err, result) => {
           if (!err) {
