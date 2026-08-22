@@ -125,18 +125,51 @@ const buildProductController = ({
         throw new DomainError(422, "VAT_RATE_INVALID", "Taux de TVA invalide.");
       }
     }
-    if (body.track_stock === undefined) body.track_stock = 1;
-    body.track_stock = Number(body.track_stock) === 0 ? 0 : 1;
-    body.stock_zero_behavior = body.stock_zero_behavior === "warn" ? "warn" : "block";
-    body.stock_unit = body.stock_unit || "piece";
-    if (body.track_stock === 0 && body.stock === undefined) body.stock = 0;
-    if (body.stock !== undefined) body.stock = normalizeStockQuantity(body.stock, "stock");
-    body.minimum_stock = body.minimum_stock === undefined
-      ? 1
-      : normalizeStockQuantity(body.minimum_stock, "minimum_stock");
-    body.target_stock = body.target_stock === undefined
-      ? Number(body.stock || 0)
-      : normalizeStockQuantity(body.target_stock, "target_stock");
+    const hasTrackStock = Object.prototype.hasOwnProperty.call(body, "track_stock");
+    const hasZeroBehavior = Object.prototype.hasOwnProperty.call(body, "stock_zero_behavior");
+    const hasStockUnit = Object.prototype.hasOwnProperty.call(body, "stock_unit");
+    const hasStock = Object.prototype.hasOwnProperty.call(body, "stock");
+    const hasMinimumStock = Object.prototype.hasOwnProperty.call(body, "minimum_stock");
+    const hasTargetStock = Object.prototype.hasOwnProperty.call(body, "target_stock");
+
+    if (creation && !hasTrackStock) body.track_stock = 1;
+    if (creation || hasTrackStock) body.track_stock = Number(body.track_stock) === 0 ? 0 : 1;
+    if (creation && !hasZeroBehavior) body.stock_zero_behavior = "block";
+    if (creation || hasZeroBehavior) {
+      body.stock_zero_behavior = body.stock_zero_behavior === "warn" ? "warn" : "block";
+    }
+    if (creation && !hasStockUnit) body.stock_unit = "piece";
+    if (hasStockUnit) body.stock_unit = String(body.stock_unit || "piece").trim() || "piece";
+
+    if (hasStock) {
+      body.stock = body.stock === "" && body.track_stock === 0
+        ? 0
+        : normalizeStockQuantity(body.stock, "stock");
+    } else if (creation && body.track_stock === 0) {
+      body.stock = 0;
+    }
+
+    if (creation && !hasMinimumStock) body.minimum_stock = 1;
+    if (creation || hasMinimumStock) {
+      body.minimum_stock = normalizeStockQuantity(body.minimum_stock, "minimum_stock");
+    }
+    if (creation && !hasTargetStock) {
+      body.target_stock = Math.max(Number(body.stock ?? 0), Number(body.minimum_stock ?? 0));
+    }
+    if (creation || hasTargetStock) {
+      body.target_stock = normalizeStockQuantity(body.target_stock, "target_stock");
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(body, "minimum_stock")
+      && Object.prototype.hasOwnProperty.call(body, "target_stock")
+      && body.target_stock < body.minimum_stock
+    ) {
+      throw new DomainError(
+        400,
+        "PRODUCT_STOCK_TARGET_INVALID",
+        "Le stock cible doit etre superieur ou egal au seuil minimum.",
+      );
+    }
     if (creation) body.is_hidden = body.is_hidden || 0;
     return body;
   };

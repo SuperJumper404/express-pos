@@ -11,6 +11,15 @@ const optionalText = (value) => {
   return String(value).trim();
 };
 
+const optionalDate = (value) => {
+  const date = optionalText(value);
+  if (date === null) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(Date.parse(`${date}T00:00:00Z`))) {
+    throw new Error("La date d'achat est invalide.");
+  }
+  return date;
+};
+
 const validateStockItemPayload = (body) => {
   const name = optionalText(body.name);
   const unit = optionalText(body.unit);
@@ -46,6 +55,8 @@ const validateReplenishmentPayload = (body) => {
   return {
     quantity,
     supplier: optionalText(body.supplier),
+    reference: optionalText(body.reference),
+    purchase_date: optionalDate(body.purchase_date),
     unit_price: unitPrice,
     total_price: totalPrice,
     remark: optionalText(body.remark),
@@ -56,6 +67,23 @@ const validateInventoryPayload = (body) => ({
   quantity: toNonNegativeInteger(body.quantity, "quantite"),
   remark: optionalText(body.remark),
 });
+
+const validateBulkInventoryPayload = (body) => {
+  if (!Array.isArray(body.items) || body.items.length === 0) {
+    throw new Error("Au moins une ligne d'inventaire est requise.");
+  }
+  const seen = new Set();
+  return body.items.map((item) => {
+    const stockItemId = toPositiveInteger(item.stock_item_id, "article");
+    if (seen.has(stockItemId)) throw new Error("Un article ne peut etre inventorie qu'une fois.");
+    seen.add(stockItemId);
+    return {
+      stock_item_id: stockItemId,
+      quantity: toNonNegativeInteger(item.quantity, "quantite"),
+      remark: optionalText(item.remark),
+    };
+  });
+};
 
 const mapStockItemResponse = (item) => ({
   ...item,
@@ -69,8 +97,8 @@ const parseTaken = (value) => {
   throw new Error("La valeur taken doit etre un booleen.");
 };
 
-const shopIdFromReq = (req) => req.shopid || req.body.shop_id || req.query.shop_id;
-const operatorIdFromReq = (req) => req.userId || req.body.operator_id || null;
+const shopIdFromReq = (req) => req.shopid;
+const operatorIdFromReq = (req) => req.id ?? null;
 
 const listItems = async (req, res) => {
   try {
@@ -78,6 +106,15 @@ const listItems = async (req, res) => {
     success(res, "Articles de stock recuperes.", null, items.map(mapStockItemResponse));
   } catch (error) {
     failed(res, "Erreur serveur.", error.message);
+  }
+};
+
+const listLowItems = async (req, res) => {
+  try {
+    const items = await stockInventory.listLowItems(shopIdFromReq(req));
+    return success(res, "Stocks bas recuperes.", null, items.map(mapStockItemResponse));
+  } catch (error) {
+    return failed(res, "Erreur serveur.", error.message);
   }
 };
 
@@ -150,6 +187,57 @@ const inventoryItem = async (req, res) => {
   }
 };
 
+const bulkInventory = async (req, res) => {
+  try {
+    const items = validateBulkInventoryPayload(req.body);
+    const result = await stockInventory.bulkInventory({
+      shopId: shopIdFromReq(req),
+      items,
+      operatorId: operatorIdFromReq(req),
+    });
+    return success(res, "Inventaire en masse enregistre.", null, {
+      affected_rows: result.affectedRows,
+    });
+  } catch (error) {
+    return custom(res, 400, error.message, {}, null);
+  }
+};
+
+const archiveIngredient = async (req, res) => {
+  try {
+    const result = await stockInventory.archiveIngredient({
+      shopId: shopIdFromReq(req),
+      id: req.params.id,
+    });
+    if (!result.affectedRows) return custom(res, 404, "Ingredient introuvable.", null, []);
+    return success(res, "Ingredient archive.", null, null);
+  } catch (error) {
+    return failed(res, "Erreur serveur.", error.message);
+  }
+};
+
+const deleteIngredient = async (req, res) => {
+  try {
+    const result = await stockInventory.deleteIngredient({
+      shopId: shopIdFromReq(req),
+      id: req.params.id,
+    });
+    if (result.hasHistory) {
+      return custom(
+        res,
+        409,
+        "Cet ingredient possede un historique et doit etre archive.",
+        null,
+        { code: "STOCK_ITEM_HAS_HISTORY" },
+      );
+    }
+    if (!result.affectedRows) return custom(res, 404, "Ingredient introuvable.", null, []);
+    return success(res, "Ingredient supprime.", null, null);
+  } catch (error) {
+    return failed(res, "Erreur serveur.", error.message);
+  }
+};
+
 const generateShoppingList = async (req, res) => {
   try {
     const list = await stockInventory.generateShoppingList(shopIdFromReq(req));
@@ -192,14 +280,19 @@ module.exports = {
   validateStockItemPayload,
   validateReplenishmentPayload,
   validateInventoryPayload,
+  validateBulkInventoryPayload,
   mapStockItemResponse,
   parseTaken,
   listItems,
+  listLowItems,
   createIngredient,
   updateItem,
   detailItem,
   replenishItem,
   inventoryItem,
+  bulkInventory,
+  archiveIngredient,
+  deleteIngredient,
   generateShoppingList,
   listShoppingList,
   setShoppingListTaken,

@@ -31,6 +31,27 @@ assert.deepStrictEqual(configuredItem.selectedChoices, [{
   linked_product_id: 2,
 }]);
 
+const configuredItemWithStockPolicy = validateConfiguredItem({
+  product,
+  steps: [{
+    ...steps[0],
+    choices: [{
+      ...steps[0].choices[0],
+      linked_product_track_stock: 0,
+      linked_product_stock_zero_behavior: "warn",
+    }],
+  }],
+  selectedChoiceIds: [30],
+});
+assert.strictEqual(
+  configuredItemWithStockPolicy.selectedChoices[0].linked_product_track_stock,
+  0,
+);
+assert.strictEqual(
+  configuredItemWithStockPolicy.selectedChoices[0].linked_product_stock_zero_behavior,
+  "warn",
+);
+
 assert.throws(
   () => validateConfiguredItem({ product, steps, selectedChoiceIds: [] }),
   (error) => error.code === "CUSTOMIZATION_MIN_NOT_MET" && error.product_step_id === 20,

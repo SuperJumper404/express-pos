@@ -3,6 +3,7 @@ const {
   validateStockItemPayload,
   validateReplenishmentPayload,
   validateInventoryPayload,
+  validateBulkInventoryPayload,
   mapStockItemResponse,
   parseTaken,
 } = require("../src/controllers/c_stockInventory");
@@ -38,11 +39,15 @@ assert.deepStrictEqual(validateReplenishmentPayload({
   quantity: "4",
   supplier: "Metro",
   unit_price: "8",
+  reference: "FAC-42",
+  purchase_date: "2026-08-22",
 }), {
   quantity: 4,
   supplier: "Metro",
   unit_price: 8,
   total_price: 32,
+  reference: "FAC-42",
+  purchase_date: "2026-08-22",
   remark: null,
 });
 
@@ -50,6 +55,20 @@ assert.deepStrictEqual(validateInventoryPayload({ quantity: "0" }), {
   quantity: 0,
   remark: null,
 });
+
+assert.deepStrictEqual(validateBulkInventoryPayload({
+  items: [
+    { stock_item_id: "4", quantity: "0", remark: "Compte" },
+    { stock_item_id: 5, quantity: 3 },
+  ],
+}), [
+  { stock_item_id: 4, quantity: 0, remark: "Compte" },
+  { stock_item_id: 5, quantity: 3, remark: null },
+]);
+assert.throws(
+  () => validateBulkInventoryPayload({ items: [{ stock_item_id: 4, quantity: "1.5" }] }),
+  /quantite/,
+);
 
 assert.strictEqual(mapStockItemResponse({
   current_stock: 2,
@@ -144,6 +163,45 @@ const withStockInventory = async (stockInventory, work) => {
       body: { taken: "oui" },
     }, res);
     assert.strictEqual(response.code, 400);
+  });
+
+  let operatorId;
+  await withStockInventory({
+    replenishItem: async (data) => {
+      operatorId = data.operatorId;
+      return { affectedRows: 1 };
+    },
+  }, async (controller) => {
+    const { res, response } = responseRecorder();
+    await controller.replenishItem({
+      shopid: 1,
+      id: 44,
+      params: { id: 10 },
+      body: { quantity: 2 },
+    }, res);
+    assert.strictEqual(response.code, 200);
+    assert.strictEqual(operatorId, 44);
+  });
+
+  let bulkPayload;
+  await withStockInventory({
+    bulkInventory: async (data) => {
+      bulkPayload = data;
+      return { affectedRows: 2 };
+    },
+  }, async (controller) => {
+    const { res, response } = responseRecorder();
+    await controller.bulkInventory({
+      shopid: 1,
+      id: 44,
+      body: { items: [{ stock_item_id: 4, quantity: 0 }] },
+    }, res);
+    assert.strictEqual(response.code, 200);
+    assert.deepStrictEqual(bulkPayload, {
+      shopId: 1,
+      items: [{ stock_item_id: 4, quantity: 0, remark: null }],
+      operatorId: 44,
+    });
   });
 
   console.log("stock inventory controller tests passed");

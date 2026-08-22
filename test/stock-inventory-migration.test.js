@@ -9,6 +9,8 @@ const migration = fs.readFileSync(
 
 assert.match(migration, /CREATE TABLE `stock_items`/);
 assert.match(migration, /CREATE TABLE `stock_movements`/);
+assert.match(migration, /`reference` varchar\(255\) DEFAULT NULL/);
+assert.match(migration, /`purchase_date` date DEFAULT NULL/);
 assert.match(migration, /CREATE TABLE `shopping_list_items`/);
 assert.match(migration, /ALTER TABLE `products`[\s\S]*`track_stock`/);
 assert.match(migration, /ALTER TABLE `products`[\s\S]*`stock_zero_behavior`/);

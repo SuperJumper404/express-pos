@@ -31,6 +31,8 @@ CREATE TABLE `stock_movements` (
   `previous_stock` int NOT NULL,
   `new_stock` int NOT NULL,
   `supplier` varchar(255) DEFAULT NULL,
+  `reference` varchar(255) DEFAULT NULL,
+  `purchase_date` date DEFAULT NULL,
   `unit_price` decimal(10,2) DEFAULT NULL,
   `total_price` decimal(10,2) DEFAULT NULL,
   `remark` text DEFAULT NULL,

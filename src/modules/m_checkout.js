@@ -6,6 +6,8 @@ const { custom } = require("../helpers/response");
 const { withTransaction } = require("../helpers/withTransaction");
 const { validateConfiguredItem } = require("../helpers/customizationRules");
 const { buildStockRequirements } = require("../helpers/stockRequirements");
+const { isStockTrackedProduct } = require("../helpers/stockInventory");
+const { adjustProductStock } = require("../helpers/productStockMutation");
 const { isOrderTakerAccess } = require("../helpers/staffAccess");
 const { nextReservationStatus } = require("../helpers/reservationLifecycle");
 const { envSTRIPESTOCKRESERVATIONMINUTES } = require("../helpers/env");
@@ -380,7 +382,7 @@ const sqlRepository = {
     const params = shopId == null ? [productIds] : [productIds, shopId];
     return queryResult(
       connection,
-      `SELECT id, shopid, stock, track_stock
+      `SELECT id, shopid, stock, track_stock, stock_zero_behavior
        FROM products
        WHERE id IN (?)${shopClause}
        ORDER BY id
@@ -389,20 +391,15 @@ const sqlRepository = {
     );
   },
 
-  adjustStock: ({ shopId, productId, delta, connection }) => {
-    const shopClause = shopId == null ? "" : " AND shopid = ?";
-    const shortageClause = delta < 0 ? " AND stock >= ?" : "";
-    const params = [delta, productId];
-    if (shopId != null) params.push(shopId);
-    if (delta < 0) params.push(-delta);
-    return queryResult(
-      connection,
-      `UPDATE products
-       SET stock = stock + ?
-       WHERE id = ?${shopClause}${shortageClause}`,
-      params,
-    );
-  },
+  adjustStock: ({
+    shopId, productId, delta, allowShortage, connection,
+  }) => adjustProductStock({
+    query: (sql, params) => queryResult(connection, sql, params),
+    shopId,
+    productId,
+    delta,
+    allowShortage,
+  }),
 
   insertOrder: ({ order, connection }) => queryResult(
     connection,
@@ -641,10 +638,18 @@ const buildCheckoutModule = ({
           productIds,
           connection,
         });
+        const trackedRequirements = requirements.filter((requirement) => {
+          const product = findById(products, requirement.productId);
+          return product && isStockTrackedProduct(product);
+        });
         const shortages = requirements.reduce((result, requirement) => {
           const product = findById(products, requirement.productId);
           const available = product ? Number(product.stock) : 0;
-          if (!product || available < requirement.quantity) {
+          if (!product || (
+            isStockTrackedProduct(product)
+            && product.stock_zero_behavior !== "warn"
+            && available < requirement.quantity
+          )) {
             result.push({
               product_id: requirement.productId,
               requested: requirement.quantity,
@@ -660,11 +665,13 @@ const buildCheckoutModule = ({
         }
 
         const timestamp = formatDate(now());
-        for (const requirement of requirements) {
+        for (const requirement of trackedRequirements) {
+          const product = findById(products, requirement.productId);
           const stockUpdate = await repository.adjustStock({
             shopId: order.shopid,
             productId: requirement.productId,
             delta: -requirement.quantity,
+            allowShortage: product.stock_zero_behavior === "warn",
             connection,
           });
           if (!stockUpdate.affectedRows) {
@@ -910,7 +917,7 @@ const buildCheckoutModule = ({
         const row = findById(lockedProducts, productId);
         const requested = requirements.get(productId);
         const available = row ? Number(row.stock) : 0;
-        if (!row || available < requested) {
+        if (!row || (row.stock_zero_behavior !== "warn" && available < requested)) {
           result.push({ product_id: productId, requested, available });
         }
         return result;
@@ -921,10 +928,12 @@ const buildCheckoutModule = ({
 
       for (const productId of stockProductIds) {
         const quantity = requirements.get(productId);
+        const product = findById(lockedProducts, productId);
         const result = await repository.adjustStock({
           shopId: checkout.shopId,
           productId,
           delta: -quantity,
+          allowShortage: product && product.stock_zero_behavior === "warn",
           connection,
         });
         if (!result.affectedRows) {
