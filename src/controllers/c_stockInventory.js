@@ -62,6 +62,13 @@ const mapStockItemResponse = (item) => ({
   status: resolveStockStatus(item),
 });
 
+const parseTaken = (value) => {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : value;
+  if (normalized === true || normalized === 1 || normalized === "1" || normalized === "true") return true;
+  if (normalized === false || normalized === 0 || normalized === "0" || normalized === "false") return false;
+  throw new Error("La valeur taken doit etre un booleen.");
+};
+
 const shopIdFromReq = (req) => req.shopid || req.body.shop_id || req.query.shop_id;
 const operatorIdFromReq = (req) => req.userId || req.body.operator_id || null;
 
@@ -87,8 +94,9 @@ const createIngredient = async (req, res) => {
 const updateItem = async (req, res) => {
   try {
     const data = validateStockItemPayload(req.body);
-    await stockInventory.updateItem({ shopId: shopIdFromReq(req), id: req.params.id, data });
-    success(res, "Article de stock mis a jour.", null, null);
+    const result = await stockInventory.updateItem({ shopId: shopIdFromReq(req), id: req.params.id, data });
+    if (!result.affectedRows) return custom(res, 404, "Article introuvable.", null, []);
+    return success(res, "Article de stock mis a jour.", null, null);
   } catch (error) {
     custom(res, 400, error.message, {}, null);
   }
@@ -111,30 +119,14 @@ const detailItem = async (req, res) => {
 const replenishItem = async (req, res) => {
   try {
     const shopId = shopIdFromReq(req);
-    const item = await stockInventory.detailItem({ shopId, id: req.params.id });
-    if (!item) return custom(res, 404, "Article introuvable.", null, []);
     const payload = validateReplenishmentPayload(req.body);
-    const previousStock = Number(item.current_stock);
-    const newStock = previousStock + payload.quantity;
-    await stockInventory.insertMovement({
+    const result = await stockInventory.replenishItem({
       shopId,
       stockItemId: req.params.id,
-      movement: {
-        movement_type: "replenishment",
-        quantity: payload.quantity,
-        previous_stock: previousStock,
-        new_stock: newStock,
-        supplier: payload.supplier,
-        unit_price: payload.unit_price,
-        total_price: payload.total_price,
-        remark: payload.remark,
-        operator_id: operatorIdFromReq(req),
-      },
+      payload,
+      operatorId: operatorIdFromReq(req),
     });
-    await stockInventory.updateStock({ shopId, id: req.params.id, newStock });
-    if (item.item_type === "product") {
-      await stockInventory.syncProductStock({ stockItemId: req.params.id, newStock });
-    }
+    if (!result.affectedRows) return custom(res, 404, "Article introuvable.", null, []);
     return success(res, "Stock reapprovisionne avec succes.", null, null);
   } catch (error) {
     return custom(res, 400, error.message, {}, null);
@@ -144,26 +136,14 @@ const replenishItem = async (req, res) => {
 const inventoryItem = async (req, res) => {
   try {
     const shopId = shopIdFromReq(req);
-    const item = await stockInventory.detailItem({ shopId, id: req.params.id });
-    if (!item) return custom(res, 404, "Article introuvable.", null, []);
     const payload = validateInventoryPayload(req.body);
-    const previousStock = Number(item.current_stock);
-    await stockInventory.insertMovement({
+    const result = await stockInventory.inventoryItem({
       shopId,
       stockItemId: req.params.id,
-      movement: {
-        movement_type: "inventory",
-        quantity: payload.quantity,
-        previous_stock: previousStock,
-        new_stock: payload.quantity,
-        remark: payload.remark,
-        operator_id: operatorIdFromReq(req),
-      },
+      payload,
+      operatorId: operatorIdFromReq(req),
     });
-    await stockInventory.updateStock({ shopId, id: req.params.id, newStock: payload.quantity });
-    if (item.item_type === "product") {
-      await stockInventory.syncProductStock({ stockItemId: req.params.id, newStock: payload.quantity });
-    }
+    if (!result.affectedRows) return custom(res, 404, "Article introuvable.", null, []);
     return success(res, "Inventaire enregistre.", null, null);
   } catch (error) {
     return custom(res, 400, error.message, {}, null);
@@ -189,13 +169,20 @@ const listShoppingList = async (req, res) => {
 };
 
 const setShoppingListTaken = async (req, res) => {
+  let taken;
   try {
-    await stockInventory.setShoppingListTaken({
+    taken = parseTaken(req.body.taken);
+  } catch (error) {
+    return custom(res, 400, error.message, {}, null);
+  }
+  try {
+    const result = await stockInventory.setShoppingListTaken({
       shopId: shopIdFromReq(req),
       id: req.params.id,
-      taken: Boolean(req.body.taken),
+      taken,
     });
-    success(res, "Ligne de course mise a jour.", null, null);
+    if (!result.affectedRows) return custom(res, 404, "Ligne de course introuvable.", null, []);
+    return success(res, "Ligne de course mise a jour.", null, null);
   } catch (error) {
     failed(res, "Erreur serveur.", error.message);
   }
@@ -206,6 +193,7 @@ module.exports = {
   validateReplenishmentPayload,
   validateInventoryPayload,
   mapStockItemResponse,
+  parseTaken,
   listItems,
   createIngredient,
   updateItem,
