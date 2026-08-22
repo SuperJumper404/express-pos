@@ -70,7 +70,7 @@ INSERT INTO `stock_items` (
 )
 SELECT
   `shopid`, 'product', `id`, `name`, 'piece',
-  `stock`, 1, `stock`, `created`, `updated`
+  `stock`, 1, `stock`, `created`, COALESCE(`updated`, `created`)
 FROM `products`;
 
 UPDATE `products` p

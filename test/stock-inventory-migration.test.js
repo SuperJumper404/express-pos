@@ -14,6 +14,7 @@ assert.match(migration, /ALTER TABLE `products`[\s\S]*`track_stock`/);
 assert.match(migration, /ALTER TABLE `products`[\s\S]*`stock_zero_behavior`/);
 assert.match(migration, /ALTER TABLE `products`[\s\S]*`stock_item_id`/);
 assert.match(migration, /INSERT INTO `stock_items`[\s\S]*SELECT[\s\S]*'product'/);
+assert.match(migration, /COALESCE\(\s*`updated`\s*,\s*`created`\s*\)/);
 assert.match(migration, /UPDATE `products` p[\s\S]*p\.`track_stock` = 1/);
 assert.match(migration, /DROP TABLE IF EXISTS `shopping_list_items`/);
 assert.match(migration, /DROP TABLE IF EXISTS `stock_movements`/);
