@@ -72,7 +72,13 @@ INSERT INTO `stock_items` (
 )
 SELECT
   `shopid`, 'product', `id`, `name`, 'piece',
-  `stock`, 1, `stock`, `created`, COALESCE(`updated`, `created`)
+  `stock`, 1, `stock`,
+  COALESCE(NULLIF(CAST(`created` AS CHAR), '0000-00-00 00:00:00'), NOW()),
+  COALESCE(
+    NULLIF(CAST(`updated` AS CHAR), '0000-00-00 00:00:00'),
+    NULLIF(CAST(`created` AS CHAR), '0000-00-00 00:00:00'),
+    NOW()
+  )
 FROM `products`;
 
 UPDATE `products` p
