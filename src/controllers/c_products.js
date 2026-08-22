@@ -4,6 +4,7 @@ const productModule = require("../modules/m_products");
 const DomainError = require("../helpers/domainError");
 const { envPUBLICIMAGEPATH } = require("../helpers/env");
 const { isMissing, parseMoney } = require("../helpers/money");
+const { toNonNegativeInteger } = require("../helpers/stockInventory");
 const { normalizeVatRate } = require("../helpers/vat");
 const { success, custom, failed } = require("../helpers/response");
 
@@ -33,6 +34,14 @@ const parseArray = (value, code, message) => {
   }
   if (!Array.isArray(parsed)) throw new DomainError(422, code, message);
   return parsed;
+};
+
+const normalizeStockQuantity = (value, fieldName) => {
+  try {
+    return toNonNegativeInteger(value, fieldName);
+  } catch (error) {
+    throw new DomainError(400, "PRODUCT_STOCK_INVALID", "Requête invalide.");
+  }
 };
 
 const buildProductController = ({
@@ -120,11 +129,14 @@ const buildProductController = ({
     body.track_stock = Number(body.track_stock) === 0 ? 0 : 1;
     body.stock_zero_behavior = body.stock_zero_behavior === "warn" ? "warn" : "block";
     body.stock_unit = body.stock_unit || "piece";
-    body.minimum_stock = body.minimum_stock === undefined ? 1 : Number(body.minimum_stock);
+    if (body.track_stock === 0 && body.stock === undefined) body.stock = 0;
+    if (body.stock !== undefined) body.stock = normalizeStockQuantity(body.stock, "stock");
+    body.minimum_stock = body.minimum_stock === undefined
+      ? 1
+      : normalizeStockQuantity(body.minimum_stock, "minimum_stock");
     body.target_stock = body.target_stock === undefined
       ? Number(body.stock || 0)
-      : Number(body.target_stock);
-    if (body.track_stock === 0 && body.stock === undefined) body.stock = 0;
+      : normalizeStockQuantity(body.target_stock, "target_stock");
     if (creation) body.is_hidden = body.is_hidden || 0;
     return body;
   };

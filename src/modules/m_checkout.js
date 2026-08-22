@@ -15,7 +15,6 @@ const {
 const { buildOrderQuoteModule } = require("./m_orderQuote");
 const { calculateDiscount } = require("../helpers/discount");
 
-// The checkout configuration projection includes linked_product.track_stock AS linked_product_track_stock.
 const RESERVATION_TTL_MS = envSTRIPESTOCKRESERVATIONMINUTES * 60 * 1000;
 
 const formatDate = (value) => value.toISOString().slice(0, 19).replace("T", " ");
