@@ -100,6 +100,11 @@ exports.createAndInitializeShop = async (req, res) => {
       discount_percentages: DEFAULT_DISCOUNT_PERCENTAGES,
       shop_adress: body.shop_adress,
       shop_siret: body.shop_siret || null,
+      shop_naf: body.shop_naf || null,
+      shop_vat_number: body.shop_vat_number || null,
+      receipt_review_qr_url: body.receipt_review_qr_url || null,
+      receipt_review_qr_label: body.receipt_review_qr_label || null,
+      cash_register_number: body.cash_register_number || null,
       admin_mail: body.admin_mail,
       admin_phone: body.admin_phone,
       admin_username: body.admin_username || "Administrateur",
@@ -162,6 +167,11 @@ exports.getShopInfoClickAndCollect = async (req, res) => {
       shop_payment_methods: response?.[0]?.shop_payment_methods,
       discount_percentages: response?.[0]?.discount_percentages,
       shop_siret: response?.[0]?.shop_siret,
+      shop_naf: response?.[0]?.shop_naf,
+      shop_vat_number: response?.[0]?.shop_vat_number,
+      receipt_review_qr_url: response?.[0]?.receipt_review_qr_url,
+      receipt_review_qr_label: response?.[0]?.receipt_review_qr_label,
+      cash_register_number: response?.[0]?.cash_register_number,
       hours: response?.[0]?.hours,
       shop_social_media: response?.[0]?.shop_social_media,
       shop_status: response?.[0]?.shop_status,
@@ -225,6 +235,8 @@ exports.updateShopInfo = async (req, res) => {
       console.log(" EQ", value, fallback);
       return value !== undefined && value !== "" ? value : fallback;
     };
+    const preferOptional = (value, fallback) =>
+      value === undefined ? fallback : value === "" ? null : value;
 
     console.log(
       "Payment Methods",
@@ -240,6 +252,23 @@ exports.updateShopInfo = async (req, res) => {
       shop_phone: prefer(req.body.shop_phone, shopInfo.shop_phone),
       shop_adress: prefer(req.body.shop_adress, shopInfo.shop_adress),
       shop_siret: prefer(req.body.shop_siret, shopInfo.shop_siret),
+      shop_naf: preferOptional(req.body.shop_naf, shopInfo.shop_naf),
+      shop_vat_number: preferOptional(
+        req.body.shop_vat_number,
+        shopInfo.shop_vat_number,
+      ),
+      receipt_review_qr_url: preferOptional(
+        req.body.receipt_review_qr_url,
+        shopInfo.receipt_review_qr_url,
+      ),
+      receipt_review_qr_label: preferOptional(
+        req.body.receipt_review_qr_label,
+        shopInfo.receipt_review_qr_label,
+      ),
+      cash_register_number: preferOptional(
+        req.body.cash_register_number,
+        shopInfo.cash_register_number,
+      ),
       activate_tva: prefer(req.body.activate_tva, shopInfo.activate_tva),
       hours: prefer(
         req.body.shop_hours,

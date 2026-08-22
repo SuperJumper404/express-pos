@@ -6,9 +6,10 @@ const {
   createTable,
   createKiosk,
   updateTable,
+  reorderTables,
   updateKiosk,
+  regenerateKioskCredentials,
   deleteTable,
-  deleteKiosk,
   createTableAccessSession,
 } = require("../controllers/c_servicePoints");
 const { authentication, authAdmin } = require("../helpers/middleware/auth");
@@ -22,9 +23,10 @@ routers
   .get("/service-points/kiosks", authentication, authAdmin, listKiosks)
   .post("/service-points/tables", authentication, authAdmin, createTable)
   .post("/service-points/kiosks", authentication, authAdmin, createKiosk)
+  .patch("/service-points/tables/order", authentication, authAdmin, reorderTables)
   .patch("/service-points/tables/:id", authentication, authAdmin, updateTable)
   .patch("/service-points/kiosks/:id", authentication, authAdmin, updateKiosk)
-  .delete("/service-points/tables/:id", authentication, authAdmin, deleteTable)
-  .delete("/service-points/kiosks/:id", authentication, authAdmin, deleteKiosk);
+  .patch("/service-points/kiosks/:id/credentials", authentication, authAdmin, regenerateKioskCredentials)
+  .delete("/service-points/tables/:id", authentication, authAdmin, deleteTable);
 
 module.exports = routers;

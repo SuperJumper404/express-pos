@@ -2702,6 +2702,10 @@ const makeArchiveHarness = ({ failAfterActiveDeletion = false } = {}) => {
       client_order_payload_hash: "client-order-payload-hash",
       is_takeaway: 1,
       subtotal: 23,
+      subtotal_before_discount: 28,
+      discount_type: "amount",
+      discount_value: 5,
+      discount_amount: 5,
       created: "2026-07-24 12:00:00",
     }],
     details: [
@@ -2912,6 +2916,10 @@ const runArchiveSnapshotContracts = async () => {
       is_takeaway: archive.is_takeaway,
       payment_status: archive.payment_status,
       stripe_payment_intent_id: archive.stripe_payment_intent_id,
+      subtotal_before_discount: archive.subtotal_before_discount,
+      discount_type: archive.discount_type,
+      discount_value: archive.discount_value,
+      discount_amount: archive.discount_amount,
       hasReplacementAttemptToken: Object.prototype.hasOwnProperty.call(
         archive,
         "stripe_replacement_attempt_token",
@@ -2930,6 +2938,10 @@ const runArchiveSnapshotContracts = async () => {
       is_takeaway: 1,
       payment_status: "paid",
       stripe_payment_intent_id: "pi_archive_42",
+      subtotal_before_discount: 28,
+      discount_type: "amount",
+      discount_value: 5,
+      discount_amount: 5,
       hasReplacementAttemptToken: false,
       hasClientOrderToken: false,
       hasClientPayloadHash: false,
@@ -2999,6 +3011,27 @@ const runArchiveSnapshotContracts = async () => {
     "archive-token-42",
   );
   assert.deepStrictEqual(archivedByToken, archived);
+
+  harness = makeArchiveHarness();
+  await harness.orderModule.mArchiveOrder(
+    42,
+    "Carte",
+    7,
+    { discountType: "percent", discountValue: 10 },
+  );
+  const discountedArchive = harness.getState().archives[0];
+  assert.strictEqual(discountedArchive.subtotal_before_discount, 28);
+  assert.strictEqual(discountedArchive.discount_type, "percent");
+  assert.strictEqual(discountedArchive.discount_value, 10);
+  assert.strictEqual(discountedArchive.discount_amount, 2.8);
+  assert.strictEqual(discountedArchive.subtotal, 25.2);
+  assert.strictEqual(
+    Number(harness.getState().archiveDetails.reduce(
+      (sum, detail) => sum + Number(detail.total),
+      0,
+    ).toFixed(2)),
+    25.2,
+  );
 
   harness = makeArchiveHarness({ failAfterActiveDeletion: true });
   await assert.rejects(

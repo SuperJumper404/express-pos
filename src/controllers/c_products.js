@@ -284,6 +284,16 @@ const buildProductController = ({
     }
   };
 
+  const reorderProducts = async (req, res) => {
+    try {
+      const ids = req.body && req.body.ids;
+      await products.mReorderProducts(req.shopid, ids);
+      return success(res, "Ordre des produits mis Ã  jour.", null, null);
+    } catch (error) {
+      return custom(res, 422, "Ordre des produits invalide.", null, null);
+    }
+  };
+
   const deleteProduct = async (req, res) => {
     try {
       const id = req.params.id;
@@ -310,6 +320,7 @@ const buildProductController = ({
     allProduct,
     deleteProduct,
     detailProduct,
+    reorderProducts,
     updateProduct,
     updateProductCustomizationConfig,
   };

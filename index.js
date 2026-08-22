@@ -24,11 +24,15 @@ const prefix = require("./src/config/prefix");
 const fs = require("fs");
 
 const productsPath = path.join(envPUBLICIMAGEPATH, "products");
+const categoriesPath = path.join(envPUBLICIMAGEPATH, "categories");
 const shopPath = path.join(envPUBLICIMAGEPATH, "shop");
 const customizationChoicesPath = path.join(envPUBLICIMAGEPATH, "customization-choices");
 
 if (!fs.existsSync(productsPath)) {
   fs.mkdirSync(productsPath, { recursive: true });
+}
+if (!fs.existsSync(categoriesPath)) {
+  fs.mkdirSync(categoriesPath, { recursive: true });
 }
 if (!fs.existsSync(shopPath)) {
   fs.mkdirSync(shopPath, { recursive: true });
@@ -83,6 +87,10 @@ console.log("Public Image Path:", envPUBLICIMAGEPATH);
 app.use(
   "/api/v1/imgproducts",
   express.static(path.join(envPUBLICIMAGEPATH, "products")),
+);
+app.use(
+  "/api/v1/imgcategories",
+  express.static(categoriesPath),
 );
 
 app.use(

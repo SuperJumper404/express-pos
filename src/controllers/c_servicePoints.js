@@ -1,5 +1,10 @@
 const { custom, failed, success } = require("../helpers/response");
 const {
+  createStaffLoginId: createKioskLoginId,
+  createStaffPin: createKioskPin,
+  hashStaffPin,
+} = require("../helpers/staffCredentials");
+const {
   signServicePointAccessToken,
   signServicePointSessionToken,
   verifyServicePointAccessToken,
@@ -97,11 +102,27 @@ const buildServicePointsController = (repository) => {
     }
 
     try {
-      const created = await getRepository().createKioskPoint({
-        shopId: req.shopid,
-        name,
-      });
-      return custom(res, 201, "Borne creee avec succes.", null, created);
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const kioskLoginId = createKioskLoginId();
+        const kioskPin = createKioskPin();
+        try {
+          const created = await getRepository().createKioskPoint({
+            shopId: req.shopid,
+            name,
+            kioskLoginId,
+            kioskPin,
+            kioskPinHash: await hashStaffPin(kioskPin),
+          });
+          return custom(res, 201, "Borne creee avec succes.", null, {
+            id: created.insertId,
+            kiosk_login_id: kioskLoginId,
+            kiosk_pin: kioskPin,
+          });
+        } catch (error) {
+          if (!(error.code === "ER_DUP_ENTRY" && attempt < 4)) throw error;
+        }
+      }
+      return failed(res, "Erreur serveur.", "Impossible de generer un ID unique.");
     } catch (error) {
       return failed(res, "Erreur serveur.", error.message);
     }
@@ -145,6 +166,18 @@ const buildServicePointsController = (repository) => {
     }
   },
 
+  reorderTables: async (req, res) => {
+    try {
+      await getRepository().reorderTablePoints({
+        shopId: req.shopid,
+        ids: req.body && req.body.ids,
+      });
+      return success(res, "Ordre des tables mis a jour.", null, null);
+    } catch (error) {
+      return custom(res, 422, "Ordre des tables invalide.", null, null);
+    }
+  },
+
   updateKiosk: async (req, res) => {
     const servicePointId = parseServicePointId(req.params.id);
     if (!servicePointId) {
@@ -183,6 +216,46 @@ const buildServicePointsController = (repository) => {
     }
   },
 
+  regenerateKioskCredentials: async (req, res) => {
+    const servicePointId = parseServicePointId(req.params.id);
+    if (!servicePointId) {
+      return custom(res, 422, "Borne invalide.", null, null);
+    }
+
+    try {
+      const point = await getRepository().findServicePoint({
+        servicePointId,
+        shopId: req.shopid,
+      });
+      if (!isEditableKiosk(point)) {
+        return custom(res, 422, "Seules les bornes peuvent etre modifiees.", null, null);
+      }
+
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const kioskLoginId = point.kiosk_login_id || createKioskLoginId();
+        const kioskPin = createKioskPin();
+        try {
+          await getRepository().updateKioskCredentials({
+            servicePointId,
+            shopId: req.shopid,
+            kioskLoginId,
+            kioskPin,
+            kioskPinHash: await hashStaffPin(kioskPin),
+          });
+          return success(res, "PIN borne regenere.", null, {
+            kiosk_login_id: kioskLoginId,
+            kiosk_pin: kioskPin,
+          });
+        } catch (error) {
+          if (!(error.code === "ER_DUP_ENTRY" && attempt < 4)) throw error;
+        }
+      }
+      return failed(res, "Erreur serveur.", "Impossible de generer un ID unique.");
+    } catch (error) {
+      return failed(res, "Erreur serveur.", error.message);
+    }
+  },
+
   deleteTable: async (req, res) => {
     const servicePointId = parseServicePointId(req.params.id);
     if (!servicePointId) {
@@ -206,34 +279,6 @@ const buildServicePointsController = (repository) => {
         return custom(res, 404, "Table introuvable.", null, null);
       }
       return success(res, "Table supprimee.", null, null);
-    } catch (error) {
-      return failed(res, "Erreur serveur.", error.message);
-    }
-  },
-
-  deleteKiosk: async (req, res) => {
-    const servicePointId = parseServicePointId(req.params.id);
-    if (!servicePointId) {
-      return custom(res, 422, "Borne invalide.", null, null);
-    }
-
-    try {
-      const point = await getRepository().findServicePoint({
-        servicePointId,
-        shopId: req.shopid,
-      });
-      if (!isEditableKiosk(point)) {
-        return custom(res, 422, "Seules les bornes peuvent etre supprimees.", null, null);
-      }
-
-      const result = await getRepository().deleteKioskPoint({
-        servicePointId,
-        shopId: req.shopid,
-      });
-      if (!result.affectedRows) {
-        return custom(res, 404, "Borne introuvable.", null, null);
-      }
-      return success(res, "Borne supprimee.", null, null);
     } catch (error) {
       return failed(res, "Erreur serveur.", error.message);
     }

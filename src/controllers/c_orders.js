@@ -361,6 +361,10 @@ const buildArchiveOrderController = ({
 } = {}) => async (req, res) => {
   const id = req.params.id;
   const payment_method = req.body.payment_method;
+  const discount = {
+    discountType: req.body.discount_type,
+    discountValue: req.body.discount_value,
+  };
   console.log("ON archive :", id);
 
   try {
@@ -371,7 +375,7 @@ const buildArchiveOrderController = ({
 
     await syncPendingStripe(orders[0]);
 
-    const response = await archiveOrder(id, payment_method, req.shopid);
+    const response = await archiveOrder(id, payment_method, req.shopid, discount);
     if (response.affectedRows) {
       return success(res, "Commande archivée avec succès.", null, null);
     }

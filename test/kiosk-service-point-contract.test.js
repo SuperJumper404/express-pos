@@ -27,11 +27,12 @@ const usersController = fs.readFileSync(
 assert.match(servicePointModule, /KIOSK:\s*"kiosk"/);
 assert.match(servicePointModule, /createKioskPoint/);
 assert.match(servicePointModule, /updateKioskPoint/);
-assert.match(servicePointModule, /deleteKioskPoint/);
+assert.match(servicePointModule, /updateKioskCredentials/);
 assert.match(servicePointController, /createKiosk/);
 assert.match(servicePointController, /updateKiosk/);
-assert.match(servicePointController, /deleteKiosk/);
+assert.doesNotMatch(servicePointController, /deleteKiosk/);
 assert.match(servicePointRouter, /\/service-points\/kiosks/);
+assert.doesNotMatch(servicePointRouter, /delete\("\/service-points\/kiosks\/:id"/);
 assert.match(usersModule, /users\.service_point_id/);
 assert.match(usersModule, /assigned_point\.id AS service_point_id/);
 assert.match(usersModule, /assigned_point\.type AS service_point_type/);

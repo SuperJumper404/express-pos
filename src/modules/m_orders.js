@@ -4,6 +4,7 @@ const pool = require("../config/dbPool");
 const {
   buildCashRegisterArchiveFields,
 } = require("../helpers/cashRegisterPayment");
+const { calculateDiscount } = require("../helpers/discount");
 const { parseMoney } = require("../helpers/money");
 const { withTransaction } = require("../helpers/withTransaction");
 
@@ -174,6 +175,10 @@ const ARCHIVE_ORDER_FIELDS = [
   "prepared_by_user_id",
   "prepared_by_name",
   "subtotal",
+  "subtotal_before_discount",
+  "discount_type",
+  "discount_value",
+  "discount_amount",
   "payment",
   "status",
   "created",
@@ -191,6 +196,106 @@ const pickArchiveOrderFields = (order = {}) => ARCHIVE_ORDER_FIELDS.reduce(
   },
   {},
 );
+
+const cents = (value) => Math.round(Number(value || 0) * 100);
+
+const normalizeArchiveDiscount = (discount = {}) => {
+  if (discount.discountType === undefined && discount.discountValue === undefined) {
+    return null;
+  }
+
+  const type = discount.discountType == null || discount.discountType === ""
+    ? "none"
+    : String(discount.discountType).trim().toLowerCase();
+  if (!["none", "percent", "amount"].includes(type)) {
+    throw new Error("Type de remise invalide");
+  }
+
+  const value = discount.discountValue == null || discount.discountValue === ""
+    ? 0
+    : parseMoney(discount.discountValue);
+  if (value === null || value < 0 || (type === "percent" && value > 100)) {
+    throw new Error("Valeur de remise invalide");
+  }
+
+  return {
+    type: value > 0 ? type : "none",
+    value: value > 0 ? value : 0,
+  };
+};
+
+const applyArchiveDiscountToDetails = ({ order, orderDetails, discount }) => {
+  const requestedDiscount = normalizeArchiveDiscount(discount);
+  if (!requestedDiscount) {
+    return {
+      archiveDiscountFields: {
+        subtotal: parseMoney(order.subtotal),
+        subtotal_before_discount:
+          order.subtotal_before_discount == null
+            ? order.subtotal_before_discount
+            : parseMoney(order.subtotal_before_discount),
+        discount_type: order.discount_type || "none",
+        discount_value: parseMoney(order.discount_value) || 0,
+        discount_amount: parseMoney(order.discount_amount) || 0,
+      },
+      details: orderDetails,
+    };
+  }
+
+  const subtotalBeforeDiscount = orderDetails.reduce(
+    (sum, detail) => sum + (parseMoney(detail.total) || 0),
+    0,
+  );
+  const discountResult = calculateDiscount({
+    subtotal: subtotalBeforeDiscount,
+    type: requestedDiscount.type,
+    value: requestedDiscount.value,
+  });
+  const discountCents = cents(discountResult.amount);
+  const grossCents = orderDetails.reduce((sum, detail) => (
+    sum + cents(detail.total)
+  ), 0);
+  let remainingDiscount = discountCents;
+  const details = orderDetails.map((detail, index) => {
+    if (discountCents <= 0 || grossCents <= 0) return detail;
+    const lineCents = cents(detail.total);
+    const lineDiscount = index === orderDetails.length - 1
+      ? remainingDiscount
+      : Math.min(lineCents, Math.round((discountCents * lineCents) / grossCents));
+    remainingDiscount -= lineDiscount;
+    const discountedCents = lineCents - lineDiscount;
+    const vatRate = Number(detail.vat_rate);
+    if (!Number.isFinite(vatRate)) {
+      return {
+        ...detail,
+        total: Number((discountedCents / 100).toFixed(2)),
+      };
+    }
+    const quantity = Number(detail.qty) || 1;
+    const divisor = 10000 + Math.round(vatRate * 100);
+    const totalHtCents = Math.round((discountedCents * 10000) / divisor);
+    const totalVat = Number(((discountedCents - totalHtCents) / 100).toFixed(2));
+    return {
+      ...detail,
+      total: Number((discountedCents / 100).toFixed(2)),
+      unit_price_ht: Number((totalHtCents / 100 / quantity).toFixed(2)),
+      unit_vat: Number((totalVat / quantity).toFixed(2)),
+      total_ht: Number((totalHtCents / 100).toFixed(2)),
+      total_vat: totalVat,
+    };
+  });
+
+  return {
+    archiveDiscountFields: {
+      subtotal: discountResult.total,
+      subtotal_before_discount: Number(subtotalBeforeDiscount.toFixed(2)),
+      discount_type: discountResult.type,
+      discount_value: discountResult.value,
+      discount_amount: discountResult.amount,
+    },
+    details,
+  };
+};
 
 const mapSnapshotCustomization = (row) => ({
   product_customization_step_id: row.product_customization_step_id,
@@ -255,7 +360,7 @@ const buildOrderArchiveModule = ({
     });
   };
 
-  const mArchiveOrder = (id, paymentMethod, shopId) => runInTransaction(
+  const mArchiveOrder = (id, paymentMethod, shopId, discount = {}) => runInTransaction(
     async (connection) => {
       if (shopId != null && repository.lockShopForArchive) {
         await repository.lockShopForArchive({ shopId, connection });
@@ -267,22 +372,28 @@ const buildOrderArchiveModule = ({
       });
       if (!order) throw new Error("Commande introuvable");
 
+      const orderDetails = await repository.findOrderDetails({
+        orderId: id,
+        connection,
+      });
+      const discountApplication = applyArchiveDiscountToDetails({
+        order,
+        orderDetails,
+        discount,
+      });
       const archivePaymentFields = buildCashRegisterArchiveFields({
         order,
         paymentMethod,
       });
       const archive = {
         ...pickArchiveOrderFields(order),
+        ...discountApplication.archiveDiscountFields,
         ...archivePaymentFields,
         token: createToken(),
       };
       const archiveResult = await repository.insertArchive({ archive, connection });
       const archiveOrderId = archiveResult.insertId;
 
-      const orderDetails = await repository.findOrderDetails({
-        orderId: id,
-        connection,
-      });
       const detailIds = orderDetails.map((detail) => detail.id);
       const activeSnapshots = await repository.findActiveSnapshots({
         detailIds,
@@ -290,7 +401,7 @@ const buildOrderArchiveModule = ({
       });
       const snapshotsByDetail = groupBy(activeSnapshots, "orderdetail_id");
 
-      for (const detail of orderDetails) {
+      for (const detail of discountApplication.details) {
         const archiveDetailResult = await repository.insertArchiveDetail({
           detail: {
             orderId: archiveOrderId,

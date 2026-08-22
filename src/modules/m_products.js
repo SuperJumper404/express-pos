@@ -12,6 +12,20 @@ const queryRows = async (connection, sql, params) => {
   return rows;
 };
 
+const normalizeOrderedIds = (ids) => {
+  if (!Array.isArray(ids)) throw new Error("Invalid product order");
+  const normalized = ids.map((id) => Number(id));
+  const unique = new Set(normalized);
+  if (
+    normalized.length === 0
+    || unique.size !== normalized.length
+    || normalized.some((id) => !Number.isInteger(id) || id <= 0)
+  ) {
+    throw new Error("Invalid product order");
+  }
+  return normalized;
+};
+
 const projectLegacyCustomizations = (steps) => (steps || []).map((step) => ({
   name: step.name,
   description: step.description,
@@ -202,11 +216,13 @@ const buildProductModule = ({
   const mAllProduct = async (shopId) => {
     const products = await queryRows(connection, `
       SELECT products.*, category.name AS category, category.id AS categoryid,
+        category.image AS category_image,
         si.unit AS stock_unit, si.minimum_stock, si.target_stock
       FROM products
       LEFT JOIN category ON products.categoryId = category.id
       LEFT JOIN stock_items si ON si.id = products.stock_item_id
       WHERE products.shopid = ?
+      ORDER BY products.sort_order ASC, products.created ASC, products.id ASC
     `, [shopId]);
     return formatProducts(products, shopId);
   };
@@ -214,6 +230,7 @@ const buildProductModule = ({
   const mDetailProduct = async (id) => {
     const products = await queryRows(connection, `
       SELECT products.*, category.name AS category, category.id AS categoryid,
+        category.image AS category_image,
         si.unit AS stock_unit, si.minimum_stock, si.target_stock
       FROM products
       LEFT JOIN category ON products.categoryId = category.id
@@ -322,6 +339,25 @@ const buildProductModule = ({
     [id],
   );
 
+  const mReorderProducts = (shopId, ids) => runInTransaction(async (transactionConnection) => {
+    const orderedIds = normalizeOrderedIds(ids);
+    const products = await queryRows(
+      transactionConnection,
+      "SELECT id FROM products WHERE shopid = ? AND id IN (?)",
+      [shopId, orderedIds],
+    );
+    if (products.length !== orderedIds.length) throw new Error("Invalid product order");
+
+    for (let index = 0; index < orderedIds.length; index += 1) {
+      await queryRows(
+        transactionConnection,
+        "UPDATE products SET sort_order = ?, updated = NOW() WHERE id = ? AND shopid = ?",
+        [(index + 1) * 10, orderedIds[index], shopId],
+      );
+    }
+    return { affectedRows: orderedIds.length };
+  });
+
   return {
     mAddProduct,
     mAllProduct,
@@ -329,6 +365,7 @@ const buildProductModule = ({
     mDeleteProduct,
     mDetailProduct,
     mReplaceProductCustomizationConfig,
+    mReorderProducts,
     mUpdateProduct,
     mUsedProduct,
   };

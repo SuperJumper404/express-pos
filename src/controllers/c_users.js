@@ -31,7 +31,7 @@ const {
   normalizeModulePermissions,
   parseModulePermissions,
 } = require("../helpers/staffPermissions");
-const { findServicePoint } = require("../modules/m_servicePoints");
+const { findServicePoint, findKioskByLoginId } = require("../modules/m_servicePoints");
 
 const STAFF_ACCESS_VALUES = new Set([0, 1, 4, 5]);
 const isStaffAccess = (access) => STAFF_ACCESS_VALUES.has(Number(access));
@@ -99,6 +99,42 @@ const createSession = async (user) => {
   );
   const sessionUsers = await mSessionUser(user.id);
   return sessionUsers.map(withModulePermissions);
+};
+
+const createKioskSession = (point) => {
+  const token = jwt.sign(
+    {
+      access: 2,
+      shopid: point.shopid,
+      subject_type: "service_point",
+      service_point_id: point.id,
+      source: "borne",
+    },
+    envJWTKEY,
+    { expiresIn: "1d" },
+  );
+  return {
+    session_subject: "service_point",
+    service_point_id: point.id,
+    service_point_name: point.name,
+    service_point_type: point.type,
+    shopid: point.shopid,
+    username: point.name,
+    access: 2,
+    source: "borne",
+    token,
+  };
+};
+
+const loginWithKioskCredentials = async (kioskLoginId, pin) => {
+  const point = await findKioskByLoginId({ kioskLoginId });
+  const valid = Boolean(
+    point &&
+      Number(point.is_active) === 1 &&
+      point.kiosk_pin_hash &&
+      (await verifyStaffPin(pin, point.kiosk_pin_hash)),
+  );
+  return valid ? createKioskSession(point) : null;
 };
 
 const createInternalPassword = () =>
@@ -220,9 +256,16 @@ const loginWithStaffCredentials = async (req, res) => {
     let valid = false;
 
     if (body.staff_login_id) {
-      const users = await mFindUserByStaffLoginId(
-        normalizeStaffLoginId(body.staff_login_id),
+      const normalizedLoginId = normalizeStaffLoginId(body.staff_login_id);
+      const kioskSession = await loginWithKioskCredentials(
+        normalizedLoginId,
+        String(body.pin || ""),
       );
+      if (kioskSession) {
+        return success(res, "Connexion borne reussie !", null, kioskSession);
+      }
+
+      const users = await mFindUserByStaffLoginId(normalizedLoginId);
       user = users.length === 1 ? users[0] : null;
       valid = Boolean(
         user &&
@@ -263,6 +306,7 @@ const loginWithStaffCredentials = async (req, res) => {
 module.exports = {
   registerWithStaffCredentials,
   loginWithStaffCredentials,
+  loginWithKioskCredentials,
   setStaffCredentials,
   register: (req, res) => {
     const body = req.body;
