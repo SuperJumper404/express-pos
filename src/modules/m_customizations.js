@@ -6,6 +6,14 @@ const isDisabled = (value) => value === false
   || value === 0
   || (typeof value === "string" && ["0", "false"].includes(value.trim().toLowerCase()));
 const isEnabled = (value) => value === true || value === 1 || value === "1";
+const isLinkedProductAvailable = (row) => row.choice_type !== "linked_product" || (
+  !isEnabled(row.linked_archived)
+  && (
+    isDisabled(row.linked_product_track_stock)
+    || row.linked_product_stock_zero_behavior === "warn"
+    || Number(row.linked_stock) > 0
+  )
+);
 const idKey = (value) => String(value);
 const isValidCatalogId = (value) => {
   if (typeof value === "number") return Number.isSafeInteger(value) && value > 0;
@@ -68,8 +76,7 @@ const groupResolvedConfigurationRows = (rows) => {
         && !isDisabled(row.step_active)
         && !isDisabled(row.product_step_choice_active)
         && !isDisabled(row.choice_active);
-      const linkedAvailable = row.choice_type !== "linked_product"
-        || (!isEnabled(row.linked_archived) && Number(row.linked_stock) > 0);
+      const linkedAvailable = isLinkedProductAvailable(row);
       const name = row.choice_type === "linked_product"
         ? row.linked_name
         : row.simple_name;
@@ -85,6 +92,8 @@ const groupResolvedConfigurationRows = (rows) => {
         choice_name: name,
         image,
         linked_product_id: row.linked_product_id,
+        linked_product_track_stock: row.linked_product_track_stock,
+        linked_product_stock_zero_behavior: row.linked_product_stock_zero_behavior,
         extra_price: row.extra_price,
         position: row.choice_position,
         active,
@@ -141,6 +150,8 @@ const RESOLVED_PRODUCT_CONFIGURATIONS_SQL = `
     linked_product.name AS linked_name,
     linked_product.image AS linked_image,
     linked_product.stock AS linked_stock,
+    linked_product.track_stock AS linked_product_track_stock,
+    linked_product.stock_zero_behavior AS linked_product_stock_zero_behavior,
     linked_product.archived AS linked_archived,
     linked_product.is_hidden AS linked_is_hidden,
     product_choice.extra_price,
@@ -212,6 +223,8 @@ const LIST_CUSTOMIZATION_STEPS_SQL = `
     linked_product.name AS linked_name,
     linked_product.image AS linked_image,
     linked_product.stock AS linked_stock,
+    linked_product.track_stock AS linked_product_track_stock,
+    linked_product.stock_zero_behavior AS linked_product_stock_zero_behavior,
     linked_product.archived AS linked_archived,
     linked_product.is_hidden AS linked_is_hidden,
     choice.default_extra_price,
@@ -251,8 +264,7 @@ const groupCustomizationStepRows = (rows) => {
     const image = row.choice_type === "linked_product"
       ? row.linked_image
       : row.simple_image;
-    const linkedAvailable = row.choice_type !== "linked_product"
-      || (!isEnabled(row.linked_archived) && Number(row.linked_stock) > 0);
+    const linkedAvailable = isLinkedProductAvailable(row);
     step.choices.push({
       id: row.choice_id,
       step_id: row.step_id,

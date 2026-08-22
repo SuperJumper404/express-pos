@@ -19,34 +19,26 @@ exports.addStock = (req, res) => {
   } else {
     mAddStock(body)
       .then(() => {
-        if (body.category === "0") {
-          const addQty = `stock+'${body.qty}' WHERE id='${body.productid}'`;
-          updateProductStock(addQty)
-            .then(() => {
-              success(res, "Stock ajouté avec succès.", null, null);
-            })
-            .catch((error) => {
-              failed(res, "Erreur serveur.", error.message);
-            });
-        } else if (body.category === "1") {
-          const reduceQty = `stock-'${body.qty}' WHERE id='${body.productid}'`;
-          updateProductStock(reduceQty)
-            .then(() => {
-              success(res, "Stock réduit avec succès.", null, null);
-            })
-            .catch((error) => {
-              failed(res, "Erreur serveur.", error.message);
-            });
-        } else {
-          const adjusmentQty = `'${body.qty}' WHERE id='${body.productid}'`;
-          updateProductStock(adjusmentQty)
-            .then(() => {
-              success(res, "Stock ajusté avec succès.", null, null);
-            })
-            .catch((error) => {
-              failed(res, "Erreur serveur.", error.message);
-            });
-        }
+        const messages = {
+          "0": "Stock ajouté avec succès.",
+          "1": "Stock réduit avec succès.",
+        };
+        updateProductStock({
+          productId: body.productid,
+          category: body.category,
+          quantity: body.qty,
+        })
+          .then(() => {
+            success(
+              res,
+              messages[body.category] || "Stock ajusté avec succès.",
+              null,
+              null
+            );
+          })
+          .catch((error) => {
+            failed(res, "Erreur serveur.", error.message);
+          });
       })
       .catch((error) => {
         failed(res, "Erreur serveur.", error.message);

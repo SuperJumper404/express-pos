@@ -718,6 +718,61 @@ assert.deepStrictEqual(
   },
 );
 
+const nonBlockingZeroStock = groupResolvedConfigurationRows([
+  {
+    product_id: 6,
+    product_step_id: 60,
+    step_id: 61,
+    step_name: "Options",
+    minimum_choices: 1,
+    maximum_choices: 1,
+    step_position: 1,
+    product_step_active: 1,
+    step_active: 1,
+    product_step_choice_id: 62,
+    step_choice_id: 63,
+    choice_type: "linked_product",
+    linked_product_id: 64,
+    linked_name: "Illimite",
+    linked_stock: 0,
+    linked_product_track_stock: 0,
+    linked_product_stock_zero_behavior: "block",
+    linked_archived: 0,
+    linked_is_hidden: 0,
+    extra_price: 0,
+    choice_position: 1,
+    product_step_choice_active: 1,
+    choice_active: 1,
+  },
+  {
+    product_id: 7,
+    product_step_id: 70,
+    step_id: 71,
+    step_name: "Options",
+    minimum_choices: 1,
+    maximum_choices: 1,
+    step_position: 1,
+    product_step_active: 1,
+    step_active: 1,
+    product_step_choice_id: 72,
+    step_choice_id: 73,
+    choice_type: "linked_product",
+    linked_product_id: 74,
+    linked_name: "Alerte",
+    linked_stock: 0,
+    linked_product_track_stock: 1,
+    linked_product_stock_zero_behavior: "warn",
+    linked_archived: 0,
+    linked_is_hidden: 0,
+    extra_price: 0,
+    choice_position: 1,
+    product_step_choice_active: 1,
+    choice_active: 1,
+  },
+]);
+assert.strictEqual(nonBlockingZeroStock.get(6)[0].choices[0].available, true);
+assert.strictEqual(nonBlockingZeroStock.get(7)[0].choices[0].available, true);
+
 const runRepositoryReadContracts = async () => {
   const resolvedCalls = [];
   const resolvedConnection = {
@@ -1584,7 +1639,7 @@ const checkoutInput = (overrides = {}) => ({
   ...overrides,
 });
 
-const checkoutConfiguration = () => new Map([[10, [{
+const checkoutConfiguration = ({ linkedTrackStock = 1, linkedZeroBehavior = "block" } = {}) => new Map([[10, [{
   product_step_id: 20,
   name: "Boisson",
   position: 1,
@@ -1610,6 +1665,8 @@ const checkoutConfiguration = () => new Map([[10, [{
     active: true,
     available: true,
     linked_product_id: 30,
+    linked_product_track_stock: linkedTrackStock,
+    linked_product_stock_zero_behavior: linkedZeroBehavior,
   }],
 }]]]);
 
@@ -1701,9 +1758,15 @@ const makeCheckoutHarness = ({
   paymentMode,
   validateConfiguredItem,
   actor = { id: 9, shopid: 7, username: "Amina", access: 1 },
+  product10Stock = 10,
+  product30Stock = 5,
+  product10TrackStock = 1,
+  product30TrackStock = 1,
+  product10ZeroBehavior = "block",
+  product30ZeroBehavior = "block",
 } = {}) => {
   const initial = {
-    products: new Map([[10, 10], [30, 5]]),
+    products: new Map([[10, product10Stock], [30, product30Stock]]),
     orders: existingOrder ? [existingOrder] : [],
     details: [],
     snapshots: [],
@@ -1767,7 +1830,16 @@ const makeCheckoutHarness = ({
     },
     getProducts: async ({ productIds }) => productIds
       .filter((id) => state.products.has(id))
-      .map((id) => ({ id, shopid: 7, name: `Product ${id}`, price: id === 10 ? 10 : 2, stock: state.products.get(id), archived: 0 })),
+      .map((id) => ({
+        id,
+        shopid: 7,
+        name: `Product ${id}`,
+        price: id === 10 ? 10 : 2,
+        stock: state.products.get(id),
+        track_stock: id === 10 ? product10TrackStock : product30TrackStock,
+        stock_zero_behavior: id === 10 ? product10ZeroBehavior : product30ZeroBehavior,
+        archived: 0,
+      })),
     lockExpiredReservations: async ({ now }) => state.reservations
       .filter((row) => (
         row.status === "reserved"
@@ -1794,10 +1866,15 @@ const makeCheckoutHarness = ({
       return productIds.filter((id) => state.products.has(id)).map((id) => ({
         id,
         stock: state.products.get(id),
+        track_stock: id === 10 ? product10TrackStock : product30TrackStock,
+        stock_zero_behavior: id === 10 ? product10ZeroBehavior : product30ZeroBehavior,
       }));
     },
-    adjustStock: async ({ productId, delta }) => {
+    adjustStock: async ({ productId, delta, allowShortage = false }) => {
       events.push(["stock", productId, delta]);
+      if (!allowShortage && state.products.get(productId) + delta < 0) {
+        return { affectedRows: 0 };
+      }
       state.products.set(productId, state.products.get(productId) + delta);
       return { affectedRows: 1 };
     },
@@ -1859,7 +1936,10 @@ const makeCheckoutHarness = ({
   const checkout = buildCheckoutModule({
     repository,
     withTransaction,
-    getResolvedProductConfigurations: async () => checkoutConfiguration(),
+    getResolvedProductConfigurations: async () => checkoutConfiguration({
+      linkedTrackStock: product30TrackStock,
+      linkedZeroBehavior: product30ZeroBehavior,
+    }),
     ...(validateConfiguredItem ? { validateConfiguredItem } : {}),
     now: () => new Date("2026-07-24T12:00:00.000Z"),
   });
@@ -2138,6 +2218,22 @@ const runTransactionalCheckoutContracts = async () => {
       && error.shortages[0].requested === 2,
   );
   assert.deepStrictEqual([...harness.getState().products.entries()], [[10, 10], [30, 1]]);
+
+  harness = makeCheckoutHarness({ product30Stock: 1, product30ZeroBehavior: "warn" });
+  await harness.checkout.createCheckout(harness.input);
+  assert.deepStrictEqual([...harness.getState().products.entries()], [[10, 8], [30, -1]]);
+
+  harness = makeCheckoutHarness({ product10Stock: 1, product10ZeroBehavior: "warn" });
+  await harness.checkout.createCheckout(harness.input);
+  assert.deepStrictEqual([...harness.getState().products.entries()], [[10, -1], [30, 3]]);
+
+  harness = makeCheckoutHarness({ product10Stock: 1, product10TrackStock: 0 });
+  await harness.checkout.createCheckout(harness.input);
+  assert.deepStrictEqual([...harness.getState().products.entries()], [[10, 1], [30, 3]]);
+
+  harness = makeCheckoutHarness({ product30Stock: 0, product30TrackStock: 0 });
+  await harness.checkout.createCheckout(harness.input);
+  assert.deepStrictEqual([...harness.getState().products.entries()], [[10, 8], [30, 0]]);
 
   const winner = {
     id: 501,

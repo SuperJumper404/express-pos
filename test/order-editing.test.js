@@ -243,6 +243,7 @@ const cloneAmendState = (state) => ({
 const makeAmendHarness = ({
   product11Stock = 1,
   product12Stock = 5,
+  product12Behavior = "block",
   failSnapshotInsert = false,
   legacy = false,
   reservationsReleased = false,
@@ -351,12 +352,20 @@ const makeAmendHarness = ({
     lockProducts: async ({ shopId, productIds }) => {
       events.push(["lock-products", shopId, [...productIds]]);
       return productIds.filter((id) => state.products.has(id))
-        .map((id) => ({ id, shopid: 7, stock: state.products.get(id) }));
+        .map((id) => ({
+          id,
+          shopid: 7,
+          stock: state.products.get(id),
+          track_stock: 1,
+          stock_zero_behavior: id === 12 ? product12Behavior : "block",
+        }));
     },
-    adjustStock: async ({ shopId, productId, delta }) => {
+    adjustStock: async ({ shopId, productId, delta, allowShortage = false }) => {
       if (Number(shopId) !== 7) return { affectedRows: 0 };
       const current = state.products.get(Number(productId));
-      if (current == null || current + Number(delta) < 0) return { affectedRows: 0 };
+      if (current == null || (!allowShortage && current + Number(delta) < 0)) {
+        return { affectedRows: 0 };
+      }
       state.products.set(Number(productId), current + Number(delta));
       events.push(["stock", Number(productId), Number(delta)]);
       return { affectedRows: 1 };
@@ -575,6 +584,10 @@ const runAmendOrderContracts = async () => {
       && error.shortages[0].available === 2,
   );
   assert.deepStrictEqual(harness.getState(), beforeShortage);
+
+  harness = makeAmendHarness({ product12Stock: 2, product12Behavior: "warn" });
+  await harness.amend();
+  assert.strictEqual(harness.getState().products.get(12), -1);
 
   harness = makeAmendHarness({ failSnapshotInsert: true });
   const beforeFailure = cloneAmendState(harness.getState());
@@ -824,8 +837,10 @@ const runEmptyCartCancellationContract = async () => {
   assert.strictEqual(harness.getState().snapshots.length, 0);
   assert.strictEqual(harness.getState().legacyCustomizations.length, 0);
   assert.deepStrictEqual([...harness.getState().products], [
-    [10, 7], [11, 3], [12, 5], [20, 5], [30, 5],
+    [10, 5], [11, 1], [12, 5], [20, 4], [30, 5],
   ]);
+  assert.strictEqual(harness.getState().movements.length, 0);
+  assert.ok(!harness.events.some((event) => Array.isArray(event) && event[0] === "stock"));
   assert.ok(harness.getState().reservations.every((row) => (
     row.quantity === 0 && row.status === "released"
   )));

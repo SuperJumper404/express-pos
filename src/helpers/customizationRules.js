@@ -86,6 +86,12 @@ const validateConfiguredItem = ({ product, steps, selectedChoiceIds }) => {
     choice_name: choice.choice_name,
     extra_price: parseMoney(choice.extra_price),
     linked_product_id: choice.linked_product_id,
+    ...(choice.linked_product_track_stock !== undefined && {
+      linked_product_track_stock: choice.linked_product_track_stock,
+    }),
+    ...(choice.linked_product_stock_zero_behavior !== undefined && {
+      linked_product_stock_zero_behavior: choice.linked_product_stock_zero_behavior,
+    }),
   }));
 
   return { selectedChoices, unitPrice };

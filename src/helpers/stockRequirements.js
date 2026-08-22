@@ -1,3 +1,5 @@
+const { isStockTrackedProduct } = require("./stockInventory");
+
 const buildStockRequirements = (items) => {
   const requirements = new Map();
   const add = (productId, quantity) => {
@@ -5,9 +7,12 @@ const buildStockRequirements = (items) => {
   };
 
   for (const item of items) {
-    add(item.product.id, item.quantity);
+    if (isStockTrackedProduct(item.product)) add(item.product.id, item.quantity);
     for (const choice of item.selectedChoices) {
-      if (choice.choice_type === "linked_product") {
+      if (
+        choice.choice_type === "linked_product"
+        && isStockTrackedProduct({ track_stock: choice.linked_product_track_stock })
+      ) {
         add(choice.linked_product_id, item.quantity);
       }
     }

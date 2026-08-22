@@ -24,7 +24,7 @@ const sqlRepository = {
   getProducts: ({ shopId, productIds, connection }) => queryResult(
     connection,
     `SELECT id, shopid, name, price, vat_rate, vat_rate_dine_in, vat_rate_takeaway,
-            stock, archived, is_hidden
+            stock, track_stock, stock_zero_behavior, archived, is_hidden
      FROM products
      WHERE shopid = ? AND id IN (?)
      ORDER BY id`,
