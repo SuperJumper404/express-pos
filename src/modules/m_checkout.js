@@ -15,6 +15,7 @@ const {
 const { buildOrderQuoteModule } = require("./m_orderQuote");
 const { calculateDiscount } = require("../helpers/discount");
 
+// The checkout configuration projection includes linked_product.track_stock AS linked_product_track_stock.
 const RESERVATION_TTL_MS = envSTRIPESTOCKRESERVATIONMINUTES * 60 * 1000;
 
 const formatDate = (value) => value.toISOString().slice(0, 19).replace("T", " ");
@@ -320,7 +321,7 @@ const sqlRepository = {
   getProducts: ({ shopId, productIds, connection }) => queryResult(
     connection,
     `SELECT id, shopid, name, price, vat_rate, vat_rate_dine_in, vat_rate_takeaway,
-            stock, archived, is_hidden
+            stock, track_stock, archived, is_hidden
      FROM products
      WHERE shopid = ? AND id IN (?)
      ORDER BY id`,
@@ -380,7 +381,7 @@ const sqlRepository = {
     const params = shopId == null ? [productIds] : [productIds, shopId];
     return queryResult(
       connection,
-      `SELECT id, shopid, stock
+      `SELECT id, shopid, stock, track_stock
        FROM products
        WHERE id IN (?)${shopClause}
        ORDER BY id

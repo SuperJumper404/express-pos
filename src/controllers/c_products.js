@@ -116,6 +116,15 @@ const buildProductController = ({
         throw new DomainError(422, "VAT_RATE_INVALID", "Taux de TVA invalide.");
       }
     }
+    if (body.track_stock === undefined) body.track_stock = 1;
+    body.track_stock = Number(body.track_stock) === 0 ? 0 : 1;
+    body.stock_zero_behavior = body.stock_zero_behavior === "warn" ? "warn" : "block";
+    body.stock_unit = body.stock_unit || "piece";
+    body.minimum_stock = body.minimum_stock === undefined ? 1 : Number(body.minimum_stock);
+    body.target_stock = body.target_stock === undefined
+      ? Number(body.stock || 0)
+      : Number(body.target_stock);
+    if (body.track_stock === 0 && body.stock === undefined) body.stock = 0;
     if (creation) body.is_hidden = body.is_hidden || 0;
     return body;
   };
@@ -131,7 +140,7 @@ const buildProductController = ({
         !body.name
         || !body.categoryid
         || isMissing(body.price)
-        || !body.stock
+        || (body.track_stock === 1 && isMissing(body.stock))
         || !uploadedFilename
       ) {
         throw new DomainError(400, "PRODUCT_REQUEST_INVALID", "Requête invalide.");

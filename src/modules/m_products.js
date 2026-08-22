@@ -44,6 +44,38 @@ const productConfiguration = (configurations, productId) => (
   configurations.get(productId) || configurations.get(String(productId)) || []
 );
 
+const upsertProductStockItem = async (connection, productId, data) => {
+  const products = await queryRows(connection, "SELECT * FROM products WHERE id = ?", [productId]);
+  const product = products[0];
+  if (!product) return;
+
+  const stockItemData = {
+    shop_id: product.shopid,
+    item_type: "product",
+    product_id: productId,
+    name: product.name,
+    unit: data.stock_unit || "piece",
+    current_stock: Number(product.stock || 0),
+    minimum_stock: Number(data.minimum_stock || 1),
+    target_stock: Number(data.target_stock || product.stock || 0),
+    archived: product.archived || 0,
+  };
+
+  if (product.stock_item_id) {
+    await queryRows(connection, "UPDATE stock_items SET ? WHERE id = ?", [
+      stockItemData,
+      product.stock_item_id,
+    ]);
+    return;
+  }
+
+  const result = await queryRows(connection, "INSERT INTO stock_items SET ?", stockItemData);
+  await queryRows(connection, "UPDATE products SET stock_item_id = ? WHERE id = ?", [
+    result.insertId,
+    productId,
+  ]);
+};
+
 const removeConfigurationAssociations = async (connection, productId) => {
   await queryRows(connection, `
     DELETE FROM product_customization_step_choices
@@ -173,11 +205,15 @@ const buildProductModule = ({
     const productData = { ...data };
     delete productData.customization_config;
     delete productData.product_customization;
+    delete productData.stock_unit;
+    delete productData.minimum_stock;
+    delete productData.target_stock;
     const result = await queryRows(
       transactionConnection,
       "INSERT INTO products SET ?",
       productData,
     );
+    await upsertProductStockItem(transactionConnection, result.insertId, data);
     if (Object.prototype.hasOwnProperty.call(data, "customization_config")) {
       await replaceConfiguration({
         shopId: data.shopid,
@@ -200,11 +236,15 @@ const buildProductModule = ({
     const productData = { ...data };
     delete productData.customization_config;
     delete productData.product_customization;
+    delete productData.stock_unit;
+    delete productData.minimum_stock;
+    delete productData.target_stock;
     const result = await queryRows(
       transactionConnection,
       "UPDATE products SET ? WHERE id = ?",
       [productData, id],
     );
+    await upsertProductStockItem(transactionConnection, id, data);
     if (Object.prototype.hasOwnProperty.call(data, "customization_config")) {
       const products = await queryRows(
         transactionConnection,
