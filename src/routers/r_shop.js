@@ -6,6 +6,9 @@ const {
   updateShopInfo,
   getShopInfoClickAndCollect,
 } = require("../controllers/c_shop");
+const {
+  createClickAndCollectSession,
+} = require("../controllers/c_servicePoints");
 const { authentication, authAdmin } = require("../helpers/middleware/auth");
 
 const express = require("express");
@@ -16,6 +19,10 @@ routers.get("/shop/init/backoffice", getCreateShopBackoffice);
 routers.post("/shop/init", createAndInitializeShop);
 routers.get("/shopInfo", authentication, authAdmin, getShopInfo);
 routers.get("/shopInfo/click-and-collect/:shopid", getShopInfoClickAndCollect);
+routers.post(
+  "/shopInfo/click-and-collect/:shopid/session",
+  createClickAndCollectSession,
+);
 
 routers.patch(
   "/updateShopInfo",

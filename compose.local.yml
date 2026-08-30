@@ -1,0 +1,8 @@
+services:
+  db:
+    ports:
+      - "3307:3306"
+
+volumes:
+  mysql_data:
+    name: express_pos_local_mysql_data

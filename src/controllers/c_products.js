@@ -4,6 +4,7 @@ const productModule = require("../modules/m_products");
 const DomainError = require("../helpers/domainError");
 const { envPUBLICIMAGEPATH } = require("../helpers/env");
 const { isMissing, parseMoney } = require("../helpers/money");
+const { toNonNegativeInteger } = require("../helpers/stockInventory");
 const { normalizeVatRate } = require("../helpers/vat");
 const { success, custom, failed } = require("../helpers/response");
 
@@ -33,6 +34,14 @@ const parseArray = (value, code, message) => {
   }
   if (!Array.isArray(parsed)) throw new DomainError(422, code, message);
   return parsed;
+};
+
+const normalizeStockQuantity = (value, fieldName) => {
+  try {
+    return toNonNegativeInteger(value, fieldName);
+  } catch (error) {
+    throw new DomainError(400, "PRODUCT_STOCK_INVALID", "Requête invalide.");
+  }
 };
 
 const buildProductController = ({
@@ -100,12 +109,66 @@ const buildProductController = ({
       }
       body.price = parsedPrice;
     }
-    if (creation || Object.prototype.hasOwnProperty.call(body, "vat_rate")) {
+    const hasLegacyVat = Object.prototype.hasOwnProperty.call(body, "vat_rate");
+    const hasDineInVat = Object.prototype.hasOwnProperty.call(body, "vat_rate_dine_in");
+    const hasTakeawayVat = Object.prototype.hasOwnProperty.call(body, "vat_rate_takeaway");
+    if (creation || hasLegacyVat || hasDineInVat || hasTakeawayVat) {
       try {
-        body.vat_rate = normalizeVatRate(body.vat_rate, 10);
+        const legacyVat = normalizeVatRate(body.vat_rate, 10);
+        body.vat_rate = legacyVat;
+        body.vat_rate_dine_in = normalizeVatRate(body.vat_rate_dine_in, legacyVat);
+        body.vat_rate_takeaway = normalizeVatRate(
+          body.vat_rate_takeaway,
+          body.vat_rate_dine_in,
+        );
       } catch (error) {
         throw new DomainError(422, "VAT_RATE_INVALID", "Taux de TVA invalide.");
       }
+    }
+    const hasTrackStock = Object.prototype.hasOwnProperty.call(body, "track_stock");
+    const hasZeroBehavior = Object.prototype.hasOwnProperty.call(body, "stock_zero_behavior");
+    const hasStockUnit = Object.prototype.hasOwnProperty.call(body, "stock_unit");
+    const hasStock = Object.prototype.hasOwnProperty.call(body, "stock");
+    const hasMinimumStock = Object.prototype.hasOwnProperty.call(body, "minimum_stock");
+    const hasTargetStock = Object.prototype.hasOwnProperty.call(body, "target_stock");
+
+    if (creation && !hasTrackStock) body.track_stock = 1;
+    if (creation || hasTrackStock) body.track_stock = Number(body.track_stock) === 0 ? 0 : 1;
+    if (creation && !hasZeroBehavior) body.stock_zero_behavior = "block";
+    if (creation || hasZeroBehavior) {
+      body.stock_zero_behavior = body.stock_zero_behavior === "warn" ? "warn" : "block";
+    }
+    if (creation && !hasStockUnit) body.stock_unit = "piece";
+    if (hasStockUnit) body.stock_unit = String(body.stock_unit || "piece").trim() || "piece";
+
+    if (hasStock) {
+      body.stock = body.stock === "" && body.track_stock === 0
+        ? 0
+        : normalizeStockQuantity(body.stock, "stock");
+    } else if (creation && body.track_stock === 0) {
+      body.stock = 0;
+    }
+
+    if (creation && !hasMinimumStock) body.minimum_stock = 1;
+    if (creation || hasMinimumStock) {
+      body.minimum_stock = normalizeStockQuantity(body.minimum_stock, "minimum_stock");
+    }
+    if (creation && !hasTargetStock) {
+      body.target_stock = Math.max(Number(body.stock ?? 0), Number(body.minimum_stock ?? 0));
+    }
+    if (creation || hasTargetStock) {
+      body.target_stock = normalizeStockQuantity(body.target_stock, "target_stock");
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(body, "minimum_stock")
+      && Object.prototype.hasOwnProperty.call(body, "target_stock")
+      && body.target_stock < body.minimum_stock
+    ) {
+      throw new DomainError(
+        400,
+        "PRODUCT_STOCK_TARGET_INVALID",
+        "Le stock cible doit etre superieur ou egal au seuil minimum.",
+      );
     }
     if (creation) body.is_hidden = body.is_hidden || 0;
     return body;
@@ -122,7 +185,7 @@ const buildProductController = ({
         !body.name
         || !body.categoryid
         || isMissing(body.price)
-        || !body.stock
+        || (body.track_stock === 1 && isMissing(body.stock))
         || !uploadedFilename
       ) {
         throw new DomainError(400, "PRODUCT_REQUEST_INVALID", "Requête invalide.");
@@ -141,6 +204,17 @@ const buildProductController = ({
     try {
       const response = await products.mAllProduct(req.shopid);
       return success(res, "Produits récupérés.", null, response);
+    } catch (error) {
+      return failed(res, "Erreur serveur.", error.message);
+    }
+  };
+
+  const publicClickAndCollectProducts = async (req, res) => {
+    try {
+      const response = await products.mPublicClickAndCollectProducts(
+        req.params.shopid,
+      );
+      return success(res, "Produits publics recuperes.", null, response);
     } catch (error) {
       return failed(res, "Erreur serveur.", error.message);
     }
@@ -221,6 +295,16 @@ const buildProductController = ({
     }
   };
 
+  const reorderProducts = async (req, res) => {
+    try {
+      const ids = req.body && req.body.ids;
+      await products.mReorderProducts(req.shopid, ids);
+      return success(res, "Ordre des produits mis Ã  jour.", null, null);
+    } catch (error) {
+      return custom(res, 422, "Ordre des produits invalide.", null, null);
+    }
+  };
+
   const deleteProduct = async (req, res) => {
     try {
       const id = req.params.id;
@@ -247,6 +331,8 @@ const buildProductController = ({
     allProduct,
     deleteProduct,
     detailProduct,
+    publicClickAndCollectProducts,
+    reorderProducts,
     updateProduct,
     updateProductCustomizationConfig,
   };

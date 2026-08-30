@@ -5,6 +5,7 @@ const { parseMoney } = require("../helpers/money");
 const { withTransaction } = require("../helpers/withTransaction");
 const { envSTRIPESTOCKRESERVATIONMINUTES } = require("../helpers/env");
 const { quoteOrderItems } = require("./m_orderQuote");
+const { adjustProductStock } = require("../helpers/productStockMutation");
 
 const EDITABLE_PAYMENT_STATUSES = new Set(["unpaid", "requires_payment"]);
 const isOrderEditable = (order = {}) =>
@@ -133,7 +134,7 @@ const sqlRepository = {
   lockProducts: ({ shopId, productIds, connection }) => (
     productIds.length === 0 ? Promise.resolve([]) : queryResult(
       connection,
-      `SELECT id, shopid, stock
+      `SELECT id, shopid, stock, track_stock, stock_zero_behavior
        FROM products
        WHERE shopid = ? AND id IN (?)
        ORDER BY id
@@ -142,18 +143,15 @@ const sqlRepository = {
     )
   ),
 
-  adjustStock: ({ shopId, productId, delta, connection }) => {
-    const shortageClause = delta < 0 ? " AND stock >= ?" : "";
-    const params = [delta, productId, shopId];
-    if (delta < 0) params.push(-delta);
-    return queryResult(
-      connection,
-      `UPDATE products
-       SET stock = stock + ?
-       WHERE id = ? AND shopid = ?${shortageClause}`,
-      params,
-    );
-  },
+  adjustStock: ({
+    shopId, productId, delta, allowShortage, connection,
+  }) => adjustProductStock({
+    query: (sql, params) => queryResult(connection, sql, params),
+    shopId,
+    productId,
+    delta,
+    allowShortage,
+  }),
 
   deleteSnapshots: ({ detailIds, connection }) => (
     detailIds.length === 0 ? Promise.resolve({ affectedRows: 0 }) : queryResult(
@@ -533,11 +531,15 @@ const buildOrderEditingModule = ({
         serverQuote: { total: 0, items: [] },
         requirements: new Map(),
       };
+      const nextIsTakeaway = amendment.isTakeaway === undefined
+        ? [true, 1, "1"].includes(order.is_takeaway)
+        : amendment.isTakeaway;
       if (amendment.items.length) {
         try {
           quote = await quoteItems({
             shopId: amendment.shopId,
             items: amendment.items,
+            isTakeaway: nextIsTakeaway,
             connection,
           });
         } catch (error) {
@@ -560,6 +562,7 @@ const buildOrderEditingModule = ({
         ? activeReservationRequirements(reservations)
         : storedRequirements(details, snapshots);
       const deltas = requirementDeltas(before, quote.requirements);
+      const canceled = amendment.items.length === 0;
       const productIds = [...new Set([
         ...deltas.keys(),
         ...reservations.map((reservation) => Number(reservation.product_id)),
@@ -573,7 +576,11 @@ const buildOrderEditingModule = ({
       for (const [productId, delta] of deltas) {
         const product = products.find((row) => Number(row.id) === productId);
         const available = product ? Number(product.stock) : 0;
-        if (!product || (delta > 0 && available < delta)) {
+        if (!product || (
+          delta > 0
+          && product.stock_zero_behavior !== "warn"
+          && available < delta
+        )) {
           shortages.push({
             product_id: productId,
             requested: Math.max(delta, 0),
@@ -591,10 +598,13 @@ const buildOrderEditingModule = ({
 
       for (const [productId, delta] of deltas) {
         if (delta === 0) continue;
+        if (canceled && delta < 0) continue;
+        const product = products.find((row) => Number(row.id) === productId);
         const result = await repository.adjustStock({
           shopId: amendment.shopId,
           productId,
           delta: -delta,
+          allowShortage: product && product.stock_zero_behavior === "warn",
           connection,
         });
         if (!result.affectedRows) {
@@ -666,12 +676,12 @@ const buildOrderEditingModule = ({
         }
       }
 
-      const canceled = amendment.items.length === 0;
-      const nextIsTakeaway = amendment.isTakeaway === undefined
-        ? [true, 1, "1"].includes(order.is_takeaway)
-        : amendment.isTakeaway;
       const orderChanges = {
         subtotal: quote.total,
+        subtotal_before_discount: quote.total,
+        discount_type: "none",
+        discount_value: 0,
+        discount_amount: 0,
         finished: timestamp,
         is_takeaway: nextIsTakeaway ? 1 : 0,
         ...(canceled && { status: 4 }),
@@ -706,7 +716,7 @@ const buildOrderEditingModule = ({
           connection,
         });
         const delta = deltas.get(productId) || 0;
-        if (order.payment_provider !== "stripe" && delta !== 0) {
+        if (!canceled && order.payment_provider !== "stripe" && delta !== 0) {
           await repository.insertMovement({
             movement: {
               productid: productId,

@@ -1,4 +1,5 @@
 const pool = require("../config/dbPool");
+const DomainError = require("../helpers/domainError");
 const { withTransaction } = require("../helpers/withTransaction");
 const {
   getProductCustomizationState,
@@ -9,6 +10,20 @@ const {
 const queryRows = async (connection, sql, params) => {
   const [rows] = await connection.query(sql, params);
   return rows;
+};
+
+const normalizeOrderedIds = (ids) => {
+  if (!Array.isArray(ids)) throw new Error("Invalid product order");
+  const normalized = ids.map((id) => Number(id));
+  const unique = new Set(normalized);
+  if (
+    normalized.length === 0
+    || unique.size !== normalized.length
+    || normalized.some((id) => !Number.isInteger(id) || id <= 0)
+  ) {
+    throw new Error("Invalid product order");
+  }
+  return normalized;
 };
 
 const projectLegacyCustomizations = (steps) => (steps || []).map((step) => ({
@@ -43,6 +58,56 @@ const minimumCommandablePrice = (price, steps, customizationAvailable) => {
 const productConfiguration = (configurations, productId) => (
   configurations.get(productId) || configurations.get(String(productId)) || []
 );
+
+const upsertProductStockItem = async (connection, productId, data) => {
+  const products = await queryRows(connection, `
+    SELECT products.*,
+      si.unit AS stock_unit,
+      si.minimum_stock,
+      si.target_stock
+    FROM products
+    LEFT JOIN stock_items si ON si.id = products.stock_item_id
+    WHERE products.id = ?
+  `, [productId]);
+  const product = products[0];
+  if (!product) return;
+
+  const minimumStock = Number(data.minimum_stock ?? product.minimum_stock ?? 1);
+  const targetStock = Number(data.target_stock ?? product.target_stock ?? product.stock ?? 0);
+  if (targetStock < minimumStock) {
+    throw new DomainError(
+      400,
+      "PRODUCT_STOCK_TARGET_INVALID",
+      "Le stock cible doit etre superieur ou egal au seuil minimum.",
+    );
+  }
+
+  const stockItemData = {
+    shop_id: product.shopid,
+    item_type: "product",
+    product_id: productId,
+    name: product.name,
+    unit: data.stock_unit ?? product.stock_unit ?? "piece",
+    current_stock: Number(product.stock ?? 0),
+    minimum_stock: minimumStock,
+    target_stock: targetStock,
+    archived: Number(product.archived ?? 0),
+  };
+
+  if (product.stock_item_id) {
+    await queryRows(connection, "UPDATE stock_items SET ? WHERE id = ?", [
+      stockItemData,
+      product.stock_item_id,
+    ]);
+    return;
+  }
+
+  const result = await queryRows(connection, "INSERT INTO stock_items SET ?", stockItemData);
+  await queryRows(connection, "UPDATE products SET stock_item_id = ? WHERE id = ?", [
+    result.insertId,
+    productId,
+  ]);
+};
 
 const removeConfigurationAssociations = async (connection, productId) => {
   await queryRows(connection, `
@@ -150,19 +215,48 @@ const buildProductModule = ({
 
   const mAllProduct = async (shopId) => {
     const products = await queryRows(connection, `
-      SELECT products.*, category.name AS category, category.id AS categoryid
+      SELECT products.*, category.name AS category, category.id AS categoryid,
+        category.image AS category_image,
+        si.unit AS stock_unit, si.minimum_stock, si.target_stock
       FROM products
       LEFT JOIN category ON products.categoryId = category.id
+      LEFT JOIN stock_items si ON si.id = products.stock_item_id
       WHERE products.shopid = ?
+      ORDER BY products.sort_order ASC, products.created ASC, products.id ASC
     `, [shopId]);
     return formatProducts(products, shopId);
   };
 
-  const mDetailProduct = async (id) => {
+  const mPublicClickAndCollectProducts = async (shopId) => {
     const products = await queryRows(connection, `
-      SELECT products.*, category.name AS category, category.id AS categoryid
+      SELECT products.id, products.name, products.description, products.price,
+        products.image, products.categoryId, products.stock,
+        products.track_stock, products.stock_zero_behavior,
+        category.name AS category, category.id AS categoryid,
+        category.image AS category_image
       FROM products
       LEFT JOIN category ON products.categoryId = category.id
+      WHERE products.shopid = ?
+        AND COALESCE(products.archived, 0) = 0
+        AND COALESCE(products.is_hidden, 0) = 0
+      ORDER BY products.sort_order ASC, products.created ASC, products.id ASC
+      LIMIT 12
+    `, [shopId]);
+    return products.filter((product) => {
+      const tracksStock = Number(product.track_stock) !== 0;
+      const blocksAtZero = (product.stock_zero_behavior || "block") === "block";
+      return !(tracksStock && blocksAtZero && Number(product.stock) <= 0);
+    });
+  };
+
+  const mDetailProduct = async (id) => {
+    const products = await queryRows(connection, `
+      SELECT products.*, category.name AS category, category.id AS categoryid,
+        category.image AS category_image,
+        si.unit AS stock_unit, si.minimum_stock, si.target_stock
+      FROM products
+      LEFT JOIN category ON products.categoryId = category.id
+      LEFT JOIN stock_items si ON si.id = products.stock_item_id
       WHERE products.id = ?
     `, [id]);
     if (products.length === 0) return [];
@@ -173,11 +267,15 @@ const buildProductModule = ({
     const productData = { ...data };
     delete productData.customization_config;
     delete productData.product_customization;
+    delete productData.stock_unit;
+    delete productData.minimum_stock;
+    delete productData.target_stock;
     const result = await queryRows(
       transactionConnection,
       "INSERT INTO products SET ?",
       productData,
     );
+    await upsertProductStockItem(transactionConnection, result.insertId, data);
     if (Object.prototype.hasOwnProperty.call(data, "customization_config")) {
       await replaceConfiguration({
         shopId: data.shopid,
@@ -200,11 +298,15 @@ const buildProductModule = ({
     const productData = { ...data };
     delete productData.customization_config;
     delete productData.product_customization;
+    delete productData.stock_unit;
+    delete productData.minimum_stock;
+    delete productData.target_stock;
     const result = await queryRows(
       transactionConnection,
       "UPDATE products SET ? WHERE id = ?",
       [productData, id],
     );
+    await upsertProductStockItem(transactionConnection, id, data);
     if (Object.prototype.hasOwnProperty.call(data, "customization_config")) {
       const products = await queryRows(
         transactionConnection,
@@ -259,6 +361,25 @@ const buildProductModule = ({
     [id],
   );
 
+  const mReorderProducts = (shopId, ids) => runInTransaction(async (transactionConnection) => {
+    const orderedIds = normalizeOrderedIds(ids);
+    const products = await queryRows(
+      transactionConnection,
+      "SELECT id FROM products WHERE shopid = ? AND id IN (?)",
+      [shopId, orderedIds],
+    );
+    if (products.length !== orderedIds.length) throw new Error("Invalid product order");
+
+    for (let index = 0; index < orderedIds.length; index += 1) {
+      await queryRows(
+        transactionConnection,
+        "UPDATE products SET sort_order = ?, updated = NOW() WHERE id = ? AND shopid = ?",
+        [(index + 1) * 10, orderedIds[index], shopId],
+      );
+    }
+    return { affectedRows: orderedIds.length };
+  });
+
   return {
     mAddProduct,
     mAllProduct,
@@ -266,6 +387,8 @@ const buildProductModule = ({
     mDeleteProduct,
     mDetailProduct,
     mReplaceProductCustomizationConfig,
+    mPublicClickAndCollectProducts,
+    mReorderProducts,
     mUpdateProduct,
     mUsedProduct,
   };

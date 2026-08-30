@@ -10,6 +10,10 @@ const {
   canonicalPayloadHash,
 } = require("../src/modules/m_checkout");
 const { buildOrderQuoteModule } = require("../src/modules/m_orderQuote");
+const checkoutSource = fs.readFileSync(
+  require.resolve("../src/modules/m_checkout"),
+  "utf8",
+);
 
 const routerSource = fs.readFileSync(
   require.resolve("../src/routers/r_customizations"),
@@ -61,6 +65,13 @@ assert.match(
   indexSource,
   /"\/api\/v1\/imgcustomizations"[\s\S]*express\.static\(customizationChoicesPath\)/,
 );
+assert.ok(
+  checkoutSource.includes("vat_rate, vat_rate_dine_in, vat_rate_takeaway"),
+  "checkout product quote query must load dine-in and takeaway VAT columns",
+);
+assert.ok(checkoutSource.includes("discount_type"));
+assert.ok(checkoutSource.includes("subtotal_before_discount"));
+assert.ok(checkoutSource.includes("applyDiscountToItems"));
 const {
   createCustomizationChoice,
   createCustomizationStep,
@@ -706,6 +717,61 @@ assert.deepStrictEqual(
     },
   },
 );
+
+const nonBlockingZeroStock = groupResolvedConfigurationRows([
+  {
+    product_id: 6,
+    product_step_id: 60,
+    step_id: 61,
+    step_name: "Options",
+    minimum_choices: 1,
+    maximum_choices: 1,
+    step_position: 1,
+    product_step_active: 1,
+    step_active: 1,
+    product_step_choice_id: 62,
+    step_choice_id: 63,
+    choice_type: "linked_product",
+    linked_product_id: 64,
+    linked_name: "Illimite",
+    linked_stock: 0,
+    linked_product_track_stock: 0,
+    linked_product_stock_zero_behavior: "block",
+    linked_archived: 0,
+    linked_is_hidden: 0,
+    extra_price: 0,
+    choice_position: 1,
+    product_step_choice_active: 1,
+    choice_active: 1,
+  },
+  {
+    product_id: 7,
+    product_step_id: 70,
+    step_id: 71,
+    step_name: "Options",
+    minimum_choices: 1,
+    maximum_choices: 1,
+    step_position: 1,
+    product_step_active: 1,
+    step_active: 1,
+    product_step_choice_id: 72,
+    step_choice_id: 73,
+    choice_type: "linked_product",
+    linked_product_id: 74,
+    linked_name: "Alerte",
+    linked_stock: 0,
+    linked_product_track_stock: 1,
+    linked_product_stock_zero_behavior: "warn",
+    linked_archived: 0,
+    linked_is_hidden: 0,
+    extra_price: 0,
+    choice_position: 1,
+    product_step_choice_active: 1,
+    choice_active: 1,
+  },
+]);
+assert.strictEqual(nonBlockingZeroStock.get(6)[0].choices[0].available, true);
+assert.strictEqual(nonBlockingZeroStock.get(7)[0].choices[0].available, true);
 
 const runRepositoryReadContracts = async () => {
   const resolvedCalls = [];
@@ -1573,7 +1639,7 @@ const checkoutInput = (overrides = {}) => ({
   ...overrides,
 });
 
-const checkoutConfiguration = () => new Map([[10, [{
+const checkoutConfiguration = ({ linkedTrackStock = 1, linkedZeroBehavior = "block" } = {}) => new Map([[10, [{
   product_step_id: 20,
   name: "Boisson",
   position: 1,
@@ -1599,6 +1665,8 @@ const checkoutConfiguration = () => new Map([[10, [{
     active: true,
     available: true,
     linked_product_id: 30,
+    linked_product_track_stock: linkedTrackStock,
+    linked_product_stock_zero_behavior: linkedZeroBehavior,
   }],
 }]]]);
 
@@ -1614,6 +1682,8 @@ const runSharedOrderQuoteContract = async () => {
           name: "Menu",
           price: 8,
           vat_rate: 10,
+          vat_rate_dine_in: 10,
+          vat_rate_takeaway: 5.5,
           stock: 5,
           archived: 0,
           is_hidden: 0,
@@ -1659,6 +1729,26 @@ const runSharedOrderQuoteContract = async () => {
     total_vat: 1.73,
   });
   assert.deepStrictEqual([...result.requirements.entries()], [[10, 2], [11, 2]]);
+
+  const takeawayResult = await quote.quoteOrderItems({
+    shopId: 7,
+    items: [{ productId: 10, quantity: 2, selectedChoiceIds: [101] }],
+    isTakeaway: true,
+    connection: { transaction: true },
+  });
+  assert.strictEqual(takeawayResult.total, 19);
+  assert.deepStrictEqual(takeawayResult.serverQuote.items[0], {
+    product_id: 10,
+    quantity: 2,
+    selected_choice_ids: [101],
+    unit_price: 9.5,
+    total: 19,
+    vat_rate: 5.5,
+    unit_price_ht: 9,
+    unit_vat: 0.5,
+    total_ht: 18.01,
+    total_vat: 0.99,
+  });
 };
 
 const makeCheckoutHarness = ({
@@ -1667,9 +1757,16 @@ const makeCheckoutHarness = ({
   duplicateOnInsert = false,
   paymentMode,
   validateConfiguredItem,
+  actor = { id: 9, shopid: 7, username: "Amina", access: 1 },
+  product10Stock = 10,
+  product30Stock = 5,
+  product10TrackStock = 1,
+  product30TrackStock = 1,
+  product10ZeroBehavior = "block",
+  product30ZeroBehavior = "block",
 } = {}) => {
   const initial = {
-    products: new Map([[10, 10], [30, 5]]),
+    products: new Map([[10, product10Stock], [30, product30Stock]]),
     orders: existingOrder ? [existingOrder] : [],
     details: [],
     snapshots: [],
@@ -1693,6 +1790,26 @@ const makeCheckoutHarness = ({
     nextReservationId: source.nextReservationId,
   });
   const repository = {
+    findUserById: async ({ userId, shopId }) => (
+      Number(userId) === Number(actor.id) && Number(shopId) === Number(actor.shopid)
+        ? actor
+        : null
+    ),
+    findServicePoint: async ({ servicePointId, shopId }) => {
+      const points = [
+        { id: 1, shopid: 7, type: "counter", system_key: "counter", is_active: 1 },
+        { id: 2, shopid: 7, type: "click_collect", system_key: "click_collect", is_active: 1 },
+        { id: 3, shopid: 7, type: "table", is_active: 1 },
+      ];
+      return points.find((point) => (
+        point.id === Number(servicePointId) && point.shopid === Number(shopId)
+      )) || null;
+    },
+    findSystemPoint: async ({ shopId, systemKey }) => (
+      Number(shopId) === 7 && systemKey === "counter"
+        ? { id: 1, shopid: 7, type: "counter", system_key: "counter", is_active: 1 }
+        : null
+    ),
     findOrderByToken: async ({ shopId, token }) => state.orders.find(
       (row) => row.shopid === shopId && row.client_order_token === token,
     ) || null,
@@ -1713,7 +1830,16 @@ const makeCheckoutHarness = ({
     },
     getProducts: async ({ productIds }) => productIds
       .filter((id) => state.products.has(id))
-      .map((id) => ({ id, shopid: 7, name: `Product ${id}`, price: id === 10 ? 10 : 2, stock: state.products.get(id), archived: 0 })),
+      .map((id) => ({
+        id,
+        shopid: 7,
+        name: `Product ${id}`,
+        price: id === 10 ? 10 : 2,
+        stock: state.products.get(id),
+        track_stock: id === 10 ? product10TrackStock : product30TrackStock,
+        stock_zero_behavior: id === 10 ? product10ZeroBehavior : product30ZeroBehavior,
+        archived: 0,
+      })),
     lockExpiredReservations: async ({ now }) => state.reservations
       .filter((row) => (
         row.status === "reserved"
@@ -1740,10 +1866,15 @@ const makeCheckoutHarness = ({
       return productIds.filter((id) => state.products.has(id)).map((id) => ({
         id,
         stock: state.products.get(id),
+        track_stock: id === 10 ? product10TrackStock : product30TrackStock,
+        stock_zero_behavior: id === 10 ? product10ZeroBehavior : product30ZeroBehavior,
       }));
     },
-    adjustStock: async ({ productId, delta }) => {
+    adjustStock: async ({ productId, delta, allowShortage = false }) => {
       events.push(["stock", productId, delta]);
+      if (!allowShortage && state.products.get(productId) + delta < 0) {
+        return { affectedRows: 0 };
+      }
       state.products.set(productId, state.products.get(productId) + delta);
       return { affectedRows: 1 };
     },
@@ -1805,7 +1936,10 @@ const makeCheckoutHarness = ({
   const checkout = buildCheckoutModule({
     repository,
     withTransaction,
-    getResolvedProductConfigurations: async () => checkoutConfiguration(),
+    getResolvedProductConfigurations: async () => checkoutConfiguration({
+      linkedTrackStock: product30TrackStock,
+      linkedZeroBehavior: product30ZeroBehavior,
+    }),
     ...(validateConfiguredItem ? { validateConfiguredItem } : {}),
     now: () => new Date("2026-07-24T12:00:00.000Z"),
   });
@@ -1832,6 +1966,13 @@ const makeConcurrentClaimHarness = () => {
   const events = [];
   const reservations = [];
   const repository = {
+    findSystemPoint: async () => ({
+      id: 1,
+      shopid: 7,
+      type: "counter",
+      system_key: "counter",
+      is_active: 1,
+    }),
     findOrderByToken: async ({ connection }) => {
       if (!connection) {
         await winnerCommitted;
@@ -1962,6 +2103,44 @@ const runTransactionalCheckoutContracts = async () => {
   assert.deepStrictEqual(harness.events, ["begin", "commit"]);
 
   harness = makeCheckoutHarness({
+    actor: { id: 9, shopid: 7, username: "Amina", access: 1 },
+  });
+  await harness.checkout.createCheckout(harness.input);
+  assert.strictEqual(
+    harness.getState().orders[0].taken_by_user_id,
+    9,
+    "a cashier-created order must retain the authenticated staff id",
+  );
+  assert.strictEqual(
+    harness.getState().orders[0].taken_by_name,
+    "Amina",
+    "a cashier-created order must retain the authenticated staff name",
+  );
+
+  harness = makeCheckoutHarness({
+    actor: { id: 9, shopid: 7, username: "Table 1", access: 2 },
+  });
+  await harness.checkout.createCheckout(harness.input);
+  assert.strictEqual(
+    harness.getState().orders[0].taken_by_user_id,
+    null,
+    "a Table QR order must not receive a staff taker",
+  );
+
+  harness = makeCheckoutHarness();
+  await harness.checkout.createCheckout({
+    ...harness.input,
+    actorId: null,
+    sessionSubject: "service_point",
+    servicePointId: 3,
+    orderSource: "table_qr",
+    customer: { name: "Marie", phone: "0102", remark: "" },
+  });
+  assert.strictEqual(harness.getState().orders[0].service_point_id, 3);
+  assert.strictEqual(harness.getState().orders[0].order_source, "table_qr");
+  assert.strictEqual(harness.getState().orders[0].taken_by_user_id, null);
+
+  harness = makeCheckoutHarness({
     existingOrder: {
       id: 44,
       shopid: 7,
@@ -2039,6 +2218,22 @@ const runTransactionalCheckoutContracts = async () => {
       && error.shortages[0].requested === 2,
   );
   assert.deepStrictEqual([...harness.getState().products.entries()], [[10, 10], [30, 1]]);
+
+  harness = makeCheckoutHarness({ product30Stock: 1, product30ZeroBehavior: "warn" });
+  await harness.checkout.createCheckout(harness.input);
+  assert.deepStrictEqual([...harness.getState().products.entries()], [[10, 8], [30, -1]]);
+
+  harness = makeCheckoutHarness({ product10Stock: 1, product10ZeroBehavior: "warn" });
+  await harness.checkout.createCheckout(harness.input);
+  assert.deepStrictEqual([...harness.getState().products.entries()], [[10, -1], [30, 3]]);
+
+  harness = makeCheckoutHarness({ product10Stock: 1, product10TrackStock: 0 });
+  await harness.checkout.createCheckout(harness.input);
+  assert.deepStrictEqual([...harness.getState().products.entries()], [[10, 1], [30, 3]]);
+
+  harness = makeCheckoutHarness({ product30Stock: 0, product30TrackStock: 0 });
+  await harness.checkout.createCheckout(harness.input);
+  assert.deepStrictEqual([...harness.getState().products.entries()], [[10, 8], [30, 0]]);
 
   const winner = {
     id: 501,
@@ -2507,6 +2702,10 @@ const makeArchiveHarness = ({ failAfterActiveDeletion = false } = {}) => {
       client_order_payload_hash: "client-order-payload-hash",
       is_takeaway: 1,
       subtotal: 23,
+      subtotal_before_discount: 28,
+      discount_type: "amount",
+      discount_value: 5,
+      discount_amount: 5,
       created: "2026-07-24 12:00:00",
     }],
     details: [
@@ -2717,6 +2916,10 @@ const runArchiveSnapshotContracts = async () => {
       is_takeaway: archive.is_takeaway,
       payment_status: archive.payment_status,
       stripe_payment_intent_id: archive.stripe_payment_intent_id,
+      subtotal_before_discount: archive.subtotal_before_discount,
+      discount_type: archive.discount_type,
+      discount_value: archive.discount_value,
+      discount_amount: archive.discount_amount,
       hasReplacementAttemptToken: Object.prototype.hasOwnProperty.call(
         archive,
         "stripe_replacement_attempt_token",
@@ -2735,6 +2938,10 @@ const runArchiveSnapshotContracts = async () => {
       is_takeaway: 1,
       payment_status: "paid",
       stripe_payment_intent_id: "pi_archive_42",
+      subtotal_before_discount: 28,
+      discount_type: "amount",
+      discount_value: 5,
+      discount_amount: 5,
       hasReplacementAttemptToken: false,
       hasClientOrderToken: false,
       hasClientPayloadHash: false,
@@ -2804,6 +3011,27 @@ const runArchiveSnapshotContracts = async () => {
     "archive-token-42",
   );
   assert.deepStrictEqual(archivedByToken, archived);
+
+  harness = makeArchiveHarness();
+  await harness.orderModule.mArchiveOrder(
+    42,
+    "Carte",
+    7,
+    { discountType: "percent", discountValue: 10 },
+  );
+  const discountedArchive = harness.getState().archives[0];
+  assert.strictEqual(discountedArchive.subtotal_before_discount, 28);
+  assert.strictEqual(discountedArchive.discount_type, "percent");
+  assert.strictEqual(discountedArchive.discount_value, 10);
+  assert.strictEqual(discountedArchive.discount_amount, 2.8);
+  assert.strictEqual(discountedArchive.subtotal, 25.2);
+  assert.strictEqual(
+    Number(harness.getState().archiveDetails.reduce(
+      (sum, detail) => sum + Number(detail.total),
+      0,
+    ).toFixed(2)),
+    25.2,
+  );
 
   harness = makeArchiveHarness({ failAfterActiveDeletion: true });
   await assert.rejects(

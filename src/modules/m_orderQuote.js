@@ -1,7 +1,7 @@
 const pool = require("../config/dbPool");
 const DomainError = require("../helpers/domainError");
 const { parseMoney } = require("../helpers/money");
-const { buildVatSnapshot } = require("../helpers/vat");
+const { buildVatSnapshot, resolveProductVatRate } = require("../helpers/vat");
 const { validateConfiguredItem } = require("../helpers/customizationRules");
 const { buildStockRequirements } = require("../helpers/stockRequirements");
 const {
@@ -23,7 +23,8 @@ const queryResult = async (connection, sql, params = []) => {
 const sqlRepository = {
   getProducts: ({ shopId, productIds, connection }) => queryResult(
     connection,
-    `SELECT id, shopid, name, price, vat_rate, stock, archived, is_hidden
+    `SELECT id, shopid, name, price, vat_rate, vat_rate_dine_in, vat_rate_takeaway,
+            stock, track_stock, stock_zero_behavior, archived, is_hidden
      FROM products
      WHERE shopid = ? AND id IN (?)
      ORDER BY id`,
@@ -37,7 +38,12 @@ const buildOrderQuoteModule = ({
   validateConfiguredItem: validateItem = validateConfiguredItem,
   buildStockRequirements: stockRequirements = buildStockRequirements,
 } = {}) => ({
-  quoteOrderItems: async ({ shopId, items, connection }) => {
+  quoteOrderItems: async ({
+    shopId,
+    items,
+    isTakeaway = false,
+    connection,
+  }) => {
     const parentProductIds = [...new Set(items.map((item) => Number(item.productId)))]
       .sort((left, right) => left - right);
     const products = await repository.getProducts({
@@ -83,7 +89,7 @@ const buildOrderQuoteModule = ({
       const vatSnapshot = buildVatSnapshot({
         unitPrice,
         quantity: item.quantity,
-        vatRate: product.vat_rate,
+        vatRate: resolveProductVatRate(product, isTakeaway),
       });
       return {
         ...item,
