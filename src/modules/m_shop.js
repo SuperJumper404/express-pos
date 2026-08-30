@@ -1,6 +1,7 @@
 const conn = require("../config/db");
 const { normalizeQrPaymentMode } = require("../helpers/qrPaymentMode");
 const { normalizeCommissionPercent } = require("../helpers/stripePayment");
+const { normalizeShopTheme } = require("../helpers/shopTheme");
 module.exports = {
   mGetShopInfo: (id) => {
     return new Promise((resolve, reject) => {
@@ -39,6 +40,7 @@ module.exports = {
           hours: JSON.stringify(data.hours),
           shop_social_media: JSON.stringify(data.shop_social_media),
           shop_profile_image: data.shop_profile_image,
+          shop_theme: JSON.stringify(normalizeShopTheme(data.shop_theme)),
           shop_status: data.shop_status,
           kitchen_closed: data.kitchen_closed || 0,
           shop_printer_ip: data.shop_printer_ip,
@@ -222,6 +224,7 @@ module.exports = {
     shop_social_media = ?,
     shop_payment_methods = ?,
     shop_profile_image = ?,
+    shop_theme = ?,
     shop_status = ?,
     kitchen_closed = ?,
     shop_printer_ip = ?,
@@ -246,6 +249,7 @@ module.exports = {
         JSON.stringify(data.shop_social_media),
         JSON.stringify(data.shop_payment_methods),
         data.shop_profile_image,
+        JSON.stringify(normalizeShopTheme(data.shop_theme)),
         data.shop_status,
         data.kitchen_closed,
         data.shop_printer_ip,

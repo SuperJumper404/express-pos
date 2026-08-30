@@ -14,6 +14,10 @@ const { nanoid } = require("nanoid");
 const { normalizeQrPaymentMode } = require("../helpers/qrPaymentMode");
 const { normalizeCommissionPercent } = require("../helpers/stripePayment");
 const { signTableAccessToken } = require("../helpers/tableAccessToken");
+const {
+  DEFAULT_SHOP_THEME,
+  normalizeShopTheme,
+} = require("../helpers/shopTheme");
 
 const DEFAULT_SHOP_PAYMENT_METHODS = [
   "Tickets Restaurants",
@@ -111,6 +115,7 @@ exports.createAndInitializeShop = async (req, res) => {
       hours: DEFAULT_SHOP_HOURS,
       shop_social_media: DEFAULT_SHOP_SOCIAL_MEDIA,
       shop_profile_image: body.shop_profile_image || "",
+      shop_theme: DEFAULT_SHOP_THEME,
       shop_status: body.shop_status || "inactive",
       kitchen_closed: 0,
       shop_printer_ip: body.shop_printer_ip || "",
@@ -172,6 +177,7 @@ exports.getShopInfoClickAndCollect = async (req, res) => {
       shop_status: response?.[0]?.shop_status,
       kitchen_closed: response?.[0]?.kitchen_closed,
       shop_profile_image: response?.[0]?.shop_profile_image,
+      shop_theme: response?.[0]?.shop_theme,
       shop_printer_ip: response?.[0]?.shop_printer_ip,
       smart_print_app: response?.[0]?.smart_print_app,
       auto_print_order_tickets: response?.[0]?.auto_print_order_tickets,
@@ -260,6 +266,9 @@ exports.updateShopInfo = async (req, res) => {
         parseStoredJson(shopInfo.shop_payment_methods, DEFAULT_SHOP_PAYMENT_METHODS),
       ),
       shop_profile_image: req.file?.filename || shopInfo.shop_profile_image,
+      shop_theme: normalizeShopTheme(
+        prefer(req.body.shop_theme, shopInfo.shop_theme),
+      ),
       shop_status: prefer(req.body.shop_status, shopInfo.shop_status),
       kitchen_closed: prefer(req.body.kitchen_closed, shopInfo.kitchen_closed || 0),
       shop_printer_ip: prefer(req.body.shop_printer_ip, shopInfo.shop_printer_ip),
