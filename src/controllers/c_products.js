@@ -209,6 +209,17 @@ const buildProductController = ({
     }
   };
 
+  const publicClickAndCollectProducts = async (req, res) => {
+    try {
+      const response = await products.mPublicClickAndCollectProducts(
+        req.params.shopid,
+      );
+      return success(res, "Produits publics recuperes.", null, response);
+    } catch (error) {
+      return failed(res, "Erreur serveur.", error.message);
+    }
+  };
+
   const detailProduct = async (req, res) => {
     try {
       const response = await products.mDetailProduct(req.params.id);
@@ -320,6 +331,7 @@ const buildProductController = ({
     allProduct,
     deleteProduct,
     detailProduct,
+    publicClickAndCollectProducts,
     reorderProducts,
     updateProduct,
     updateProductCustomizationConfig,

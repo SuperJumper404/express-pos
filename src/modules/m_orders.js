@@ -984,7 +984,7 @@ module.exports = {
          FROM archives
          LEFT JOIN service_points ON service_points.id = archives.service_point_id
          WHERE archives.shopid = ?
-         ORDER BY archives.created DESC`,
+         ORDER BY archives.archived_at DESC, archives.id DESC`,
         [shopid],
         (err, result) => {
           if (!err) {

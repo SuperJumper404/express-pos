@@ -107,8 +107,9 @@ const respond = (res, statusCode, message, data) =>
     "a current password hash must not trigger a legacy password migration",
   );
   console.log("admin email login tests passed");
+  process.exit(0);
 })().catch((error) => {
   Module._load = originalLoad;
   console.error(error);
-  process.exitCode = 1;
+  process.exit(1);
 });

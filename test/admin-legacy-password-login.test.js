@@ -93,8 +93,9 @@ const respond = (res, statusCode, message, data) =>
   assert.equal(updates[0].clearpass, "");
   assert.equal(await bcrypt.compare(password, updates[0].password), true);
   console.log("admin legacy password login tests passed");
+  process.exit(0);
 })().catch((error) => {
   Module._load = originalLoad;
   console.error(error);
-  process.exitCode = 1;
+  process.exit(1);
 });

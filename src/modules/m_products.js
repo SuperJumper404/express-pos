@@ -227,6 +227,28 @@ const buildProductModule = ({
     return formatProducts(products, shopId);
   };
 
+  const mPublicClickAndCollectProducts = async (shopId) => {
+    const products = await queryRows(connection, `
+      SELECT products.id, products.name, products.description, products.price,
+        products.image, products.categoryId, products.stock,
+        products.track_stock, products.stock_zero_behavior,
+        category.name AS category, category.id AS categoryid,
+        category.image AS category_image
+      FROM products
+      LEFT JOIN category ON products.categoryId = category.id
+      WHERE products.shopid = ?
+        AND COALESCE(products.archived, 0) = 0
+        AND COALESCE(products.is_hidden, 0) = 0
+      ORDER BY products.sort_order ASC, products.created ASC, products.id ASC
+      LIMIT 12
+    `, [shopId]);
+    return products.filter((product) => {
+      const tracksStock = Number(product.track_stock) !== 0;
+      const blocksAtZero = (product.stock_zero_behavior || "block") === "block";
+      return !(tracksStock && blocksAtZero && Number(product.stock) <= 0);
+    });
+  };
+
   const mDetailProduct = async (id) => {
     const products = await queryRows(connection, `
       SELECT products.*, category.name AS category, category.id AS categoryid,
@@ -365,6 +387,7 @@ const buildProductModule = ({
     mDeleteProduct,
     mDetailProduct,
     mReplaceProductCustomizationConfig,
+    mPublicClickAndCollectProducts,
     mReorderProducts,
     mUpdateProduct,
     mUsedProduct,

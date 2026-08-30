@@ -6,6 +6,7 @@ const {
   mReduceStock,
   mAddNewStocks,
   mDeleteOrder,
+  mUpdateOrders,
   mOrdersbyUserId,
   mArchiveOrder,
   mFindOrderById,
@@ -19,9 +20,11 @@ const { custom, success, failed } = require("../helpers/response");
 const DomainError = require("../helpers/domainError");
 const { envJWTKEY } = require("../helpers/env");
 const { isMissing, parseMoney } = require("../helpers/money");
+const { calculateDiscount } = require("../helpers/discount");
 const { ORDER_STATUSES } = require("../helpers/orderStatus");
 const { buildOrderDetailStockEntry } = require("../helpers/orderDetailStock");
 const {
+  buildCashRegisterCollectionFields,
   shouldCancelPendingStripePayment,
 } = require("../helpers/cashRegisterPayment");
 const { getStripe } = require("../config/stripe");
@@ -49,6 +52,33 @@ exports.checkout = buildCheckoutController({
 const moneyOrZero = (value) => {
   const parsed = parseMoney(value);
   return parsed === null ? 0 : parsed;
+};
+
+const buildOrderCollectionDiscountFields = (order = {}, discount = {}) => {
+  if (
+    discount.discountType === undefined &&
+    discount.discountValue === undefined
+  ) {
+    return {};
+  }
+
+  const subtotalBeforeDiscount =
+    order.subtotal_before_discount == null
+      ? moneyOrZero(order.subtotal)
+      : moneyOrZero(order.subtotal_before_discount);
+  const discountResult = calculateDiscount({
+    subtotal: subtotalBeforeDiscount,
+    type: discount.discountType || "none",
+    value: discount.discountValue || 0,
+  });
+
+  return {
+    subtotal: discountResult.total,
+    subtotal_before_discount: subtotalBeforeDiscount,
+    discount_type: discountResult.type,
+    discount_value: discountResult.value,
+    discount_amount: discountResult.amount,
+  };
 };
 
 const hasPendingStripePayment = (order = {}) =>
@@ -351,6 +381,38 @@ const buildUpdateOrderController = ({
 
 exports.buildUpdateOrderController = buildUpdateOrderController;
 exports.updateOrder = buildUpdateOrderController();
+
+exports.collectOrderPayment = async (req, res) => {
+  const id = req.params.id;
+
+  try {
+    const orders = await mFindOrderById(id, req.shopid);
+    if (!orders.length) {
+      return custom(res, 404, "Commande introuvable.", null, null);
+    }
+
+    const result = await mUpdateOrders(
+      {
+        ...buildCashRegisterCollectionFields(req.body.payment_method),
+        ...buildOrderCollectionDiscountFields(orders[0], {
+          discountType: req.body.discount_type,
+          discountValue: req.body.discount_value,
+        }),
+      },
+      id,
+    );
+    if (!result.affectedRows) {
+      return custom(res, 404, "Commande introuvable.", null, null);
+    }
+
+    return success(res, "Commande encaissée avec succès.", null, null);
+  } catch (error) {
+    if (String(error.message || "").includes("Moyen de paiement requis")) {
+      return custom(res, 422, error.message, null, null);
+    }
+    return failed(res, "Erreur serveur.", error.message);
+  }
+};
 
 const buildArchiveOrderController = ({
   findOrderById = mFindOrderById,

@@ -14,6 +14,7 @@ routers
   // Legacy split-write endpoints. New checkout clients must use /orders/checkout.
   .post("/orders", authentication, orders.addOrder)
   .post("/detailorder", authentication, orders.addDetailOrder)
+  .post("/orders/collect/:id", authentication, orders.collectOrderPayment)
   .patch("/orders/:id", authentication, orders.updateOrder)
   .post("/orders/delete/:id", authentication, orders.deleteOrder)
   .get("/ordersbyUserId", authentication, orders.ordersbyUserId)
