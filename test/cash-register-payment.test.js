@@ -1,5 +1,6 @@
 const assert = require("assert");
 const {
+  buildCashRegisterCollectionFields,
   buildCashRegisterArchiveFields,
   isPaymentAlreadyCollected,
   shouldCancelPendingStripePayment,
@@ -47,6 +48,45 @@ assert.deepStrictEqual(
     payment_provider: "stripe",
     stripe_payment_intent_id: "pi_123",
     used_payment_method: "Apple Pay",
+  },
+);
+
+assert.throws(
+  () =>
+    buildCashRegisterArchiveFields({
+      order: {
+        payment_status: "paid",
+        payment: "Paiement au comptoir",
+      },
+      paymentMethod: "",
+    }),
+  /Moyen de paiement requis/,
+);
+
+assert.deepStrictEqual(
+  buildCashRegisterArchiveFields({
+    order: {
+      payment_status: "paid",
+      payment: "Paiement au comptoir",
+    },
+    paymentMethod: "Especes",
+  }),
+  {
+    payment: "Especes",
+    payment_status: "paid",
+    payment_provider: null,
+    stripe_payment_intent_id: null,
+    used_payment_method: "Especes",
+  },
+);
+
+assert.deepStrictEqual(
+  buildCashRegisterCollectionFields("Especes"),
+  {
+    payment: "Especes",
+    payment_status: "paid",
+    payment_provider: null,
+    stripe_payment_intent_id: null,
   },
 );
 

@@ -5,26 +5,34 @@ const routerUsers = require("./src/routers/r_users");
 const routerProducts = require("./src/routers/r_products");
 const routerCategory = require("./src/routers/r_category");
 const routerStock = require("./src/routers/stocks");
+const routerStockInventory = require("./src/routers/r_stockInventory");
 const routerOrders = require("./src/routers/r_orders");
 const routerShop = require("./src/routers/r_shop");
 const routerPrinting = require("./src/routers/r_printing");
 const routerStripe = require("./src/routers/r_stripe");
 const routerCustomizations = require("./src/routers/r_customizations");
+const routerServicePoints = require("./src/routers/r_servicePoints");
 const {
   buildNonOverlappingRunner,
   runStripePaymentMaintenance,
 } = require("./src/services/stripePaymentMaintenance");
+const dbPool = require("./src/config/dbPool");
+const { waitForDatabase } = require("./src/helpers/waitForDatabase");
 const { envPORT, envPUBLICIMAGEPATH } = require("./src/helpers/env");
 const prefix = require("./src/config/prefix");
 
 const fs = require("fs");
 
 const productsPath = path.join(envPUBLICIMAGEPATH, "products");
+const categoriesPath = path.join(envPUBLICIMAGEPATH, "categories");
 const shopPath = path.join(envPUBLICIMAGEPATH, "shop");
 const customizationChoicesPath = path.join(envPUBLICIMAGEPATH, "customization-choices");
 
 if (!fs.existsSync(productsPath)) {
   fs.mkdirSync(productsPath, { recursive: true });
+}
+if (!fs.existsSync(categoriesPath)) {
+  fs.mkdirSync(categoriesPath, { recursive: true });
 }
 if (!fs.existsSync(shopPath)) {
   fs.mkdirSync(shopPath, { recursive: true });
@@ -38,12 +46,6 @@ const runScheduledStripePaymentMaintenance = buildNonOverlappingRunner(
   runStripePaymentMaintenance,
   console,
 );
-const reservationReleaseTimer = setInterval(() => {
-  runScheduledStripePaymentMaintenance().catch((error) => {
-    console.error("Stripe payment maintenance failed", error);
-  });
-}, 60 * 1000);
-reservationReleaseTimer.unref();
 
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
@@ -71,11 +73,13 @@ app.use(`${prefix}`, routerUsers);
 app.use(`${prefix}`, routerProducts);
 app.use(`${prefix}`, routerCategory);
 app.use(`${prefix}`, routerStock);
+app.use(`${prefix}`, routerStockInventory);
 app.use(`${prefix}`, routerOrders);
 app.use(`${prefix}`, routerShop);
 app.use(`${prefix}`, routerPrinting);
 app.use(`${prefix}`, routerStripe.routers);
 app.use(`${prefix}`, routerCustomizations);
+app.use(`${prefix}`, routerServicePoints);
 app.get(`${prefix}/testapi`, (req, res) => {
   res.json({ success: true, message: "API redirigée correctement 👌" });
 });
@@ -83,6 +87,10 @@ console.log("Public Image Path:", envPUBLICIMAGEPATH);
 app.use(
   "/api/v1/imgproducts",
   express.static(path.join(envPUBLICIMAGEPATH, "products")),
+);
+app.use(
+  "/api/v1/imgcategories",
+  express.static(categoriesPath),
 );
 
 app.use(
@@ -93,6 +101,25 @@ app.use(
   "/api/v1/imgcustomizations",
   express.static(customizationChoicesPath),
 );
-app.listen(envPORT, "0.0.0.0" || 5005, () => {
-  console.log(`Server is running onn  http://localhosst:${envPORT || 5005}`);
+const startServer = async () => {
+  await waitForDatabase({
+    checkConnection: () => dbPool.query("SELECT 1"),
+    logger: console,
+  });
+
+  const reservationReleaseTimer = setInterval(() => {
+    runScheduledStripePaymentMaintenance().catch((error) => {
+      console.error("Stripe payment maintenance failed", error);
+    });
+  }, 60 * 1000);
+  reservationReleaseTimer.unref();
+
+  app.listen(envPORT, "0.0.0.0", () => {
+    console.log(`Server is running onn  http://localhosst:${envPORT || 5005}`);
+  });
+};
+
+startServer().catch((error) => {
+  console.error("Database startup failed:", error);
+  process.exitCode = 1;
 });

@@ -4232,7 +4232,7 @@ const runRefundControllerContract = async () => {
     getStripe: () => ({
       refunds: {
         create: async () => {
-          throw new Error("sk_test_must_not_be_exposed");
+          throw new Error("test_payment_key_must_not_be_exposed");
         },
       },
     }),
@@ -4478,7 +4478,7 @@ const runStripePaymentMaintenanceContracts = async () => {
     retrieve: async (paymentIntentId) => {
       if (paymentIntentId === "pi_retrieve_error") {
         const error = new Error("Stripe unavailable");
-        error.secret = "sk_test_must_not_be_logged";
+        error.secret = "test_payment_key_must_not_be_logged";
         throw error;
       }
       return {
@@ -4492,7 +4492,7 @@ const runStripePaymentMaintenanceContracts = async () => {
     cancel: async (paymentIntentId) => {
       if (paymentIntentId === "pi_cancel_error") {
         const error = new Error("Cancellation unavailable");
-        error.secret = "sk_test_must_not_be_logged";
+        error.secret = "test_payment_key_must_not_be_logged";
         throw error;
       }
       return { id: paymentIntentId, status: "canceled" };

@@ -4,6 +4,7 @@ const pool = require("../config/dbPool");
 const {
   buildCashRegisterArchiveFields,
 } = require("../helpers/cashRegisterPayment");
+const { calculateDiscount } = require("../helpers/discount");
 const { parseMoney } = require("../helpers/money");
 const { withTransaction } = require("../helpers/withTransaction");
 
@@ -13,6 +14,11 @@ const queryResult = async (connection, sql, params = []) => {
 };
 
 const archiveSqlRepository = {
+  lockShopForArchive: ({ shopId, connection }) => queryResult(
+    connection,
+    "SELECT id FROM shop WHERE id = ? FOR UPDATE",
+    [shopId],
+  ).then((rows) => rows[0] || null),
   findOrderForArchive: ({ orderId, shopId, connection }) => {
     const shopClause = shopId == null ? "" : " AND shopid = ?";
     const params = shopId == null ? [orderId] : [orderId, shopId];
@@ -161,8 +167,18 @@ const ARCHIVE_ORDER_FIELDS = [
   "customer",
   "phone",
   "customerID",
+  "service_point_id",
+  "order_source",
   "operator",
+  "taken_by_user_id",
+  "taken_by_name",
+  "prepared_by_user_id",
+  "prepared_by_name",
   "subtotal",
+  "subtotal_before_discount",
+  "discount_type",
+  "discount_value",
+  "discount_amount",
   "payment",
   "status",
   "created",
@@ -180,6 +196,106 @@ const pickArchiveOrderFields = (order = {}) => ARCHIVE_ORDER_FIELDS.reduce(
   },
   {},
 );
+
+const cents = (value) => Math.round(Number(value || 0) * 100);
+
+const normalizeArchiveDiscount = (discount = {}) => {
+  if (discount.discountType === undefined && discount.discountValue === undefined) {
+    return null;
+  }
+
+  const type = discount.discountType == null || discount.discountType === ""
+    ? "none"
+    : String(discount.discountType).trim().toLowerCase();
+  if (!["none", "percent", "amount"].includes(type)) {
+    throw new Error("Type de remise invalide");
+  }
+
+  const value = discount.discountValue == null || discount.discountValue === ""
+    ? 0
+    : parseMoney(discount.discountValue);
+  if (value === null || value < 0 || (type === "percent" && value > 100)) {
+    throw new Error("Valeur de remise invalide");
+  }
+
+  return {
+    type: value > 0 ? type : "none",
+    value: value > 0 ? value : 0,
+  };
+};
+
+const applyArchiveDiscountToDetails = ({ order, orderDetails, discount }) => {
+  const requestedDiscount = normalizeArchiveDiscount(discount);
+  if (!requestedDiscount) {
+    return {
+      archiveDiscountFields: {
+        subtotal: parseMoney(order.subtotal),
+        subtotal_before_discount:
+          order.subtotal_before_discount == null
+            ? order.subtotal_before_discount
+            : parseMoney(order.subtotal_before_discount),
+        discount_type: order.discount_type || "none",
+        discount_value: parseMoney(order.discount_value) || 0,
+        discount_amount: parseMoney(order.discount_amount) || 0,
+      },
+      details: orderDetails,
+    };
+  }
+
+  const subtotalBeforeDiscount = orderDetails.reduce(
+    (sum, detail) => sum + (parseMoney(detail.total) || 0),
+    0,
+  );
+  const discountResult = calculateDiscount({
+    subtotal: subtotalBeforeDiscount,
+    type: requestedDiscount.type,
+    value: requestedDiscount.value,
+  });
+  const discountCents = cents(discountResult.amount);
+  const grossCents = orderDetails.reduce((sum, detail) => (
+    sum + cents(detail.total)
+  ), 0);
+  let remainingDiscount = discountCents;
+  const details = orderDetails.map((detail, index) => {
+    if (discountCents <= 0 || grossCents <= 0) return detail;
+    const lineCents = cents(detail.total);
+    const lineDiscount = index === orderDetails.length - 1
+      ? remainingDiscount
+      : Math.min(lineCents, Math.round((discountCents * lineCents) / grossCents));
+    remainingDiscount -= lineDiscount;
+    const discountedCents = lineCents - lineDiscount;
+    const vatRate = Number(detail.vat_rate);
+    if (!Number.isFinite(vatRate)) {
+      return {
+        ...detail,
+        total: Number((discountedCents / 100).toFixed(2)),
+      };
+    }
+    const quantity = Number(detail.qty) || 1;
+    const divisor = 10000 + Math.round(vatRate * 100);
+    const totalHtCents = Math.round((discountedCents * 10000) / divisor);
+    const totalVat = Number(((discountedCents - totalHtCents) / 100).toFixed(2));
+    return {
+      ...detail,
+      total: Number((discountedCents / 100).toFixed(2)),
+      unit_price_ht: Number((totalHtCents / 100 / quantity).toFixed(2)),
+      unit_vat: Number((totalVat / quantity).toFixed(2)),
+      total_ht: Number((totalHtCents / 100).toFixed(2)),
+      total_vat: totalVat,
+    };
+  });
+
+  return {
+    archiveDiscountFields: {
+      subtotal: discountResult.total,
+      subtotal_before_discount: Number(subtotalBeforeDiscount.toFixed(2)),
+      discount_type: discountResult.type,
+      discount_value: discountResult.value,
+      discount_amount: discountResult.amount,
+    },
+    details,
+  };
+};
 
 const mapSnapshotCustomization = (row) => ({
   product_customization_step_id: row.product_customization_step_id,
@@ -244,8 +360,11 @@ const buildOrderArchiveModule = ({
     });
   };
 
-  const mArchiveOrder = (id, paymentMethod, shopId) => runInTransaction(
+  const mArchiveOrder = (id, paymentMethod, shopId, discount = {}) => runInTransaction(
     async (connection) => {
+      if (shopId != null && repository.lockShopForArchive) {
+        await repository.lockShopForArchive({ shopId, connection });
+      }
       const order = await repository.findOrderForArchive({
         orderId: id,
         shopId,
@@ -253,22 +372,28 @@ const buildOrderArchiveModule = ({
       });
       if (!order) throw new Error("Commande introuvable");
 
+      const orderDetails = await repository.findOrderDetails({
+        orderId: id,
+        connection,
+      });
+      const discountApplication = applyArchiveDiscountToDetails({
+        order,
+        orderDetails,
+        discount,
+      });
       const archivePaymentFields = buildCashRegisterArchiveFields({
         order,
         paymentMethod,
       });
       const archive = {
         ...pickArchiveOrderFields(order),
+        ...discountApplication.archiveDiscountFields,
         ...archivePaymentFields,
         token: createToken(),
       };
       const archiveResult = await repository.insertArchive({ archive, connection });
       const archiveOrderId = archiveResult.insertId;
 
-      const orderDetails = await repository.findOrderDetails({
-        orderId: id,
-        connection,
-      });
       const detailIds = orderDetails.map((detail) => detail.id);
       const activeSnapshots = await repository.findActiveSnapshots({
         detailIds,
@@ -276,7 +401,7 @@ const buildOrderArchiveModule = ({
       });
       const snapshotsByDetail = groupBy(activeSnapshots, "orderdetail_id");
 
-      for (const detail of orderDetails) {
+      for (const detail of discountApplication.details) {
         const archiveDetailResult = await repository.insertArchiveDetail({
           detail: {
             orderId: archiveOrderId,
@@ -350,7 +475,18 @@ module.exports = {
   mAllOrder: (shopid) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        `SELECT orders.*, users.username FROM orders JOIN users ON orders.customerID = users.id WHERE orders.shopid = ? AND orders.status <> 0 ORDER BY orders.created DESC`,
+        `SELECT orders.*,
+                service_points.name AS service_point_name,
+                stock_reservations.stock_reservation_status
+         FROM orders
+         LEFT JOIN service_points ON service_points.id = orders.service_point_id
+         LEFT JOIN (
+           SELECT order_id, MAX(status) AS stock_reservation_status
+           FROM order_stock_reservations
+           GROUP BY order_id
+         ) stock_reservations ON stock_reservations.order_id = orders.id
+         WHERE orders.shopid = ? AND orders.status <> 0
+         ORDER BY orders.created DESC`,
         [shopid],
         (err, result) => {
           if (!err) {
@@ -378,11 +514,18 @@ module.exports = {
       });
     });
   },
-  mOrdersbyUserId: (userId) => {
+  mOrdersbyUserId: (servicePointId, shopid) => {
     return new Promise((resolve, reject) => {
-      // const query = `SELECT * FROM orders WHERE customerID = ${userId} ORDER BY orders.created DESC`;
-      const query = `SELECT orders.*, users.username FROM orders JOIN users ON orders.customerID = users.id WHERE orders.customerID =  ${userId} ORDER BY orders.created DESC`;
-      conn.query(query, (err, result) => {
+      const query = `SELECT orders.*, users.username
+        FROM orders
+        LEFT JOIN users ON orders.customerID = users.id
+        WHERE orders.shopid = ?
+          AND (
+            orders.service_point_id = ?
+            OR (orders.service_point_id IS NULL AND orders.customerID = ?)
+          )
+        ORDER BY orders.created DESC`;
+      conn.query(query, [shopid, servicePointId, servicePointId], (err, result) => {
         if (!err) {
           resolve(result);
         } else {
@@ -407,7 +550,7 @@ module.exports = {
   mDetailOrder: (id) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        `SELECT *, orders.id as id, orderdetail.id as orderDetailsId FROM orders LEFT JOIN orderdetail ON orders.id=orderdetail.orderId LEFT JOIN products ON orderdetail.productid=products.id WHERE orders.id='${id}' ORDER BY orders.created DESC`,
+        `SELECT *, orders.id as id, service_points.name AS service_point_name, orderdetail.id as orderDetailsId FROM orders LEFT JOIN orderdetail ON orders.id=orderdetail.orderId LEFT JOIN products ON orderdetail.productid=products.id LEFT JOIN service_points ON service_points.id=orders.service_point_id WHERE orders.id='${id}' ORDER BY orders.created DESC`,
         (err, result) => {
           if (!err) {
             const customizationPromises = [];
@@ -837,7 +980,11 @@ module.exports = {
   mAllArchivedOrders: (shopid) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        `SELECT archives.*, users.username FROM archives JOIN users ON archives.customerID = users.id WHERE archives.shopid = ? ORDER BY archives.created DESC`,
+        `SELECT archives.*, service_points.name AS service_point_name
+         FROM archives
+         LEFT JOIN service_points ON service_points.id = archives.service_point_id
+         WHERE archives.shopid = ?
+         ORDER BY archives.archived_at DESC, archives.id DESC`,
         [shopid],
         (err, result) => {
           if (!err) {
@@ -949,9 +1096,9 @@ module.exports = {
     return new Promise((resolve, reject) => {
       // Étape 1 : Récupérer les commandes archivées dans la plage de dates
       const query1 = `
-      SELECT archives.*, users.username 
+      SELECT archives.*, service_points.name AS service_point_name
       FROM archives 
-      JOIN users ON archives.customerID = users.id 
+      LEFT JOIN service_points ON service_points.id = archives.service_point_id
       WHERE archives.shopid = ? 
         AND DATE(archives.created) BETWEEN ? AND ? 
       ORDER BY archives.created DESC`;
@@ -1008,6 +1155,7 @@ module.exports = {
 
 const legacyAllArchivedOrdersWithDetails = module.exports.mAllArchivedOrdersWithDetails;
 module.exports.buildOrderArchiveModule = buildOrderArchiveModule;
+module.exports.pickArchiveOrderFields = pickArchiveOrderFields;
 module.exports.mArchiveOrder = orderArchiveModule.mArchiveOrder;
 module.exports.mDetailArchivedOrder = orderArchiveModule.mDetailArchivedOrder;
 module.exports.mDetailArchivedOrderByToken = orderArchiveModule.mDetailArchivedOrderByToken;

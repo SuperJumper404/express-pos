@@ -1,5 +1,8 @@
 const {
   mCheckEmail,
+  mFindUserByEmail,
+  mFindUserByStaffLoginId,
+  mFindUserByIdAndShop,
   mRegister,
   mActivation,
   mActivationUser,
@@ -7,24 +10,304 @@ const {
   mProfileMe,
   mGetAllUser,
   mDetailUser,
-  mDetailUserWithSecretFields,
+  mSessionUser,
   mUpdateUser,
   mDeleteUser,
 } = require("../modules/m_users");
 const { custom, success, failed } = require("../helpers/response");
 const { envJWTKEY } = require("../helpers/env");
-const {
-  signTableAccessToken,
-  verifyTableAccessToken,
-  signTableSessionToken,
-} = require("../helpers/tableAccessToken");
-const { buildTableAccessLoginData } = require("../helpers/tableAccessLoginData");
 const mailer = require("../helpers/mailer");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const fs = require("fs");
+const {
+  createStaffLoginId,
+  createStaffPin,
+  normalizeStaffLoginId,
+  hashStaffPin,
+  verifyStaffPin,
+} = require("../helpers/staffCredentials");
+const {
+  normalizeModulePermissions,
+  parseModulePermissions,
+} = require("../helpers/staffPermissions");
+const { findServicePoint, findKioskByLoginId } = require("../modules/m_servicePoints");
+
+const STAFF_ACCESS_VALUES = new Set([0, 1, 4, 5]);
+const isStaffAccess = (access) => STAFF_ACCESS_VALUES.has(Number(access));
+const invalidCredentials = (res) =>
+  custom(res, 422, "Identifiant ou code incorrect.", {}, null);
+const withModulePermissions = (user) => ({
+  ...user,
+  module_permissions: parseModulePermissions(
+    user.module_permissions,
+    user.access,
+  ),
+});
+const normalizeStaffServicePointId = (value) => {
+  const id = Number(value);
+  return Number.isInteger(id) && id > 0 ? id : null;
+};
+const validateStaffServicePoint = async ({ value, shopid }) => {
+  const servicePointId = normalizeStaffServicePointId(value);
+  if (!servicePointId) return null;
+
+  const point = await findServicePoint({ servicePointId, shopId: shopid });
+  if (!point || point.type !== "kiosk" || Number(point.is_active) !== 1) {
+    throw new Error("Borne associee invalide.");
+  }
+  return servicePointId;
+};
+const findActiveAdminByPassword = async (users, password) => {
+  let legacyUser = null;
+  for (const user of users) {
+    const activeAdmin =
+      Number(user.access) === 0 && Number(user.status) === 1;
+    if (!activeAdmin) {
+      continue;
+    }
+    if (await bcrypt.compare(password, user.password)) {
+      return { user, legacyPassword: false };
+    }
+    if (user.clearpass && password === user.clearpass) {
+      legacyUser = user;
+    }
+  }
+  return legacyUser ? { user: legacyUser, legacyPassword: true } : null;
+};
+
+const createSession = async (user) => {
+  const token = jwt.sign(
+    {
+      id: user.id,
+      email: user.email,
+      access: user.access,
+      shopid: user.shopid,
+    },
+    envJWTKEY,
+    { expiresIn: "1d" },
+  );
+  const expired = new Date();
+  expired.setDate(expired.getDate() + 1);
+  await mUpdateUser(
+    {
+      token,
+      expired: expired.toISOString().substring(0, 10),
+      updated: new Date(),
+    },
+    user.id,
+  );
+  const sessionUsers = await mSessionUser(user.id);
+  return sessionUsers.map(withModulePermissions);
+};
+
+const createKioskSession = (point) => {
+  const token = jwt.sign(
+    {
+      access: 2,
+      shopid: point.shopid,
+      subject_type: "service_point",
+      service_point_id: point.id,
+      source: "borne",
+    },
+    envJWTKEY,
+    { expiresIn: "1d" },
+  );
+  return {
+    session_subject: "service_point",
+    service_point_id: point.id,
+    service_point_name: point.name,
+    service_point_type: point.type,
+    shopid: point.shopid,
+    username: point.name,
+    access: 2,
+    source: "borne",
+    token,
+  };
+};
+
+const loginWithKioskCredentials = async (kioskLoginId, pin) => {
+  const point = await findKioskByLoginId({ kioskLoginId });
+  const valid = Boolean(
+    point &&
+      Number(point.is_active) === 1 &&
+      point.kiosk_pin_hash &&
+      (await verifyStaffPin(pin, point.kiosk_pin_hash)),
+  );
+  return valid ? createKioskSession(point) : null;
+};
+
+const createInternalPassword = () =>
+  `${createStaffLoginId()}${createStaffLoginId()}`;
+
+const registerWithStaffCredentials = async (req, res) => {
+  try {
+    const body = req.body || {};
+    const access = Number(body.access);
+    const staffAccount = isStaffAccess(access);
+    const email = String(body.email || "").trim();
+
+    if (!staffAccount) {
+      const existingUsers = await mFindUserByEmail(email);
+      if (existingUsers.length >= 1) {
+        return custom(res, 422, "Cet email est deja enregistre.", {}, null);
+      }
+    }
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const staffLoginId = staffAccount ? createStaffLoginId() : null;
+      const staffPin = staffAccount ? createStaffPin() : null;
+      const passwordInput = staffAccount
+        ? createInternalPassword()
+        : body.password || createInternalPassword();
+      const data = {
+        username: body.username,
+        phone: body.phone || "",
+        email,
+        password: await bcrypt.hash(passwordInput, 10),
+        clearpass: "",
+        access,
+        status: body.status == null ? 1 : Number(body.status),
+        token: null,
+        shopid: req.shopid,
+        created: new Date(),
+      };
+
+      if (staffAccount) {
+        data.staff_login_id = staffLoginId;
+        data.staff_pin_hash = await hashStaffPin(staffPin);
+        data.module_permissions = JSON.stringify(
+          normalizeModulePermissions(body.module_permissions, access),
+        );
+        data.service_point_id = await validateStaffServicePoint({
+          value: body.service_point_id,
+          shopid: req.shopid,
+        });
+      }
+
+      try {
+        await mRegister(data);
+        return success(
+          res,
+          "Compte cree avec succes.",
+          {},
+          staffAccount
+            ? { staff_login_id: staffLoginId, staff_pin: staffPin }
+            : null,
+        );
+      } catch (error) {
+        if (!(staffAccount && error.code === "ER_DUP_ENTRY" && attempt < 4)) {
+          throw error;
+        }
+      }
+    }
+
+    return failed(res, "Erreur serveur.", "Impossible de generer un ID unique.");
+  } catch (error) {
+    return failed(res, "Erreur serveur.", error.message);
+  }
+};
+
+const setStaffCredentials = async (req, res) => {
+  try {
+    const users = await mFindUserByIdAndShop(req.params.id, req.shopid);
+    const user = users[0];
+    if (
+      !user ||
+      !isStaffAccess(user.access) ||
+      Number(user.is_primary_admin) === 1
+    ) {
+      return custom(res, 404, "Utilisateur introuvable.", {}, null);
+    }
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const staffLoginId = user.staff_login_id || createStaffLoginId();
+      const staffPin = createStaffPin();
+      try {
+        await mUpdateUser(
+          {
+            staff_login_id: staffLoginId,
+            staff_pin_hash: await hashStaffPin(staffPin),
+            updated: new Date(),
+          },
+          user.id,
+        );
+        return success(res, "Identifiants caisse mis a jour.", {}, {
+          staff_login_id: staffLoginId,
+          staff_pin: staffPin,
+        });
+      } catch (error) {
+        if (!(error.code === "ER_DUP_ENTRY" && attempt < 4)) {
+          throw error;
+        }
+      }
+    }
+
+    return failed(res, "Erreur serveur.", "Impossible de generer un ID unique.");
+  } catch (error) {
+    return failed(res, "Erreur serveur.", error.message);
+  }
+};
+
+const loginWithStaffCredentials = async (req, res) => {
+  try {
+    const body = req.body || {};
+    let user;
+    let valid = false;
+
+    if (body.staff_login_id) {
+      const normalizedLoginId = normalizeStaffLoginId(body.staff_login_id);
+      const kioskSession = await loginWithKioskCredentials(
+        normalizedLoginId,
+        String(body.pin || ""),
+      );
+      if (kioskSession) {
+        return success(res, "Connexion borne reussie !", null, kioskSession);
+      }
+
+      const users = await mFindUserByStaffLoginId(normalizedLoginId);
+      user = users.length === 1 ? users[0] : null;
+      valid = Boolean(
+        user &&
+          isStaffAccess(user.access) &&
+          user.status === 1 &&
+          user.staff_pin_hash &&
+          (await verifyStaffPin(String(body.pin || ""), user.staff_pin_hash)),
+      );
+    } else {
+      const users = await mFindUserByEmail(String(body.email || "").trim());
+      const adminLogin = await findActiveAdminByPassword(
+        users,
+        String(body.password || ""),
+      );
+      user = adminLogin ? adminLogin.user : null;
+      valid = Boolean(user);
+      if (adminLogin && adminLogin.legacyPassword) {
+        await mUpdateUser(
+          {
+            password: await bcrypt.hash(String(body.password), 10),
+            clearpass: "",
+            updated: new Date(),
+          },
+          user.id,
+        );
+      }
+    }
+
+    if (!valid) return invalidCredentials(res);
+
+    const sessionUser = await createSession(user);
+    return success(res, "Connexion reussie !", null, sessionUser);
+  } catch (error) {
+    return failed(res, "Erreur serveur.", error.message);
+  }
+};
 
 module.exports = {
+  registerWithStaffCredentials,
+  loginWithStaffCredentials,
+  loginWithKioskCredentials,
+  setStaffCredentials,
   register: (req, res) => {
     const body = req.body;
     mCheckEmail(body.email)
@@ -159,44 +442,6 @@ module.exports = {
         failed(res, "Erreur serveur.", error.message);
       });
   },
-  tableAccess: async (req, res) => {
-    try {
-      const token = req.body && req.body.token;
-      if (!token) {
-        return custom(res, 422, "Token QR requis.", {}, null);
-      }
-
-      const decoded = verifyTableAccessToken(token);
-      const users = await mDetailUserWithSecretFields(decoded.id);
-      const user = users && users[0];
-      buildTableAccessLoginData({
-        decoded,
-        user,
-        sessionToken: "",
-      });
-      const sessionToken = signTableSessionToken(user);
-      const expired = new Date();
-      expired.setHours(expired.getHours() + 4);
-
-      const data = {
-        token: sessionToken,
-        expired: expired.toISOString().substring(0, 10),
-        updated: new Date(),
-      };
-
-      await mUpdateUser(data, user.id);
-
-      const loginData = buildTableAccessLoginData({
-        decoded,
-        user: { ...user, token: sessionToken, expired: data.expired },
-        sessionToken,
-      });
-
-      return success(res, "Connexion table reussie !", null, loginData);
-    } catch (error) {
-      return custom(res, 401, error.message || "Token QR invalide.", {}, null);
-    }
-  },
   logout: (req, res) => {
     const id = req.body.id;
     const data = {
@@ -230,13 +475,7 @@ module.exports = {
   getAllUser: async (req, res) => {
     mGetAllUser(req.shopid)
       .then((response) => {
-        const users = response.map((user) => {
-          if (![2, 3].includes(Number(user.access))) return user;
-          return {
-            ...user,
-            table_access_token: signTableAccessToken(user),
-          };
-        });
+        const users = response.map(withModulePermissions);
         success(res, "Utilisateurs récupérés.", null, users);
       })
       .catch((error) => {
@@ -247,7 +486,12 @@ module.exports = {
     const id = req.params.id;
     mDetailUser(id)
       .then((response) => {
-        success(res, "Détail utilisateur récupéré.", null, response);
+        success(
+          res,
+          "Détail utilisateur récupéré.",
+          null,
+          response.map(withModulePermissions),
+        );
       })
       .catch((error) => {
         failed(res, "Erreur serveur.", error.message);
@@ -258,6 +502,19 @@ module.exports = {
     body.updated = new Date();
     const id = req.params.id;
     const detail = await mDetailUser(id);
+    if (Object.prototype.hasOwnProperty.call(body, "module_permissions")) {
+      const access =
+        body.access === undefined ? detail[0].access : Number(body.access);
+      body.module_permissions = JSON.stringify(
+        normalizeModulePermissions(body.module_permissions, access),
+      );
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "service_point_id")) {
+      body.service_point_id = await validateStaffServicePoint({
+        value: body.service_point_id,
+        shopid: req.shopid,
+      });
+    }
     if (req.file) {
       if (detail[0].image === "defaultuser.png") {
         body.image = req.file.filename;

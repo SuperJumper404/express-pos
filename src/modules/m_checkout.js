@@ -6,12 +6,16 @@ const { custom } = require("../helpers/response");
 const { withTransaction } = require("../helpers/withTransaction");
 const { validateConfiguredItem } = require("../helpers/customizationRules");
 const { buildStockRequirements } = require("../helpers/stockRequirements");
+const { isStockTrackedProduct } = require("../helpers/stockInventory");
+const { adjustProductStock } = require("../helpers/productStockMutation");
+const { isOrderTakerAccess } = require("../helpers/staffAccess");
 const { nextReservationStatus } = require("../helpers/reservationLifecycle");
 const { envSTRIPESTOCKRESERVATIONMINUTES } = require("../helpers/env");
 const {
   getResolvedProductConfigurations,
 } = require("./m_customizations");
 const { buildOrderQuoteModule } = require("./m_orderQuote");
+const { calculateDiscount } = require("../helpers/discount");
 
 const RESERVATION_TTL_MS = envSTRIPESTOCKRESERVATIONMINUTES * 60 * 1000;
 
@@ -48,6 +52,8 @@ const canonicalPayload = (input) => {
   ));
   const customer = input.customer || {};
   return stableValue({
+    service_point_id: input.servicePointId == null ? null : Number(input.servicePointId),
+    order_source: input.orderSource || "pos",
     customer: {
       id: Number(customer.id),
       name: typeof customer.name === "string" ? customer.name.trim() : customer.name,
@@ -55,6 +61,8 @@ const canonicalPayload = (input) => {
       remark: customer.remark == null ? null : String(customer.remark).trim(),
     },
     expected_total: parseMoney(input.expectedTotal),
+    discount_type: input.discountType || "none",
+    discount_value: parseMoney(input.discountValue) || 0,
     is_takeaway: input.isTakeaway === true,
     items,
     payment_mode: typeof input.paymentMode === "string"
@@ -67,6 +75,38 @@ const canonicalPayloadHash = (input) => crypto
   .createHash("sha256")
   .update(JSON.stringify(canonicalPayload(input)))
   .digest("hex");
+
+const COUNTER_PAY_BEFORE_PREFIX = "counter_pay_before:";
+
+const resolveCheckoutPaymentState = (paymentMode) => {
+  const normalizedPaymentMode = typeof paymentMode === "string"
+    ? paymentMode.trim()
+    : "";
+  const comparablePaymentMode = normalizedPaymentMode.toLowerCase();
+
+  if (comparablePaymentMode === "stripe") {
+    return {
+      payment: "stripe",
+      payment_status: "requires_payment",
+      payment_provider: "stripe",
+    };
+  }
+
+  if (comparablePaymentMode.startsWith(COUNTER_PAY_BEFORE_PREFIX)) {
+    const method = normalizedPaymentMode.slice(COUNTER_PAY_BEFORE_PREFIX.length).trim();
+    return {
+      payment: method || "Caisse",
+      payment_status: "paid",
+      payment_provider: "counter",
+    };
+  }
+
+  return {
+    payment: comparablePaymentMode,
+    payment_status: "unpaid",
+    payment_provider: null,
+  };
+};
 
 const invalidRequest = (field) => new DomainError(
   400,
@@ -125,8 +165,17 @@ const normalizeCheckoutRequestBody = (body = {}, { paymentModeOverride } = {}) =
 
   return {
     customer,
+    ...(body.service_point_id === undefined
+      ? {}
+      : { servicePointId: body.service_point_id }),
     items,
     expectedTotal: body.expected_total,
+    ...(body.discount_type === undefined
+      ? {}
+      : { discountType: body.discount_type }),
+    ...(body.discount_value === undefined
+      ? {}
+      : { discountValue: body.discount_value }),
     isTakeaway: normalizeBoolean(body.is_takeaway, "is_takeaway"),
     clientOrderToken: body.client_order_token,
     paymentMode: paymentModeOverride !== undefined
@@ -137,9 +186,29 @@ const normalizeCheckoutRequestBody = (body = {}, { paymentModeOverride } = {}) =
 
 const validateCheckoutInput = (input = {}) => {
   if (!isPositiveId(input.shopId)) throw invalidRequest("shop_id");
-  if (!isPositiveId(input.actorId)) throw invalidRequest("actor_id");
+  const publicServicePointSession = input.sessionSubject === "service_point";
+  if (!publicServicePointSession && !isPositiveId(input.actorId)) {
+    throw invalidRequest("actor_id");
+  }
+  if (publicServicePointSession && !isPositiveId(input.servicePointId)) {
+    throw invalidRequest("service_point_id");
+  }
+  if (
+    input.servicePointId !== undefined &&
+    input.servicePointId !== null &&
+    !isPositiveId(input.servicePointId)
+  ) {
+    throw invalidRequest("service_point_id");
+  }
   if (!input.customer || typeof input.customer !== "object") throw invalidRequest("customer");
-  if (!isPositiveId(input.customer.id)) throw invalidRequest("customer.id");
+  if (
+    input.customer.id !== undefined &&
+    input.customer.id !== null &&
+    input.customer.id !== "" &&
+    !isPositiveId(input.customer.id)
+  ) {
+    throw invalidRequest("customer.id");
+  }
   if (typeof input.customer.name !== "string" || !input.customer.name.trim()) {
     throw invalidRequest("customer.name");
   }
@@ -161,6 +230,19 @@ const validateCheckoutInput = (input = {}) => {
 
   const expectedTotal = parseMoney(input.expectedTotal);
   if (expectedTotal === null || expectedTotal < 0) throw invalidRequest("expected_total");
+  const discountType = input.discountType == null || input.discountType === ""
+    ? "none"
+    : String(input.discountType).trim().toLowerCase();
+  if (!["none", "percent", "amount"].includes(discountType)) {
+    throw invalidRequest("discount_type");
+  }
+  const discountValue = input.discountValue == null || input.discountValue === ""
+    ? 0
+    : parseMoney(input.discountValue);
+  if (discountValue === null || discountValue < 0
+    || (discountType === "percent" && discountValue > 100)) {
+    throw invalidRequest("discount_value");
+  }
   if (typeof input.clientOrderToken !== "string"
     || !input.clientOrderToken.trim()
     || input.clientOrderToken.trim().length > 64) {
@@ -173,15 +255,22 @@ const validateCheckoutInput = (input = {}) => {
 
   return {
     shopId: Number(input.shopId),
-    actorId: Number(input.actorId),
+    actorId: publicServicePointSession ? null : Number(input.actorId),
+    sessionSubject: publicServicePointSession ? "service_point" : "staff",
+    servicePointId: input.servicePointId == null ? null : Number(input.servicePointId),
+    orderSource: publicServicePointSession ? input.orderSource : "pos",
     customer: {
-      id: Number(input.customer.id),
+      id: input.customer.id == null || input.customer.id === ""
+        ? 0
+        : Number(input.customer.id),
       name: input.customer.name.trim(),
       phone: input.customer.phone == null ? null : String(input.customer.phone).trim(),
       remark: input.customer.remark == null ? null : String(input.customer.remark).trim(),
     },
     items,
     expectedTotal,
+    discountType: discountValue > 0 ? discountType : "none",
+    discountValue: discountValue > 0 ? discountValue : 0,
     isTakeaway,
     clientOrderToken: input.clientOrderToken.trim(),
     paymentMode: input.paymentMode.trim().toLowerCase(),
@@ -194,6 +283,33 @@ const queryResult = async (connection, sql, params = []) => {
 };
 
 const sqlRepository = {
+  findUserById: ({ userId, shopId, connection }) => queryResult(
+    connection,
+    `SELECT id, shopid, username, access
+     FROM users
+     WHERE id = ? AND shopid = ?
+     LIMIT 1`,
+    [userId, shopId],
+  ).then((rows) => rows[0] || null),
+
+  findServicePoint: ({ servicePointId, shopId, connection }) => queryResult(
+    connection,
+    `SELECT id, shopid, name, type, system_key, is_active
+     FROM service_points
+     WHERE id = ? AND shopid = ?
+     LIMIT 1`,
+    [servicePointId, shopId],
+  ).then((rows) => rows[0] || null),
+
+  findSystemPoint: ({ shopId, systemKey, connection }) => queryResult(
+    connection,
+    `SELECT id, shopid, name, type, system_key, is_active
+     FROM service_points
+     WHERE shopid = ? AND system_key = ?
+     LIMIT 1`,
+    [shopId, systemKey],
+  ).then((rows) => rows[0] || null),
+
   findOrderByToken: ({ shopId, token, connection }) => queryResult(
     connection,
     `SELECT id, shopid, subtotal, payment_status, client_order_payload_hash
@@ -205,7 +321,8 @@ const sqlRepository = {
 
   getProducts: ({ shopId, productIds, connection }) => queryResult(
     connection,
-    `SELECT id, shopid, name, price, stock, archived, is_hidden
+    `SELECT id, shopid, name, price, vat_rate, vat_rate_dine_in, vat_rate_takeaway,
+            stock, track_stock, archived, is_hidden
      FROM products
      WHERE shopid = ? AND id IN (?)
      ORDER BY id`,
@@ -265,7 +382,7 @@ const sqlRepository = {
     const params = shopId == null ? [productIds] : [productIds, shopId];
     return queryResult(
       connection,
-      `SELECT id, shopid, stock
+      `SELECT id, shopid, stock, track_stock, stock_zero_behavior
        FROM products
        WHERE id IN (?)${shopClause}
        ORDER BY id
@@ -274,20 +391,15 @@ const sqlRepository = {
     );
   },
 
-  adjustStock: ({ shopId, productId, delta, connection }) => {
-    const shopClause = shopId == null ? "" : " AND shopid = ?";
-    const shortageClause = delta < 0 ? " AND stock >= ?" : "";
-    const params = [delta, productId];
-    if (shopId != null) params.push(shopId);
-    if (delta < 0) params.push(-delta);
-    return queryResult(
-      connection,
-      `UPDATE products
-       SET stock = stock + ?
-       WHERE id = ?${shopClause}${shortageClause}`,
-      params,
-    );
-  },
+  adjustStock: ({
+    shopId, productId, delta, allowShortage, connection,
+  }) => adjustProductStock({
+    query: (sql, params) => queryResult(connection, sql, params),
+    shopId,
+    productId,
+    delta,
+    allowShortage,
+  }),
 
   insertOrder: ({ order, connection }) => queryResult(
     connection,
@@ -337,6 +449,44 @@ const replayResult = (order) => ({
   idempotent_replay: true,
   payment_status: order.payment_status,
 });
+
+const applyDiscountToItems = (items, discountAmount) => {
+  const discountCents = Math.round(Number(discountAmount || 0) * 100);
+  if (discountCents <= 0) return items.map((item) => ({
+    ...item,
+    discountedTotal: item.lineTotal,
+    discountAmount: 0,
+  }));
+
+  const grossCents = items.reduce((sum, item) => sum + cents(item.lineTotal), 0);
+  let remainingDiscount = discountCents;
+  return items.map((item, index) => {
+    const lineCents = cents(item.lineTotal);
+    const lineDiscount = index === items.length - 1
+      ? remainingDiscount
+      : Math.min(
+        lineCents,
+        Math.round((discountCents * lineCents) / grossCents),
+      );
+    remainingDiscount -= lineDiscount;
+    const discountedCents = lineCents - lineDiscount;
+    const rate = Number(item.vatRate);
+    const divisor = 10000 + Math.round(rate * 100);
+    const totalHtCents = Math.round((discountedCents * 10000) / divisor);
+    const unitPriceHt = Number((totalHtCents / 100 / item.quantity).toFixed(2));
+    const totalHt = Number((totalHtCents / 100).toFixed(2));
+    const totalVat = Number(((discountedCents - totalHtCents) / 100).toFixed(2));
+    return {
+      ...item,
+      discountedTotal: Number((discountedCents / 100).toFixed(2)),
+      discountAmount: Number((lineDiscount / 100).toFixed(2)),
+      unitPriceHt,
+      unitVat: Number((totalVat / item.quantity).toFixed(2)),
+      totalHt,
+      totalVat,
+    };
+  });
+};
 const isDuplicateKeyError = (error) => error && (
   error.code === "ER_DUP_ENTRY" || error.errno === 1062
 );
@@ -346,11 +496,17 @@ const buildCheckoutController = ({ checkout, logger = console }) => async (req, 
 
   try {
     const normalized = normalizeCheckoutRequestBody(body);
-    const result = await checkout.createCheckout({
+    const checkoutInput = {
       shopId: req.shopid,
       actorId: req.id,
       ...normalized,
-    });
+    };
+    if (req.sessionSubject === "service_point") {
+      checkoutInput.sessionSubject = "service_point";
+      checkoutInput.servicePointId = req.servicePointId;
+      checkoutInput.orderSource = req.orderSource;
+    }
+    const result = await checkout.createCheckout(checkoutInput);
     return custom(
       res,
       result.idempotent_replay ? 200 : 201,
@@ -431,7 +587,7 @@ const buildCheckoutModule = ({
     if (!Object.prototype.hasOwnProperty.call({ commit: true, release: true }, action)) {
       return Promise.reject(invalidRequest("status"));
     }
-    if (action === "commit" && !isPositiveId(operator)) {
+    if (action === "commit" && !isPositiveId(operator) && Number(operator) !== 0) {
       return Promise.reject(invalidRequest("operator"));
     }
 
@@ -482,10 +638,18 @@ const buildCheckoutModule = ({
           productIds,
           connection,
         });
+        const trackedRequirements = requirements.filter((requirement) => {
+          const product = findById(products, requirement.productId);
+          return product && isStockTrackedProduct(product);
+        });
         const shortages = requirements.reduce((result, requirement) => {
           const product = findById(products, requirement.productId);
           const available = product ? Number(product.stock) : 0;
-          if (!product || available < requirement.quantity) {
+          if (!product || (
+            isStockTrackedProduct(product)
+            && product.stock_zero_behavior !== "warn"
+            && available < requirement.quantity
+          )) {
             result.push({
               product_id: requirement.productId,
               requested: requirement.quantity,
@@ -501,11 +665,13 @@ const buildCheckoutModule = ({
         }
 
         const timestamp = formatDate(now());
-        for (const requirement of requirements) {
+        for (const requirement of trackedRequirements) {
+          const product = findById(products, requirement.productId);
           const stockUpdate = await repository.adjustStock({
             shopId: order.shopid,
             productId: requirement.productId,
             delta: -requirement.quantity,
+            allowShortage: product.stock_zero_behavior === "warn",
             connection,
           });
           if (!stockUpdate.affectedRows) {
@@ -620,14 +786,41 @@ const buildCheckoutModule = ({
 
       const {
         resolvedItems,
-        total,
-        serverQuote,
+        total: subtotalBeforeDiscount,
+        serverQuote: quote,
         requirements,
       } = await quoteOrderItems({
         shopId: checkout.shopId,
         items: checkout.items,
+        isTakeaway: checkout.isTakeaway,
         connection,
       });
+      const discount = calculateDiscount({
+        subtotal: subtotalBeforeDiscount,
+        type: checkout.discountType,
+        value: checkout.discountValue,
+      });
+      const discountedItems = applyDiscountToItems(
+        resolvedItems,
+        discount.amount,
+      );
+      const total = discount.total;
+      const serverQuote = {
+        ...quote,
+        total,
+        subtotal_before_discount: subtotalBeforeDiscount,
+        discount_type: discount.type,
+        discount_value: discount.value,
+        discount_amount: discount.amount,
+        items: discountedItems.map((item, itemIndex) => ({
+          ...quote.items[itemIndex],
+          total: item.discountedTotal,
+          total_ht: item.totalHt,
+          total_vat: item.totalVat,
+          unit_price_ht: item.unitPriceHt,
+          unit_vat: item.unitVat,
+        })),
+      };
       if (cents(total) !== cents(checkout.expectedTotal)) {
         throw new DomainError(
           409,
@@ -639,8 +832,47 @@ const buildCheckoutModule = ({
 
       const timestampDate = now();
       const timestamp = formatDate(timestampDate);
-      const stripe = checkout.paymentMode === "stripe";
-      const paymentStatus = stripe ? "requires_payment" : "unpaid";
+      const paymentState = resolveCheckoutPaymentState(checkout.paymentMode);
+      const stripe = paymentState.payment_provider === "stripe";
+      const actor = checkout.actorId && typeof repository.findUserById === "function"
+        ? await repository.findUserById({
+          userId: checkout.actorId,
+          shopId: checkout.shopId,
+          connection,
+        })
+        : null;
+      const takenBy = actor && isOrderTakerAccess(actor.access)
+        ? { id: Number(actor.id), name: actor.username }
+        : { id: null, name: null };
+      const servicePoint = checkout.sessionSubject === "service_point"
+        ? await repository.findServicePoint({
+          servicePointId: checkout.servicePointId,
+          shopId: checkout.shopId,
+          connection,
+        })
+        : checkout.servicePointId
+          ? await repository.findServicePoint({
+            servicePointId: checkout.servicePointId,
+            shopId: checkout.shopId,
+            connection,
+          })
+          : await repository.findSystemPoint({
+            shopId: checkout.shopId,
+            systemKey: "counter",
+            connection,
+          });
+      const validPublicPoint = checkout.orderSource === "table_qr"
+        ? servicePoint && servicePoint.type === "table"
+        : checkout.orderSource === "web"
+          ? servicePoint && servicePoint.type === "click_collect"
+          : true;
+      if (!servicePoint || Number(servicePoint.is_active) !== 1 || !validPublicPoint) {
+        throw new DomainError(
+          422,
+          "SERVICE_POINT_INVALID",
+          "Point de service indisponible.",
+        );
+      }
       const orderResult = await repository.insertOrder({
         order: {
           shopid: checkout.shopId,
@@ -648,11 +880,19 @@ const buildCheckoutModule = ({
           customer: checkout.customer.name,
           phone: checkout.customer.phone,
           customerID: checkout.customer.id,
-          operator: checkout.actorId,
+          service_point_id: servicePoint.id,
+          order_source: checkout.orderSource,
+          operator: checkout.actorId || 0,
+          taken_by_user_id: takenBy.id,
+          taken_by_name: takenBy.name,
           subtotal: total,
-          payment: checkout.paymentMode,
-          payment_status: paymentStatus,
-          payment_provider: stripe ? "stripe" : null,
+          subtotal_before_discount: subtotalBeforeDiscount,
+          discount_type: discount.type,
+          discount_value: discount.value,
+          discount_amount: discount.amount,
+          payment: paymentState.payment,
+          payment_status: paymentState.payment_status,
+          payment_provider: paymentState.payment_provider,
           status: 1,
           created: timestamp,
           finished: timestamp,
@@ -677,7 +917,7 @@ const buildCheckoutModule = ({
         const row = findById(lockedProducts, productId);
         const requested = requirements.get(productId);
         const available = row ? Number(row.stock) : 0;
-        if (!row || available < requested) {
+        if (!row || (row.stock_zero_behavior !== "warn" && available < requested)) {
           result.push({ product_id: productId, requested, available });
         }
         return result;
@@ -688,10 +928,12 @@ const buildCheckoutModule = ({
 
       for (const productId of stockProductIds) {
         const quantity = requirements.get(productId);
+        const product = findById(lockedProducts, productId);
         const result = await repository.adjustStock({
           shopId: checkout.shopId,
           productId,
           delta: -quantity,
+          allowShortage: product && product.stock_zero_behavior === "warn",
           connection,
         });
         if (!result.affectedRows) {
@@ -701,14 +943,14 @@ const buildCheckoutModule = ({
         }
       }
 
-      for (const item of resolvedItems) {
+      for (const item of discountedItems) {
         const detailResult = await repository.insertOrderDetail({
           detail: {
             orderid: orderId,
             productid: item.productId,
             price: item.unitPrice,
             qty: item.quantity,
-            total: item.lineTotal,
+            total: item.discountedTotal,
             vat_rate: item.vatRate,
             unit_price_ht: item.unitPriceHt,
             unit_vat: item.unitVat,
@@ -775,7 +1017,7 @@ const buildCheckoutModule = ({
         orderId,
         total,
         idempotent_replay: false,
-        payment_status: paymentStatus,
+        payment_status: paymentState.payment_status,
       };
     };
 
@@ -815,4 +1057,5 @@ module.exports = {
   finalizeReservations: checkoutModule.finalizeReservations,
   normalizeCheckoutRequestBody,
   releaseExpiredReservations: checkoutModule.releaseExpiredReservations,
+  resolveCheckoutPaymentState,
 };
