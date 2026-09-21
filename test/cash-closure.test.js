@@ -37,9 +37,8 @@ assert.deepStrictEqual(
 );
 
 assert.deepStrictEqual(buildPaymentSummary(orders), [
-  { payment: "Carte", orders_count: 1, total: 12.5 },
-  { payment: "Especes", orders_count: 1, total: 7.5 },
-  { payment: "Autres", orders_count: 1, total: 0 },
+  { payment: "Carte bancaire", orders_count: 2, total: 12.5 },
+  { payment: "Espèces", orders_count: 1, total: 7.5 },
 ]);
 
 assert.deepStrictEqual(
@@ -67,9 +66,8 @@ assert.deepStrictEqual(
     orders_count: 3,
     total_revenue: 20,
     payments_summary: [
-      { payment: "Carte", orders_count: 1, total: 12.5 },
-      { payment: "Especes", orders_count: 1, total: 7.5 },
-      { payment: "Autres", orders_count: 1, total: 0 },
+      { payment: "Carte bancaire", orders_count: 2, total: 12.5 },
+      { payment: "Espèces", orders_count: 1, total: 7.5 },
     ],
     vat_summary: [{ vat_rate: "20.00", total_ht: 10, total_vat: 2, total_ttc: 12 }],
   }
@@ -83,7 +81,7 @@ assert.deepStrictEqual(
         id: 30,
         archived_at: "2026-08-11 10:00:00.123925",
         subtotal: 9,
-        payment: "Carte",
+        payment: "Carte bancaire",
       },
       {
         id: 31,
@@ -100,7 +98,7 @@ assert.deepStrictEqual(
     closed_at: "2026-08-11 10:00:00.123950",
     orders_count: 1,
     total_revenue: 9,
-    payments_summary: [{ payment: "Carte", orders_count: 1, total: 9 }],
+    payments_summary: [{ payment: "Carte bancaire", orders_count: 1, total: 9 }],
     vat_summary: [],
   }
 );
@@ -131,7 +129,7 @@ assert.deepStrictEqual(
         created: "2026-08-11T09:00:00.000Z",
         archived_at: "2026-08-11T10:30:00.000Z",
         subtotal: 15,
-        payment: "Carte",
+        payment: "Carte bancaire",
       },
       {
         id: 21,
@@ -149,7 +147,7 @@ assert.deepStrictEqual(
     closed_at: "2026-08-11T11:00:00.000Z",
     orders_count: 1,
     total_revenue: 15,
-    payments_summary: [{ payment: "Carte", orders_count: 1, total: 15 }],
+    payments_summary: [{ payment: "Carte bancaire", orders_count: 1, total: 15 }],
     vat_summary: [],
   }
 );

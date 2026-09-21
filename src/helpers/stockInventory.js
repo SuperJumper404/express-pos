@@ -66,11 +66,10 @@ const calculateAverageUnitPrice = (movements) => {
   return Number((totals.total / totals.quantity).toFixed(2));
 };
 
-const isStockTrackedProduct = (product) => (
-  product.track_stock === undefined ||
-  product.track_stock === null ||
+const isStockTrackedProduct = (product = {}) => (
   product.track_stock === true ||
-  Number(product.track_stock) === 1
+  product.track_stock === 1 ||
+  product.track_stock === "1"
 );
 
 module.exports = {

@@ -1685,6 +1685,7 @@ const runSharedOrderQuoteContract = async () => {
           vat_rate_dine_in: 10,
           vat_rate_takeaway: 5.5,
           stock: 5,
+          track_stock: 1,
           archived: 0,
           is_hidden: 0,
         }];
@@ -1705,6 +1706,7 @@ const runSharedOrderQuoteContract = async () => {
         active: true,
         available: true,
         linked_product_id: 11,
+        linked_product_track_stock: 1,
       }],
     }]]]),
   });
@@ -1990,6 +1992,7 @@ const makeConcurrentClaimHarness = () => {
       name: "Last item",
       price: 10,
       stock,
+      track_stock: 1,
       archived: 0,
       is_hidden: 0,
     }],
@@ -1998,7 +2001,7 @@ const makeConcurrentClaimHarness = () => {
       lockCount += 1;
       events.push([connection.requestId, "lock-products"]);
       if (lockCount > 1) await winnerCommitted;
-      return [{ id: 10, stock }];
+      return [{ id: 10, stock, track_stock: 1 }];
     },
     adjustStock: async ({ delta }) => {
       stock += delta;
@@ -2125,6 +2128,20 @@ const runTransactionalCheckoutContracts = async () => {
     harness.getState().orders[0].taken_by_user_id,
     null,
     "a Table QR order must not receive a staff taker",
+  );
+
+  harness = makeCheckoutHarness({
+    product10TrackStock: 0,
+    product30TrackStock: 0,
+  });
+  await harness.checkout.createCheckout(harness.input);
+  assert.ok(
+    !harness.events.some((event) => (
+      Array.isArray(event)
+      && event[0] === "lock-products"
+      && event[1].length === 0
+    )),
+    "checkout must not lock an empty product list when stock tracking is disabled",
   );
 
   harness = makeCheckoutHarness();

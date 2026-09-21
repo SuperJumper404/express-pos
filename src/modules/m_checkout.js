@@ -16,6 +16,7 @@ const {
 } = require("./m_customizations");
 const { buildOrderQuoteModule } = require("./m_orderQuote");
 const { calculateDiscount } = require("../helpers/discount");
+const { normalizePaymentMethod } = require("../helpers/paymentMethod");
 
 const RESERVATION_TTL_MS = envSTRIPESTOCKRESERVATIONMINUTES * 60 * 1000;
 
@@ -86,7 +87,7 @@ const resolveCheckoutPaymentState = (paymentMode) => {
 
   if (comparablePaymentMode === "stripe") {
     return {
-      payment: "stripe",
+      payment: "Stripe",
       payment_status: "requires_payment",
       payment_provider: "stripe",
     };
@@ -95,14 +96,14 @@ const resolveCheckoutPaymentState = (paymentMode) => {
   if (comparablePaymentMode.startsWith(COUNTER_PAY_BEFORE_PREFIX)) {
     const method = normalizedPaymentMode.slice(COUNTER_PAY_BEFORE_PREFIX.length).trim();
     return {
-      payment: method || "Caisse",
+      payment: normalizePaymentMethod(method || "Carte bancaire"),
       payment_status: "paid",
       payment_provider: "counter",
     };
   }
 
   return {
-    payment: comparablePaymentMode,
+    payment: normalizePaymentMethod(comparablePaymentMode),
     payment_status: "unpaid",
     payment_provider: null,
   };
@@ -908,11 +909,13 @@ const buildCheckoutModule = ({
       await releaseExpiredReservations({ connection });
 
       const stockProductIds = uniqueSortedIds([...requirements.keys()]);
-      const lockedProducts = await repository.lockProducts({
-        shopId: checkout.shopId,
-        productIds: stockProductIds,
-        connection,
-      });
+      const lockedProducts = stockProductIds.length
+        ? await repository.lockProducts({
+          shopId: checkout.shopId,
+          productIds: stockProductIds,
+          connection,
+        })
+        : [];
       const shortages = stockProductIds.reduce((result, productId) => {
         const row = findById(lockedProducts, productId);
         const requested = requirements.get(productId);
@@ -1004,7 +1007,7 @@ const buildCheckoutModule = ({
         });
       }
 
-      if (!stripe) {
+      if (!stripe && stockProductIds.length) {
         await finalizeReservations({
           orderId,
           status: "commit",

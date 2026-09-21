@@ -6,6 +6,7 @@ const {
   getResolvedProductConfigurations,
   replaceProductConfiguration,
 } = require("./m_customizations");
+const { isStockTrackedProduct } = require("../helpers/stockInventory");
 
 const queryRows = async (connection, sql, params) => {
   const [rows] = await connection.query(sql, params);
@@ -243,7 +244,7 @@ const buildProductModule = ({
       LIMIT 12
     `, [shopId]);
     return products.filter((product) => {
-      const tracksStock = Number(product.track_stock) !== 0;
+      const tracksStock = isStockTrackedProduct(product);
       const blocksAtZero = (product.stock_zero_behavior || "block") === "block";
       return !(tracksStock && blocksAtZero && Number(product.stock) <= 0);
     });

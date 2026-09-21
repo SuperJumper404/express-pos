@@ -13,15 +13,16 @@ const bcrypt = require("bcrypt");
 const { normalizeQrPaymentMode } = require("../helpers/qrPaymentMode");
 const { normalizeCommissionPercent } = require("../helpers/stripePayment");
 const { normalizeDiscountPercentages } = require("../helpers/discount");
+const { normalizePaymentMethods } = require("../helpers/paymentMethod");
 const {
   DEFAULT_SHOP_THEME,
   normalizeShopTheme,
 } = require("../helpers/shopTheme");
 
 const DEFAULT_SHOP_PAYMENT_METHODS = [
-  "Tickets Restaurants",
-  "Cheques",
-  "Especes",
+  "Ticket restaurant",
+  "Chèque",
+  "Espèces",
 ];
 const DEFAULT_DISCOUNT_PERCENTAGES = [5, 10, 15, 20];
 
@@ -285,10 +286,10 @@ exports.updateShopInfo = async (req, res) => {
         parseStoredJson(shopInfo.shop_social_media, DEFAULT_SHOP_SOCIAL_MEDIA),
       ),
 
-      shop_payment_methods: prefer(
+      shop_payment_methods: normalizePaymentMethods(prefer(
         req.body.shop_payment_methods,
         parseStoredJson(shopInfo.shop_payment_methods, DEFAULT_SHOP_PAYMENT_METHODS),
-      ),
+      )),
       discount_percentages: normalizeDiscountPercentages(
         parseStoredJson(
           prefer(req.body.discount_percentages, shopInfo.discount_percentages),

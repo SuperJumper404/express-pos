@@ -43,11 +43,11 @@ assert.deepStrictEqual(
     paymentMethod: "Especes",
   }),
   {
-    payment: "Apple Pay",
+    payment: "Stripe",
     payment_status: "paid",
     payment_provider: "stripe",
     stripe_payment_intent_id: "pi_123",
-    used_payment_method: "Apple Pay",
+    used_payment_method: "Stripe",
   },
 );
 
@@ -72,18 +72,18 @@ assert.deepStrictEqual(
     paymentMethod: "Especes",
   }),
   {
-    payment: "Especes",
+    payment: "Espèces",
     payment_status: "paid",
     payment_provider: null,
     stripe_payment_intent_id: null,
-    used_payment_method: "Especes",
+    used_payment_method: "Espèces",
   },
 );
 
 assert.deepStrictEqual(
   buildCashRegisterCollectionFields("Especes"),
   {
-    payment: "Especes",
+    payment: "Espèces",
     payment_status: "paid",
     payment_provider: null,
     stripe_payment_intent_id: null,
@@ -99,11 +99,11 @@ assert.deepStrictEqual(
     paymentMethod: "Tickets Restaurants",
   }),
   {
-    payment: "Tickets Restaurants",
+    payment: "Ticket restaurant",
     payment_status: "paid",
     payment_provider: null,
     stripe_payment_intent_id: null,
-    used_payment_method: "Tickets Restaurants",
+    used_payment_method: "Ticket restaurant",
   },
 );
 
@@ -118,11 +118,11 @@ assert.deepStrictEqual(
     paymentMethod: "Cheques",
   }),
   {
-    payment: "Cheques",
+    payment: "Chèque",
     payment_status: "paid",
     payment_provider: null,
     stripe_payment_intent_id: null,
-    used_payment_method: "Cheques",
+    used_payment_method: "Chèque",
   },
 );
 
