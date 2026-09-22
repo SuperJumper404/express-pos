@@ -4,6 +4,7 @@ const moneyOrZero = (value) => {
 };
 
 const roundMoney = (value) => Number(moneyOrZero(value).toFixed(2));
+const { normalizePaymentMethod } = require("./paymentMethod");
 
 const TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z)?$/;
 
@@ -67,7 +68,10 @@ const buildPaymentSummary = (orders = []) => {
   const totals = new Map();
 
   orders.forEach((order) => {
-    const payment = String((order && order.payment) || "").trim() || "Autres";
+    const payment = normalizePaymentMethod(
+      order && order.payment,
+      order && order.payment_provider,
+    ) || "Carte bancaire";
     const current = totals.get(payment) || { payment, orders_count: 0, total: 0 };
     current.orders_count += 1;
     current.total = roundMoney(current.total + moneyOrZero(order && order.subtotal));

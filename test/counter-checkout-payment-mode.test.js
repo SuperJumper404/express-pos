@@ -4,13 +4,13 @@ const {
 } = require("../src/modules/m_checkout");
 
 assert.deepStrictEqual(resolveCheckoutPaymentState("stripe"), {
-  payment: "stripe",
+  payment: "Stripe",
   payment_status: "requires_payment",
   payment_provider: "stripe",
 });
 
 assert.deepStrictEqual(resolveCheckoutPaymentState("cash"), {
-  payment: "cash",
+  payment: "Espèces",
   payment_status: "unpaid",
   payment_provider: null,
 });

@@ -22,6 +22,7 @@ const { envJWTKEY } = require("../helpers/env");
 const { isMissing, parseMoney } = require("../helpers/money");
 const { calculateDiscount } = require("../helpers/discount");
 const { ORDER_STATUSES } = require("../helpers/orderStatus");
+const { normalizePaymentMethod } = require("../helpers/paymentMethod");
 const { buildOrderDetailStockEntry } = require("../helpers/orderDetailStock");
 const {
   buildCashRegisterCollectionFields,
@@ -235,7 +236,7 @@ exports.addOrder = async (req, res) => {
       customerID: body.customerID,
       operator: body.operator,
       subtotal,
-      payment: body.payment,
+      payment: normalizePaymentMethod(body.payment),
       remark: body.remark,
       phone: body.phone,
       status: body.status,
@@ -555,7 +556,7 @@ function getPaymentsSummary(orders) {
   let totalPayments = 0;
 
   for (const order of orders) {
-    const type = order.payment || "Autres";
+    const type = normalizePaymentMethod(order.payment, order.payment_provider);
     const montant = moneyOrZero(order.subtotal);
 
     if (!paymentTotals[type]) {

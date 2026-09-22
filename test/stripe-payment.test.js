@@ -232,6 +232,7 @@ const makeStripeLifecycleHarness = ({
     lockProducts: async ({ productIds }) => productIds.map((productId) => ({
       id: productId,
       stock: state.products.get(productId),
+      track_stock: 1,
     })),
     updateReservationStatus: async ({ reservationId, fromStatus, toStatus }) => {
       const reservation = state.reservations.find((row) => row.id === reservationId);
@@ -1895,11 +1896,11 @@ const runCashRegisterArchiveContract = async () => {
     order: syncedOrder,
     paymentMethod: "Carte",
   }), {
-    payment: "Carte",
+    payment: "Carte bancaire",
     payment_status: "paid",
     payment_provider: null,
     stripe_payment_intent_id: null,
-    used_payment_method: "Carte",
+    used_payment_method: "Carte bancaire",
   });
   const archivedOrders = [];
   const archiveModule = buildOrderArchiveModule({
@@ -1923,7 +1924,7 @@ const runCashRegisterArchiveContract = async () => {
   });
   await archiveModule.mArchiveOrder(42, "Carte", 7);
   assert.strictEqual(archivedOrders[0].payment_status, "paid");
-  assert.strictEqual(archivedOrders[0].payment, "Carte");
+  assert.strictEqual(archivedOrders[0].payment, "Carte bancaire");
   assert.strictEqual(harness.getState().reservations[0].status, "committed");
   assert.strictEqual(harness.getState().products.get(10), 8);
   assert.strictEqual(harness.getState().movements.length, 1);

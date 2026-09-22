@@ -460,10 +460,45 @@ const normalizeChoiceData = async ({ shopId, data, connection }) => {
   };
 };
 
-const createCustomizationChoice = async ({ shopId, stepId, data, connection }) => {
+const propagateChoiceToProductSteps = async ({
+  shopId,
+  stepId,
+  choiceId,
+  choice,
+  connection,
+}) => {
+  const productSteps = await queryRows(connection, `
+    SELECT product_step.id AS product_customization_step_id
+    FROM product_customization_steps product_step
+    JOIN products product ON product.id = product_step.product_id
+    WHERE product_step.step_id = ? AND product.shopid = ?
+  `, [stepId, shopId]);
+
+  for (const productStep of Array.isArray(productSteps) ? productSteps : []) {
+    await queryRows(connection, `
+      INSERT INTO product_customization_step_choices (
+        product_customization_step_id, step_choice_id, extra_price,
+        position, active
+      ) VALUES (?, ?, ?, ?, ?)
+    `, [
+      productStep.product_customization_step_id,
+      choiceId,
+      choice.default_extra_price == null ? 0 : choice.default_extra_price,
+      choice.default_position == null ? 0 : choice.default_position,
+      isDisabled(choice.active) ? 0 : 1,
+    ]);
+  }
+};
+
+const createCustomizationChoiceInConnection = async ({
+  shopId,
+  stepId,
+  data,
+  connection,
+}) => {
   await requireOwnedStep({ shopId, stepId, connection });
   const choice = await normalizeChoiceData({ shopId, data, connection });
-  return queryRows(connection, `
+  const result = await queryRows(connection, `
     INSERT INTO customization_step_choices (
       step_id, choice_type, name, image, linked_product_id,
       default_extra_price, default_position, active, created, updated
@@ -478,6 +513,31 @@ const createCustomizationChoice = async ({ shopId, stepId, data, connection }) =
     choice.default_position == null ? 0 : choice.default_position,
     isDisabled(choice.active) ? 0 : 1,
   ]);
+  await propagateChoiceToProductSteps({
+    shopId,
+    stepId,
+    choiceId: result.insertId,
+    choice,
+    connection,
+  });
+  return result;
+};
+
+const createCustomizationChoice = ({ shopId, stepId, data, connection }) => {
+  if (connection) {
+    return createCustomizationChoiceInConnection({
+      shopId,
+      stepId,
+      data,
+      connection,
+    });
+  }
+  return withTransaction((transactionConnection) => createCustomizationChoiceInConnection({
+    shopId,
+    stepId,
+    data,
+    connection: transactionConnection,
+  }));
 };
 
 const updateCustomizationChoice = async ({ shopId, choiceId, data, connection }) => {

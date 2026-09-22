@@ -43,6 +43,7 @@ assert.match(productsModuleSource, /si\.unit AS stock_unit/);
 assert.match(productsModuleSource, /si\.minimum_stock/);
 assert.match(productsModuleSource, /si\.target_stock/);
 assert.match(productsModuleSource, /data\.minimum_stock \?\? product\.minimum_stock \?\? 1/);
+assert.match(productsModuleSource, /isStockTrackedProduct\(product\)/);
 
 const { buildProductController } = require("../src/controllers/c_products");
 

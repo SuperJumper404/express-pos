@@ -52,5 +52,7 @@ assert.strictEqual(calculateAverageUnitPrice([]), null);
 assert.strictEqual(isStockTrackedProduct({ track_stock: 1 }), true);
 assert.strictEqual(isStockTrackedProduct({ track_stock: true }), true);
 assert.strictEqual(isStockTrackedProduct({ track_stock: 0 }), false);
+assert.strictEqual(isStockTrackedProduct({}), false);
+assert.strictEqual(isStockTrackedProduct({ track_stock: null }), false);
 
 console.log("stock inventory domain tests passed");
