@@ -12,6 +12,16 @@ const TERMINAL_PAYMENT_STATUSES = Object.freeze({
 const isPositiveCents = (value) => Number.isSafeInteger(value) && value > 0;
 const isPositiveId = (value) => Number.isSafeInteger(value) && value > 0;
 
+const roundPercentOfCents = (amountCents, percent) => {
+  const [, whole, fraction = "", exponentText = "0"] = String(percent)
+    .match(/^(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/i);
+  const exponent = Number(exponentText) - fraction.length;
+  const scale = 10n ** BigInt(Math.abs(exponent));
+  const numerator = BigInt(whole + fraction) * (exponent > 0 ? scale : 1n);
+  const denominator = 100n * (exponent < 0 ? scale : 1n);
+  return Number((BigInt(amountCents) * numerator + denominator / 2n) / denominator);
+};
+
 const allocateTerminalOrderAmounts = ({ orders, discountType = "none", discountValue = 0 }) => {
   if (!Array.isArray(orders) || orders.length === 0) {
     throw new Error("Invalid Terminal orders");
@@ -38,7 +48,7 @@ const allocateTerminalOrderAmounts = ({ orders, discountType = "none", discountV
     if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
       throw new Error("Invalid Terminal discount");
     }
-    discountCents = Math.round((subtotalCents * percent) / 100);
+    discountCents = roundPercentOfCents(subtotalCents, percent);
   } else if (discountType === "amount") {
     if (!Number.isSafeInteger(discountValue) || discountValue < 0) {
       throw new Error("Invalid Terminal discount");
@@ -74,7 +84,7 @@ const calculateTerminalApplicationFee = (totalCents, commissionPercent) => {
   if (!isPositiveCents(totalCents)) {
     throw new Error("Invalid Terminal total");
   }
-  return Math.round((totalCents * normalizeCommissionPercent(commissionPercent)) / 100);
+  return roundPercentOfCents(totalCents, normalizeCommissionPercent(commissionPercent));
 };
 
 const buildTerminalPaymentIntentParams = ({ totalCents, connectedAccountId,

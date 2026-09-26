@@ -41,6 +41,16 @@ assert.deepStrictEqual(allocateTerminalOrderAmounts({
   ],
 });
 assert.deepStrictEqual(allocateTerminalOrderAmounts({
+  orders: [{ id: 42, amountCents: 1500 }],
+  discountType: "percent",
+  discountValue: 8.7,
+}), {
+  subtotalCents: 1500,
+  discountCents: 131,
+  totalCents: 1369,
+  allocations: [{ orderId: 42, amountCents: 1369 }],
+});
+assert.deepStrictEqual(allocateTerminalOrderAmounts({
   orders, discountType: "amount", discountValue: 500,
 }), {
   subtotalCents: 2000,
@@ -94,6 +104,7 @@ for (const input of [
 
 assert.strictEqual(calculateTerminalApplicationFee(2000), 100);
 assert.strictEqual(calculateTerminalApplicationFee(999, "7.5"), 75);
+assert.strictEqual(calculateTerminalApplicationFee(1500, 8.7), 131);
 assert.strictEqual(calculateTerminalApplicationFee(2000, "invalid"), 100);
 assert.strictEqual(calculateTerminalApplicationFee(2000, 0), 0);
 assert.throws(() => calculateTerminalApplicationFee(0, 5), /invalid/i);
