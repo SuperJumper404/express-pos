@@ -187,11 +187,36 @@ const hasShopFilter = (call, alias, shopId) => {
     shopId, paymentId: 42, status: "succeeded",
   }), /finalizePaymentSucceeded/);
   await management.store.listPaymentAllocations({ shopId, paymentId: 42 });
-  await management.store.findOrderAllocation({ shopId, orderId: 21 });
+  await management.store.findOrderAllocation({ shopId, orderId: 21, paymentId: 42 });
   assert.ok(management.calls.every((call) => (
     call.params.includes(shopId) || (call.params[0] && call.params[0].shopid === shopId)
   )));
   assert.ok(!management.calls.some((call) => /registration_code/i.test(call.sql)));
+
+  const attempts = [
+    { shopid: shopId, order_id: 21, terminal_payment_id: 41, amount_cents: 900 },
+    { shopid: shopId, order_id: 21, terminal_payment_id: 42, amount_cents: 1200 },
+  ];
+  const paymentStatuses = new Map([[41, "failed"], [42, "succeeded"]]);
+  const allocationLookup = makeStore((sql, params) => {
+    if (!/FROM stripe_terminal_payment_orders a/.test(sql)) return [];
+    const matches = attempts.filter((attempt) => (
+      attempt.shopid === params[0] && attempt.order_id === params[1]
+      && (!/a\.terminal_payment_id = \?/.test(sql)
+        || attempt.terminal_payment_id === params[2])
+      && (!/p\.status = 'succeeded'/.test(sql)
+        || paymentStatuses.get(attempt.terminal_payment_id) === "succeeded")
+    ));
+    return matches.slice(0, 1);
+  });
+  assert.deepStrictEqual(await allocationLookup.store.findOrderAllocation({
+    shopId, orderId: 21, paymentId: 42,
+  }), attempts[1]);
+  assert.deepStrictEqual(allocationLookup.calls[0].params, [shopId, 21, 42, shopId]);
+  assert.match(allocationLookup.calls[0].sql, /p\.status = 'succeeded'/);
+  await assert.rejects(() => allocationLookup.store.findOrderAllocation({
+    shopId, orderId: 21,
+  }), /paymentId is required/);
 
   const callbackCalls = [];
   const callbackStore = buildStripeTerminalModule({ connection: {

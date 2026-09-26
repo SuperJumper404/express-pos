@@ -241,14 +241,19 @@ const buildStripeTerminalModule = ({ connection }) => {
     );
   };
 
-  const findOrderAllocation = async ({ shopId, orderId }) => {
+  const findOrderAllocation = async ({ shopId, orderId, paymentId }) => {
     requireShopId(shopId);
+    if (!Number.isSafeInteger(Number(paymentId)) || Number(paymentId) <= 0) {
+      throw new Error("paymentId is required");
+    }
     return first(await query(
       `SELECT a.* FROM stripe_terminal_payment_orders a
        JOIN stripe_terminal_payments p ON p.id = a.terminal_payment_id
          AND p.shopid = a.shopid
-       WHERE a.shopid = ? AND a.order_id = ? AND p.shopid = ? LIMIT 1`,
-      [shopId, orderId, shopId],
+       WHERE a.shopid = ? AND a.order_id = ?
+         AND a.terminal_payment_id = ? AND p.shopid = ?
+         AND p.status = 'succeeded' LIMIT 1`,
+      [shopId, orderId, paymentId, shopId],
     ));
   };
 
