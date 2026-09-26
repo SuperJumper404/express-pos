@@ -505,9 +505,20 @@ module.exports = {
       conn.query(
         `SELECT orders.*,
                 service_points.name AS service_point_name,
-                stock_reservations.stock_reservation_status
+                stock_reservations.stock_reservation_status,
+                CASE WHEN orders.payment_status = 'paid'
+                  AND orders.payment_provider = 'stripe_terminal'
+                  AND terminal_payment.status = 'succeeded'
+                THEN terminal_allocation.amount_cents ELSE NULL END AS stripe_terminal_amount_cents
          FROM orders
          LEFT JOIN service_points ON service_points.id = orders.service_point_id
+         LEFT JOIN stripe_terminal_payment_orders terminal_allocation
+           ON terminal_allocation.order_id = orders.id
+           AND terminal_allocation.shopid = orders.shopid
+           AND terminal_allocation.terminal_payment_id = orders.stripe_terminal_payment_id
+         LEFT JOIN stripe_terminal_payments terminal_payment
+           ON terminal_payment.id = terminal_allocation.terminal_payment_id
+           AND terminal_payment.shopid = orders.shopid
          LEFT JOIN (
            SELECT order_id, MAX(status) AS stock_reservation_status
            FROM order_stock_reservations

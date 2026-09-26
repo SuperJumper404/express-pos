@@ -19,6 +19,27 @@ const paidOrder = () => ({ id: 12, shopid: 7, status: 1, subtotal: 12, payment_s
   payment_provider: "stripe_terminal", payment: "Carte bancaire - TPE Stripe", stripe_terminal_payment_id: 41 });
 const response = () => ({ status(code) { this.statusCode = code; return this; }, json(payload) { this.payload = payload; return this; } });
 
+test("shop order listing exposes only paid successful linked allocations without payment-owner access", async () => {
+  const connection = require("../src/config/db");
+  let query;
+  connection.query = (sql, params, done) => { query = { sql, params }; done(null, []); };
+  try {
+    await require("../src/modules/m_orders").mAllOrder(7);
+    assert.match(query.sql, /CASE WHEN orders\.payment_status = 'paid'/);
+    assert.match(query.sql, /orders\.payment_provider = 'stripe_terminal'/);
+    assert.match(query.sql, /terminal_payment\.status = 'succeeded'/);
+    assert.match(query.sql, /THEN terminal_allocation\.amount_cents ELSE NULL END AS stripe_terminal_amount_cents/);
+    assert.match(query.sql, /terminal_allocation\.order_id = orders\.id/);
+    assert.match(query.sql, /terminal_allocation\.shopid = orders\.shopid/);
+    assert.match(query.sql, /terminal_allocation\.terminal_payment_id = orders\.stripe_terminal_payment_id/);
+    assert.match(query.sql, /terminal_payment\.id = terminal_allocation\.terminal_payment_id/);
+    assert.match(query.sql, /terminal_payment\.shopid = orders\.shopid/);
+    assert.match(query.sql, /WHERE orders\.shopid = \?/);
+    assert.deepStrictEqual(query.params, [7]);
+    assert.doesNotMatch(query.sql, /stripe_payment_intent_id|cashier_user_id/);
+  } finally { delete connection.query; }
+});
+
 test("archive fields preserve Terminal identity and never recollect or change its method", () => {
   const result = buildCashRegisterArchiveFields({ order: paidOrder(), paymentMethod: "Especes" });
   assert.strictEqual(result.stripe_terminal_payment_id, 41);
