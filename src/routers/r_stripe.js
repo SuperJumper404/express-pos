@@ -1,5 +1,6 @@
 const express = require("express");
 const stripe = require("../controllers/c_stripe");
+const stripeTerminal = require("../controllers/c_stripeTerminal");
 const orderEditing = require("../controllers/c_orderEditing");
 const {
   authentication,
@@ -8,6 +9,14 @@ const {
 
 const routers = express.Router();
 const webhookRouter = express.Router();
+
+routers
+  .get("/stripe/terminal/readers", authentication, authAdmin, stripeTerminal.listReaders)
+  .post("/stripe/terminal/readers", authentication, authAdmin, stripeTerminal.registerReader)
+  .patch("/stripe/terminal/readers/:id/assignment", authentication, authAdmin, stripeTerminal.assignReader)
+  .patch("/stripe/terminal/readers/:id/status", authentication, authAdmin, stripeTerminal.setReaderActive)
+  .post("/stripe/terminal/readers/refresh", authentication, authAdmin, stripeTerminal.refreshReaders)
+  .get("/stripe/terminal/current-reader", authentication, stripeTerminal.getCurrentReader);
 
 routers
   .get("/stripe/connect/status", authentication, authAdmin, stripe.getConnectStatus)
