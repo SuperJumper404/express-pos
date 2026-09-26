@@ -14,10 +14,16 @@ const fixture = () => {
     orders: [12, 31].map((id, i) => ({ id, shopid: 7, status: 1, payment_status: "unpaid", subtotal: i ? "12.00" : "8.00", stripe_terminal_payment_id: null })),
     shop: { id: 7, stripe_account_id: "acct_shop", stripe_charges_enabled: 1, stripe_commission_percent: 5 },
     sessions: [], allocations: [], calls: [], events: [], remote: { id: "tmr_server", status: "online", action: null },
-    intent: null, locked: false,
+    intent: null, locked: false, intentsByKey: new Map(), creationLocks: new Set(),
   };
   let queue = Promise.resolve();
   const terminalStore = {
+    withPaymentCreationLock: async ({ paymentId }, work) => {
+      if (state.creationLocks.has(paymentId)) return null;
+      state.creationLocks.add(paymentId);
+      try { return await work(terminalStore); }
+      finally { state.creationLocks.delete(paymentId); }
+    },
     withTransaction: async (work) => {
       const previous = queue;
       let release;
@@ -44,7 +50,7 @@ const fixture = () => {
     createPaymentSession: async (data) => {
       assert(state.locked);
       const id = 41 + state.sessions.length;
-      state.sessions.push({ id, shopid: data.shopId, terminal_reader_id: data.readerId, cashier_user_id: data.cashierUserId, idempotency_key: data.idempotencyKey, amount_cents: data.amountCents, application_fee_amount: data.applicationFeeAmount, currency: data.currency || "eur", discount_type: data.discountType, discount_value: data.discountValue, status: "creating", stripe_payment_intent_id: null });
+      state.sessions.push({ id, shopid: data.shopId, terminal_reader_id: data.readerId, cashier_user_id: data.cashierUserId, idempotency_key: data.idempotencyKey, amount_cents: data.amountCents, application_fee_amount: data.applicationFeeAmount, currency: data.currency || "eur", discount_type: data.discountType, discount_value: data.discountValue, status: "creating", stripe_payment_intent_id: null, created_at: new Date().toISOString() });
       state.events.push("session");
       return { insertId: id, affectedRows: 1 };
     },
@@ -53,6 +59,10 @@ const fixture = () => {
       state.allocations.push(...allocations.map((a) => ({ shopid: shopId, terminal_payment_id: paymentId, order_id: a.orderId, amount_cents: a.amountCents })));
     },
     findPaymentSession: async ({ shopId, paymentId }) => clone(state.sessions.find((s) => s.shopid === shopId && s.id === paymentId) || null),
+    lockPaymentSession: async (data) => {
+      assert(state.locked);
+      return { payment: await terminalStore.findPaymentSession(data) };
+    },
     listPaymentAllocations: async ({ shopId, paymentId }) => clone(state.allocations.filter((a) => a.shopid === shopId && a.terminal_payment_id === paymentId)),
     updatePaymentSession: async (data) => {
       const session = state.sessions.find((s) => s.shopid === data.shopId && s.id === data.paymentId);
@@ -88,7 +98,13 @@ const fixture = () => {
         assert.strictEqual(state.sessions.at(-1).status, "creating");
         assert.strictEqual(state.allocations.length, 2);
         assert.strictEqual(options.idempotencyKey, state.sessions.at(-1).idempotency_key);
+        if (state.intentsByKey.has(options.idempotencyKey)) {
+          const previous = state.intentsByKey.get(options.idempotencyKey);
+          assert.deepStrictEqual(params, previous.params, "replay must use the persisted payment parameters");
+          return clone(previous.intent);
+        }
         state.intent = { ...params, id: "pi_terminal", status: "requires_payment_method", client_secret: "raw-secret", latest_charge: null };
+        state.intentsByKey.set(options.idempotencyKey, { params: clone(params), intent: clone(state.intent) });
         return clone(state.intent);
       }),
       retrieve: call("retrieve-intent", () => clone(state.intent)),
@@ -187,26 +203,158 @@ for (const invalid of [{ orderIds: [] }, { orderIds: [12, 12] }, { orderIds: [tr
 for (const [name, remote, code] of [
   ["offline", { status: "offline" }, "TERMINAL_READER_OFFLINE"],
   ["busy", { action: { status: "in_progress", type: "process_payment_intent", process_payment_intent: { payment_intent: "pi_other" } } }, "TERMINAL_READER_BUSY"],
-]) test(`rejects ${name} reader and releases the reservation`, async () => {
+]) test(`rejects ${name} reader and retains the retryable reservation`, async () => {
   const f = fixture(); Object.assign(f.state.remote, remote);
   await rejects(() => f.service.startPayment(input), code);
   assert(!f.state.calls.some((c) => c.name === "create"));
-  assert.strictEqual(f.state.sessions[0].status, "failed");
+  assert.strictEqual(f.state.sessions[0].status, "creating");
 });
 
-test("definitive creation failure releases session with sanitized failure details", async () => {
+test("definitive creation failure retains the durable key without raw failure details", async () => {
   const f = fixture();
   f.state.errors = { create: Object.assign(new Error("raw-secret Stripe"), { type: "StripeInvalidRequestError", statusCode: 400 }) };
   await rejects(() => f.service.startPayment(input), "TERMINAL_STRIPE_ERROR");
-  assert.strictEqual(f.state.sessions[0].status, "failed");
+  assert.strictEqual(f.state.sessions[0].status, "creating");
   assert(!JSON.stringify(f.state.sessions).includes("raw-secret"));
 });
 
 test("ambiguous creation timeout retains reservation and retry does not create a second intent", async () => {
+  const f = fixture();
+  const create = f.stripe.paymentIntents.create;
+  let attempts = 0;
+  f.stripe.paymentIntents.create = async (...args) => {
+    const result = await create(...args);
+    if (++attempts === 1) throw new Error("raw-secret timeout after creation");
+    return result;
+  };
+  await rejects(() => f.service.startPayment(input), "TERMINAL_STRIPE_ERROR");
+  assert.strictEqual((await f.service.startPayment({ ...input, discountType: "none", discountValue: 0 })).status, "processing");
+  assert.strictEqual(f.state.calls.filter((c) => c.name === "create").length, 2);
+  assert.strictEqual(f.state.intentsByKey.size, 1);
+  assert.strictEqual(f.state.sessions.length, 1);
+  assert.strictEqual(f.state.intent.amount, 1750);
+});
+
+for (const statusCode of [401, 403, 429]) test(`round1 recovers a ${statusCode} creation rejection with the durable key`, async () => {
+  const f = fixture();
+  f.state.errors = { create: Object.assign(new Error("raw-secret Stripe rejection"), { statusCode }) };
+  await rejects(() => f.service.startPayment(input), "TERMINAL_STRIPE_ERROR");
+  const key = f.state.sessions[0].idempotency_key;
+  assert.strictEqual(f.state.sessions[0].stripe_payment_intent_id, null);
+  f.state.errors = null;
+  f.state.shop.stripe_commission_percent = 99;
+  const result = await f.service.startPayment({ ...input, discountValue: 50, total: 1, readerId: "tmr_attacker" });
+  assert.strictEqual(result.status, "processing");
+  assert.strictEqual(result.amountCents, 1750);
+  assert.strictEqual(f.state.intent.application_fee_amount, 88);
+  assert.strictEqual(f.state.sessions.length, 1);
+  assert.strictEqual(f.state.intentsByKey.size, 1);
+  assert(f.state.calls.filter((c) => c.name === "create").every((c) => c.args[1].idempotencyKey === key));
+});
+
+test("round1 concurrent recovery loser returns the session without another Stripe call", async () => {
   const f = fixture(); f.state.errors = { create: new Error("raw-secret timeout") };
   await rejects(() => f.service.startPayment(input), "TERMINAL_STRIPE_ERROR");
-  assert.strictEqual((await f.service.startPayment(input)).status, "creating");
+  f.state.errors = null;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let entered;
+  const called = new Promise((resolve) => { entered = resolve; });
+  const create = f.stripe.paymentIntents.create;
+  f.stripe.paymentIntents.create = async (...args) => { entered(); await gate; return create(...args); };
+  const first = f.service.startPayment(input);
+  const reachedStripe = await Promise.race([called.then(() => true), first.then(() => false)]);
+  try {
+    assert(reachedStripe, "stranded session must attempt Stripe recovery");
+    const second = await buildStripeTerminalPaymentService(f).startPayment(input);
+    assert.strictEqual(second.id, 41);
+    assert.strictEqual(second.status, "creating");
+    assert.strictEqual(f.state.calls.filter((c) => c.name === "create").length, 1);
+  } finally { release(); await first; }
+  assert.strictEqual(f.state.calls.filter((c) => c.name === "create").length, 2);
+  assert.strictEqual(f.state.calls.filter((c) => c.name === "process").length, 1);
+  assert.strictEqual(f.state.intentsByKey.size, 1);
+});
+
+test("round1 delayed original starter cannot release an ambiguously created intent", async () => {
+  const f = fixture();
+  const withLock = f.terminalStore.withPaymentCreationLock;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let waiting;
+  const originalWaiting = new Promise((resolve) => { waiting = resolve; });
+  let attempts = 0;
+  f.terminalStore.withPaymentCreationLock = async (...args) => {
+    if (++attempts === 1) { waiting(); await gate; }
+    return withLock(...args);
+  };
+  const create = f.stripe.paymentIntents.create;
+  f.stripe.paymentIntents.create = async (...args) => { await create(...args); throw new Error("raw-secret timeout"); };
+  const original = f.service.startPayment(input);
+  await originalWaiting;
+  await rejects(() => buildStripeTerminalPaymentService(f).startPayment(input), "TERMINAL_STRIPE_ERROR");
+  f.state.remote.status = "offline";
+  release();
+  await rejects(() => original, "TERMINAL_READER_OFFLINE");
+  assert.strictEqual(f.state.sessions[0].status, "creating");
+  assert.strictEqual(f.state.intentsByKey.size, 1);
+});
+
+test("round1 refuses to replay creation after the safe idempotency window", async () => {
+  const f = fixture(); f.state.errors = { create: new Error("raw-secret timeout") };
+  await rejects(() => f.service.startPayment(input), "TERMINAL_STRIPE_ERROR");
+  f.state.sessions[0].created_at = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  f.state.errors = null;
+  await rejects(() => f.service.startPayment(input), "TERMINAL_RECOVERY_REQUIRED");
   assert.strictEqual(f.state.calls.filter((c) => c.name === "create").length, 1);
+});
+
+for (const code of ["ER_LOCK_DEADLOCK", "ER_LOCK_WAIT_TIMEOUT"]) {
+  for (const phase of ["reservation", "finalization"]) test(`round1 retries ${code} in database-only ${phase}`, async () => {
+    const f = fixture();
+    if (phase === "finalization") { await f.service.startPayment(input); f.state.intent.status = "succeeded"; }
+    const method = phase === "reservation" ? "createAllocations" : "finalizePaymentSucceeded";
+    const original = f.terminalStore[method];
+    let attempts = 0;
+    f.terminalStore[method] = async (...args) => {
+      const result = await original(...args);
+      if (++attempts < 3) throw Object.assign(new Error("raw-secret lock failure"), { code });
+      return result;
+    };
+    const result = phase === "reservation" ? await f.service.startPayment(input) : await f.service.getPaymentStatus(scope);
+    assert.strictEqual(result.status, phase === "reservation" ? "processing" : "succeeded");
+    assert.strictEqual(attempts, 3);
+    assert.strictEqual(f.state.sessions.length, 1);
+    assert.strictEqual(f.state.calls.filter((c) => c.name === "create").length, 1);
+    assert.strictEqual(f.state.calls.filter((c) => c.name === "process").length, 1);
+  });
+}
+
+test("round1 stops database retries after three attempts and keeps errors sanitized", async () => {
+  const f = fixture(); let attempts = 0;
+  f.terminalStore.createAllocations = async () => { attempts += 1; throw Object.assign(new Error("raw-secret deadlock"), { code: "ER_LOCK_DEADLOCK" }); };
+  await rejects(() => f.service.startPayment(input), "TERMINAL_INTERNAL_ERROR");
+  assert.strictEqual(attempts, 3);
+  assert.strictEqual(f.state.sessions.length, 0);
+  assert.strictEqual(f.state.calls.length, 0);
+});
+
+test("round1 retries cancellation persistence without repeating Stripe cancellation", async () => {
+  const f = fixture(); await f.service.startPayment(input);
+  const update = f.terminalStore.updatePaymentSession;
+  let attempts = 0;
+  f.terminalStore.updatePaymentSession = async (data) => {
+    const result = await update(data);
+    if (data.status === "canceled" && ++attempts < 3) throw Object.assign(new Error("raw-secret timeout"), { code: "ER_LOCK_WAIT_TIMEOUT" });
+    return result;
+  };
+  assert.strictEqual((await f.service.cancelPayment(scope)).status, "canceled");
+  assert.strictEqual(attempts, 3);
+  assert.strictEqual(f.state.calls.filter((c) => c.name === "cancel-action").length, 1);
+  assert.strictEqual(f.state.calls.filter((c) => c.name === "cancel-intent").length, 1);
+  for (const call of f.state.calls.filter((c) => ["cancel-action", "cancel-intent"].includes(c.name))) {
+    assert(call.args[2].idempotencyKey.startsWith(f.state.sessions[0].idempotency_key));
+  }
 });
 
 test("process failure cancels its intent before freeing the session", async () => {
@@ -432,6 +580,8 @@ test("default controller wires reservation SQL to one transaction connection and
   let inTransaction = false;
   const execute = async (sql, params, dedicated) => {
     calls.push({ sql, params, dedicated });
+    if (sql.includes("GET_LOCK")) { assert(dedicated && !inTransaction); return [{ acquired: 1 }]; }
+    if (sql.includes("RELEASE_LOCK")) { assert(dedicated && !inTransaction); return [{ released: 1 }]; }
     if (sql.includes("FROM shop")) { assert(!inTransaction); return [f.state.shop]; }
     if (sql.startsWith("SELECT") && sql.includes("FROM stripe_terminal_readers r")) {
       assert(dedicated && inTransaction);
@@ -462,7 +612,7 @@ test("default controller wires reservation SQL to one transaction connection and
       return { affectedRows: 1 };
     }
     if (sql.startsWith("UPDATE stripe_terminal_payments")) {
-      assert(!dedicated && !inTransaction);
+      assert(dedicated && inTransaction);
       return f.terminalStore.updatePaymentSession({ shopId: params[1], paymentId: params[2], ...(sql.includes("stripe_payment_intent_id =") ? { stripePaymentIntentId: params[0] } : { status: params[0] }) });
     }
     throw new Error(`Unexpected test SQL: ${sql}`);
@@ -487,7 +637,7 @@ test("default controller wires reservation SQL to one transaction connection and
     const response = await invoke(controller.startPayment, { body: input });
     assert.strictEqual(response.statusCode, 200);
     assert.strictEqual(response.body.data.status, "processing");
-    assert.strictEqual(calls.filter((c) => c.released).length, 1);
+    assert.strictEqual(calls.filter((c) => c.released).length, 2);
     assert.strictEqual(f.state.sessions.length, 1);
     assert.deepStrictEqual(f.state.allocations.map((a) => a.amount_cents), [700, 1050]);
   } finally { paths.forEach((p, i) => { if (previous[i]) require.cache[p] = previous[i]; else delete require.cache[p]; }); }

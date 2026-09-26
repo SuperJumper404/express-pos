@@ -25,6 +25,53 @@ const buildStripeTerminalModule = ({ connection }) => {
   }
   const query = (sql, params) => queryWith(connection, sql, params);
 
+  // A nonblocking, connection-owned lock elects one creator across processes.
+  // Use this same connection for all work so lock holders cannot exhaust the pool.
+  const withPaymentCreationLock = async ({ shopId, paymentId }, work) => {
+    requireShopId(shopId);
+    if (!Number.isSafeInteger(paymentId) || paymentId <= 0) throw new Error("paymentId is required");
+    const dedicated = await connection.getConnection();
+    const lockName = `pos:terminal-payment:${Number(shopId)}:${paymentId}`;
+    let acquired = false;
+    let reusable = false;
+    let rollbackFailed = false;
+    try {
+      const rows = await queryWith(dedicated, "SELECT GET_LOCK(?, 0) AS acquired", [lockName]);
+      acquired = rows[0].acquired === 1;
+      if (!acquired) {
+        reusable = rows[0].acquired === 0;
+        if (reusable) return null;
+        throw new Error("Terminal payment lock unavailable");
+      }
+      const store = buildStripeTerminalModule({ connection: dedicated });
+      store.withTransaction = async (transactionWork) => {
+        try {
+          await dedicated.beginTransaction();
+          const result = await transactionWork(store);
+          await dedicated.commit();
+          return result;
+        } catch (error) {
+          try { await dedicated.rollback(); }
+          catch (rollbackError) {
+            rollbackFailed = true;
+            throw new Error("Terminal transaction rollback failed");
+          }
+          throw error;
+        }
+      };
+      return await work(store);
+    } finally {
+      if (acquired) {
+        try {
+          const rows = await queryWith(dedicated, "SELECT RELEASE_LOCK(?) AS released", [lockName]);
+          reusable = rows[0].released === 1 && !rollbackFailed;
+        } catch (error) { reusable = false; }
+      }
+      if (reusable) dedicated.release();
+      else dedicated.destroy();
+    }
+  };
+
   // A shop lock also serializes first-location creation across application instances.
   // Locked work never needs a second checkout from a pool occupied by waiters.
   const withRegistrationLock = async ({ shopId }, work) => {
@@ -341,23 +388,38 @@ const buildStripeTerminalModule = ({ connection }) => {
     return { reader, orders, activePayment };
   };
 
+  // Allocations are immutable after reservation. Lock their orders in the same
+  // order as start, then read the current payment (never payment -> orders).
+  const lockPaymentSession = async ({ shopId, paymentId }) => {
+    requireShopId(shopId);
+    const allocations = await listPaymentAllocations({ shopId, paymentId });
+    const orderIds = allocations.map((allocation) => allocation.order_id).sort((a, b) => a - b);
+    const orders = orderIds.length ? await query(
+      `SELECT o.* FROM orders o
+       WHERE o.shopid = ? AND o.id IN (${orderIds.map(() => "?").join(", ")})
+       ORDER BY o.id FOR UPDATE`,
+      [shopId, ...orderIds],
+    ) : [];
+    const payment = await findPaymentSession({ shopId, paymentId, forUpdate: true });
+    return { payment, orders, allocations };
+  };
+
   // The caller rolls back its transaction if any allocation or order update fails.
   const finalizePaymentSucceeded = async ({ shopId, paymentId,
     stripePaymentIntentId, stripeChargeId = null, timestamp }) => {
     requireShopId(shopId);
-    const payment = await findPaymentSession({ shopId, paymentId, forUpdate: true });
+    const { payment, orders: lockedOrders, allocations } = await lockPaymentSession({ shopId, paymentId });
     if (!payment) throw new Error("Terminal payment not found");
     if (!stripePaymentIntentId || payment.stripe_payment_intent_id !== stripePaymentIntentId) {
       throw new Error("Terminal payment cannot be finalized");
     }
     if (payment.status === "succeeded") return { finalized: false };
-    const counted = await query(
-      `SELECT COUNT(*) AS count FROM stripe_terminal_payment_orders a
-       WHERE a.shopid = ? AND a.terminal_payment_id = ?`,
-      [shopId, paymentId],
-    );
-    const count = Number(counted[0].count);
+    const count = allocations.length;
     if (!count) throw new Error("Terminal payment has no allocations");
+    if (lockedOrders.length !== count || lockedOrders.some((order) => (
+      Number(order.shopid) !== Number(shopId) || Number(order.status) !== 1
+      || order.payment_status !== "unpaid" || order.stripe_terminal_payment_id != null
+    ))) throw new Error("Terminal order finalization incomplete");
     const orders = await query(
       `UPDATE orders o
        JOIN stripe_terminal_payment_orders a ON a.order_id = o.id
@@ -384,13 +446,13 @@ const buildStripeTerminalModule = ({ connection }) => {
   };
 
   return {
-    withRegistrationLock,
+    withRegistrationLock, withPaymentCreationLock,
     findLocation, createLocation, updateLocation,
     listReaders, findReader, findAssignedReader, createReader, updateReader,
     findActivePaymentForReader, createPaymentSession, findPaymentSession,
     findPaymentByIntent, findPaymentByIdempotencyKey, updatePaymentSession,
     createAllocations, listPaymentAllocations, findOrderAllocation,
-    lockReaderAndOrders, finalizePaymentSucceeded,
+    lockReaderAndOrders, lockPaymentSession, finalizePaymentSucceeded,
   };
 };
 

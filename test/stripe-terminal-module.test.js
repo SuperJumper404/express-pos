@@ -68,14 +68,17 @@ const hasShopFilter = (call, alias, shopId) => {
   const final = makeStore((sql) => {
     if (/FROM stripe_terminal_payments p/.test(sql)) return [{ id: 42, shopid: shopId,
       stripe_payment_intent_id: "pi_test", status: "processing" }];
-    if (/COUNT\(\*\)/.test(sql)) return [{ count: 1 }];
+    if (/FROM stripe_terminal_payment_orders a/.test(sql)) return [{ order_id: 21 }];
+    if (/FROM orders o/.test(sql)) return [{ id: 21, shopid: shopId, status: 1, payment_status: "unpaid" }];
     return { affectedRows: 1 };
   });
   assert.deepStrictEqual(await final.store.finalizePaymentSucceeded({
     shopId, paymentId: 42, stripePaymentIntentId: "pi_test", stripeChargeId: "ch_test",
     timestamp: "2026-09-26 10:00:00",
   }), { finalized: true });
-  assert.match(final.calls[0].sql, /FOR UPDATE/);
+  assert(final.calls.findIndex((call) => /FROM orders o/.test(call.sql))
+    < final.calls.findIndex((call) => /FROM stripe_terminal_payments p/.test(call.sql)));
+  assert.match(final.calls.find((call) => /FROM orders o/.test(call.sql)).sql, /FOR UPDATE/);
   const sessionUpdate = final.calls.find((call) => /UPDATE stripe_terminal_payments/.test(call.sql));
   const orderUpdate = final.calls.find((call) => /UPDATE orders/.test(call.sql));
   assert.ok(sessionUpdate && orderUpdate);
@@ -83,19 +86,23 @@ const hasShopFilter = (call, alias, shopId) => {
   hasShopFilter(orderUpdate, "o", shopId);
   assert.match(orderUpdate.sql, /stripe_terminal_payment_id/);
 
-  const duplicate = makeStore((sql) => /FROM stripe_terminal_payments p/.test(sql)
-    ? [{ id: 42, shopid: shopId, stripe_payment_intent_id: "pi_test",
-      status: "succeeded" }] : { affectedRows: 1 });
+  const duplicate = makeStore((sql) => {
+    if (/FROM stripe_terminal_payments p/.test(sql)) return [{ id: 42, shopid: shopId, stripe_payment_intent_id: "pi_test", status: "succeeded" }];
+    if (/FROM stripe_terminal_payment_orders a/.test(sql)) return [{ order_id: 21 }];
+    if (/FROM orders o/.test(sql)) return [];
+    throw new Error("A finalized payment must not be mutated again");
+  });
   assert.deepStrictEqual(await duplicate.store.finalizePaymentSucceeded({
     shopId, paymentId: 42, stripePaymentIntentId: "pi_test",
   }), { finalized: false });
-  assert.strictEqual(duplicate.calls.length, 1);
+  assert.strictEqual(duplicate.calls.filter((call) => /UPDATE stripe_terminal_payments|UPDATE orders/.test(call.sql)).length, 0);
 
   for (const status of ["failed", "canceled"]) {
     const lateSuccess = makeStore((sql) => {
       if (/FROM stripe_terminal_payments p/.test(sql)) return [{ id: 42, shopid: shopId,
         stripe_payment_intent_id: "pi_test", status }];
-      if (/COUNT\(\*\)/.test(sql)) return [{ count: 1 }];
+      if (/FROM stripe_terminal_payment_orders a/.test(sql)) return [{ order_id: 21 }];
+      if (/FROM orders o/.test(sql)) return [{ id: 21, shopid: shopId, status: 1, payment_status: "unpaid" }];
       return { affectedRows: 1 };
     });
     assert.deepStrictEqual(await lateSuccess.store.finalizePaymentSucceeded({
@@ -158,7 +165,8 @@ const hasShopFilter = (call, alias, shopId) => {
   const shortUpdate = makeStore((sql) => {
     if (/FROM stripe_terminal_payments p/.test(sql)) return [{ id: 42,
       stripe_payment_intent_id: "pi_test", status: "processing" }];
-    if (/COUNT\(\*\)/.test(sql)) return [{ count: 2 }];
+    if (/FROM stripe_terminal_payment_orders a/.test(sql)) return [{ order_id: 21 }, { order_id: 22 }];
+    if (/FROM orders o/.test(sql)) return [21, 22].map((id) => ({ id, shopid: shopId, status: 1, payment_status: "unpaid" }));
     return { affectedRows: 1 };
   });
   await assert.rejects(() => shortUpdate.store.finalizePaymentSucceeded({
