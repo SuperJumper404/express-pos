@@ -8,6 +8,8 @@ const ERRORS = {
   TERMINAL_READER_NOT_FOUND: [404, "Terminal introuvable."],
   TERMINAL_READER_INACTIVE: [409, "Ce terminal est desactive."],
   TERMINAL_STRIPE_ERROR: [502, "Le service de terminaux Stripe est indisponible. Veuillez reessayer."],
+  TERMINAL_CLEANUP_FAILED: [502, "Verification du terminal necessaire avant une nouvelle tentative."],
+  TERMINAL_REGISTRATION_BUSY: [409, "Une connexion de terminal est deja en cours. Veuillez reessayer."],
   TERMINAL_INTERNAL_ERROR: [500, "Impossible de gerer le terminal."],
 };
 
@@ -71,6 +73,7 @@ const buildStripeTerminalReaderService = ({ stripe, terminalStore, staffStore })
       return await operation(input);
     } catch (error) {
       if (error instanceof TerminalReaderError) throw error;
+      if (error && error.code === "TERMINAL_REGISTRATION_BUSY") fail("TERMINAL_REGISTRATION_BUSY");
       fail(error && error.code === "ER_DUP_ENTRY"
         ? "TERMINAL_ASSIGNMENT_CONFLICT" : "TERMINAL_INTERNAL_ERROR");
     }
@@ -82,25 +85,48 @@ const buildStripeTerminalReaderService = ({ stripe, terminalStore, staffStore })
       fail("TERMINAL_STRIPE_ERROR");
     }
   };
-  const requireAdmin = async (input) => {
+  const compensate = async (operation) => {
+    try {
+      await operation();
+    } catch (error) {
+      fail("TERMINAL_CLEANUP_FAILED");
+    }
+  };
+  const deleteCreated = (remove, id) => compensate(async () => {
+    let deleted;
+    try {
+      deleted = await remove();
+    } catch (error) {
+      if (error && error.statusCode === 404 && error.code === "resource_missing") return;
+      throw error;
+    }
+    if (!deleted || deleted.deleted !== true || deleted.id !== id) fail("TERMINAL_CLEANUP_FAILED");
+  });
+  const requireInsert = (result) => {
+    if (!result || result.affectedRows !== 1 || !Number.isSafeInteger(result.insertId) || result.insertId <= 0) {
+      fail("TERMINAL_INTERNAL_ERROR");
+    }
+    return result;
+  };
+  const requireAdmin = async (input, users = staffStore) => {
     const shopId = positiveId(input.shopId);
     const id = positiveId(input.actorUserId);
-    const user = await staffStore.findUserByIdAndShop({ id, shopId });
+    const user = await users.findUserByIdAndShop({ id, shopId });
     if (!activeStaff(user, shopId, id) || Number(user.access) !== 0) fail("TERMINAL_FORBIDDEN");
     return shopId;
   };
-  const requireAssignee = async (shopId, userId, readerId = null) => {
-    const user = await staffStore.findUserByIdAndShop({ id: userId, shopId });
+  const requireAssignee = async (shopId, userId, readerId = null, store = terminalStore, users = staffStore) => {
+    const user = await users.findUserByIdAndShop({ id: userId, shopId });
     if (!activeStaff(user, shopId, userId)) fail("TERMINAL_INVALID_ASSIGNEE");
-    const assigned = await terminalStore.findAssignedReader({ shopId, userId });
+    const assigned = await store.findAssignedReader({ shopId, userId });
     if (assigned && Number(assigned.id) !== readerId) fail("TERMINAL_ASSIGNMENT_CONFLICT");
   };
-  const requireReader = async (shopId, readerId) => {
-    const reader = await terminalStore.findReader({ shopId, readerId });
+  const requireReader = async (shopId, readerId, store = terminalStore) => {
+    const reader = await store.findReader({ shopId, readerId });
     if (!reader || Number(reader.shopid) !== shopId) fail("TERMINAL_READER_NOT_FOUND");
     return reader;
   };
-  const readDto = async (shopId, readerId) => readerDto(await requireReader(shopId, readerId));
+  const readDto = async (shopId, readerId, store = terminalStore) => readerDto(await requireReader(shopId, readerId, store));
 
   const listReaders = safe(async (input) => {
     const shopId = await requireAdmin(input);
@@ -113,37 +139,62 @@ const buildStripeTerminalReaderService = ({ stripe, terminalStore, staffStore })
     const label = requiredText(input.label, 255);
     const assignedUserId = positiveId(input.assignedUserId);
     if (input.assignedServicePointId != null) fail("TERMINAL_INVALID_INPUT");
-    let location = await terminalStore.findLocation({ shopId });
-    const address = input.address === undefined && location ? null : normalizeAddress(input.address);
-    await requireAssignee(shopId, assignedUserId);
+    const suppliedAddress = input.address === undefined ? null : normalizeAddress(input.address);
+    return terminalStore.withRegistrationLock({ shopId }, async ({ terminalStore: store, staffStore: users }) => {
+      await requireAdmin(input, users);
+      let location = await store.findLocation({ shopId });
+      const address = suppliedAddress || (location ? null : normalizeAddress(input.address));
+      await requireAssignee(shopId, assignedUserId, null, store, users);
 
-    if (!location) {
-      const displayName = `Restaurant ${shopId}`;
-      const created = await stripeCall(() => stripe.terminal.locations.create({
-        display_name: displayName, address: stripeAddress(address),
-      }));
-      const saved = await terminalStore.createLocation({ shopId, stripeLocationId: created.id, displayName, address });
-      location = { id: saved.insertId, stripe_location_id: created.id };
-    } else if (address && (location.address_line1 !== address.line1
-      || location.postal_code !== address.postalCode || location.city !== address.city
-      || location.country !== address.country)) {
-      await stripeCall(() => stripe.terminal.locations.update(location.stripe_location_id, {
-        address: stripeAddress(address),
-      }));
-      await terminalStore.updateLocation({
-        shopId, stripeLocationId: location.stripe_location_id, displayName: location.display_name, address,
-      });
-    }
+      if (!location) {
+        const displayName = `Restaurant ${shopId}`;
+        const created = await stripeCall(() => stripe.terminal.locations.create({
+          display_name: displayName, address: stripeAddress(address),
+        }));
+        try {
+          const saved = requireInsert(await store.createLocation({ shopId, stripeLocationId: created.id, displayName, address }));
+          location = { id: saved.insertId, stripe_location_id: created.id };
+        } catch (error) {
+          await deleteCreated(() => stripe.terminal.locations.del(created.id), created.id);
+          throw error;
+        }
+      } else if (address && (location.address_line1 !== address.line1
+        || location.postal_code !== address.postalCode || location.city !== address.city
+        || location.country !== address.country)) {
+        const previousAddress = {
+          line1: location.address_line1, postal_code: location.postal_code,
+          city: location.city, country: location.country,
+        };
+        await stripeCall(() => stripe.terminal.locations.update(location.stripe_location_id, {
+          address: stripeAddress(address),
+        }));
+        try {
+          const updated = await store.updateLocation({
+            shopId, stripeLocationId: location.stripe_location_id, displayName: location.display_name, address,
+          });
+          if (!updated || updated.affectedRows !== 1) fail("TERMINAL_INTERNAL_ERROR");
+        } catch (error) {
+          await compensate(() => stripe.terminal.locations.update(location.stripe_location_id, { address: previousAddress }));
+          throw error;
+        }
+      }
 
-    const registered = await stripeCall(() => stripe.terminal.readers.create({
-      registration_code: registrationCode, label, location: location.stripe_location_id,
-    }));
-    const saved = await terminalStore.createReader({
-      shopId, locationId: location.id, stripeReaderId: registered.id,
-      serialNumber: registered.serial_number, deviceType: registered.device_type,
-      label, status: readerStatus(registered.status), assignedUserId, assignedServicePointId: null,
+      const registered = await stripeCall(() => stripe.terminal.readers.create({
+        registration_code: registrationCode, label, location: location.stripe_location_id,
+      }));
+      let saved;
+      try {
+        saved = requireInsert(await store.createReader({
+          shopId, locationId: location.id, stripeReaderId: registered.id,
+          serialNumber: registered.serial_number, deviceType: registered.device_type,
+          label, status: readerStatus(registered.status), assignedUserId, assignedServicePointId: null,
+        }));
+      } catch (error) {
+        await deleteCreated(() => stripe.terminal.readers.del(registered.id), registered.id);
+        throw error;
+      }
+      return readDto(shopId, saved.insertId, store);
     });
-    return readDto(shopId, saved.insertId);
   });
 
   const assignReader = safe(async (input) => {

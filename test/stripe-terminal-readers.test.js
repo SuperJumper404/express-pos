@@ -1,6 +1,7 @@
 const assert = require("assert");
 const { buildStripeTerminalReaderService } = require("../src/services/stripeTerminalReaders");
 const { buildStripeTerminalController } = require("../src/controllers/c_stripeTerminal");
+const { buildStripeTerminalModule } = require("../src/modules/m_stripeTerminal");
 
 const tests = [];
 const test = (name, run) => tests.push({ name, run });
@@ -22,7 +23,7 @@ const locationRow = (overrides = {}) => ({
 // Only the external Stripe and SQL boundaries are replaced; service/controller logic is real.
 const fixture = ({ readers = [], location = null, users } = {}) => {
   const state = {
-    readers, location, writes: [], stripeCalls: [],
+    readers, location, writes: [], stripeCalls: [], remoteReaders: new Set(), remoteLocations: new Set(),
     users: users || [
       { id: 10, shopid: 7, access: 0, status: 1 },
       { id: 11, shopid: 7, access: 1, status: 1 },
@@ -67,6 +68,7 @@ const fixture = ({ readers = [], location = null, users } = {}) => {
   const staffStore = {
     findUserByIdAndShop: async ({ id, shopId }) => state.users.find((u) => u.id === id && u.shopid === shopId) || null,
   };
+  terminalStore.withRegistrationLock = async ({ shopId }, work) => work({ terminalStore, staffStore });
   const call = (name, result) => async (...args) => {
     state.stripeCalls.push({ name, args });
     if (state.stripeError) throw state.stripeError;
@@ -74,15 +76,24 @@ const fixture = ({ readers = [], location = null, users } = {}) => {
   };
   const stripe = { terminal: {
     locations: {
-      create: call("locations.create", { id: "tml_5" }),
+      create: call("locations.create", () => {
+        state.remoteLocations.add("tml_5");
+        return { id: "tml_5" };
+      }),
       update: call("locations.update", { id: "tml_5" }),
+      del: call("locations.del", (id) => { state.remoteLocations.delete(id); return { id, deleted: true }; }),
     },
     readers: {
-      create: call("readers.create", (params) => ({
-        id: "tmr_new", serial_number: "S710-123", device_type: "stripe_s710", label: params.label,
-        status: "online", location: params.location, registration_code: params.registration_code,
-        metadata: { secret: params.registration_code },
-      })),
+      create: call("readers.create", (params) => {
+        const id = state.remoteReaders.size ? `tmr_new_${state.remoteReaders.size + 1}` : "tmr_new";
+        state.remoteReaders.add(id);
+        return {
+          id, serial_number: "S710-123", device_type: "stripe_s710", label: params.label,
+          status: "online", location: params.location, registration_code: params.registration_code,
+          metadata: { secret: params.registration_code },
+        };
+      }),
+      del: call("readers.del", (id) => { state.remoteReaders.delete(id); return { id, deleted: true }; }),
       retrieve: call("readers.retrieve", (id) => ({ id, status: "offline", label: "Remote label", metadata: { secret: "raw-secret" } })),
     },
   } };
@@ -375,6 +386,197 @@ test("unexpected infrastructure errors never expose raw data", async () => {
   assert(!JSON.stringify(result.body).includes("raw-secret"));
 });
 
+for (const resource of ["Reader", "Location"]) {
+  for (const failure of ["throw", "empty insert"]) {
+    test(`compensation deletes the returned Stripe ${resource} after ${failure}`, async () => {
+      const f = fixture({ location: resource === "Reader" ? locationRow() : null });
+      f.terminalStore[`create${resource}`] = async () => {
+        if (failure === "throw") throw new Error("test-one-time-code raw DB failure");
+        return { affectedRows: 0, insertId: 0 };
+      };
+      await assert.rejects(() => f.service.registerReader(registration()), (error) => error.code === "TERMINAL_INTERNAL_ERROR");
+      const plural = resource === "Reader" ? "readers" : "locations";
+      const id = resource === "Reader" ? "tmr_new" : "tml_5";
+      assert.deepStrictEqual(f.state.stripeCalls.at(-1), { name: `${plural}.del`, args: [id] });
+      assert.strictEqual(f.state.remoteReaders.size, 0);
+      assert.strictEqual(f.state.remoteLocations.size, 0);
+      assert.strictEqual(f.state.readers.length, 0);
+      assert(!JSON.stringify(f.state.writes).includes("test-one-time-code"));
+    });
+  }
+}
+
+test("compensation restores the old Stripe address after a location update persistence failure", async () => {
+  const f = fixture({ location: locationRow() });
+  f.terminalStore.updateLocation = async () => { throw new Error("raw location failure"); };
+  await assert.rejects(() => f.service.registerReader({ ...registration(), address: { ...address, city: "Lyon" } }), (error) => error.code === "TERMINAL_INTERNAL_ERROR");
+  assert.deepStrictEqual(f.state.stripeCalls.map((entry) => entry.name), ["locations.update", "locations.update"]);
+  assert.deepStrictEqual(f.state.stripeCalls[1].args, ["tml_5", {
+    address: { line1: address.line1, postal_code: "75001", city: "Paris", country: "FR" },
+  }]);
+});
+
+for (const resource of ["Reader", "Location"]) {
+  test(`compensation failure for ${resource} is sanitized and the lock is released`, async () => {
+    const f = fixture({ location: resource === "Reader" ? locationRow() : null });
+    let released = false;
+    f.terminalStore.withRegistrationLock = async (scope, work) => {
+      try { return await work({ terminalStore: f.terminalStore, staffStore: f.staffStore }); }
+      finally { released = true; }
+    };
+    f.terminalStore[`create${resource}`] = async () => { throw new Error("test-one-time-code DB"); };
+    f.stripe.terminal[resource === "Reader" ? "readers" : "locations"].del = async () => {
+      throw new Error("test-one-time-code raw Stripe cleanup");
+    };
+    const logs = [];
+    const previous = [console.log, console.warn, console.error];
+    console.log = console.warn = console.error = (...args) => logs.push(args);
+    try {
+      const response = await invoke(f.controller, "registerReader", { body: registration() });
+      assert.strictEqual(response.statusCode, 502);
+      assert.strictEqual(response.body.error, "TERMINAL_CLEANUP_FAILED");
+      assert(!JSON.stringify([response.body, logs, f.state.writes]).includes("test-one-time-code"));
+      assert.strictEqual(released, true);
+    } finally {
+      [console.log, console.warn, console.error] = previous;
+    }
+  });
+}
+
+test("compensation treats an already deleted reader as cleaned up", async () => {
+  const f = fixture({ location: locationRow() });
+  f.terminalStore.createReader = async () => { throw new Error("DB failure"); };
+  f.stripe.terminal.readers.del = async () => { throw Object.assign(new Error("raw Stripe"), { statusCode: 404, code: "resource_missing" }); };
+  await assert.rejects(() => f.service.registerReader(registration()), (error) => error.code === "TERMINAL_INTERNAL_ERROR");
+});
+
+test("compensation requires Stripe to confirm deletion", async () => {
+  const f = fixture({ location: locationRow() });
+  f.terminalStore.createReader = async () => { throw new Error("DB failure"); };
+  f.stripe.terminal.readers.del = async () => ({ id: "tmr_new", deleted: false });
+  await assert.rejects(() => f.service.registerReader(registration()), (error) => error.code === "TERMINAL_CLEANUP_FAILED");
+});
+
+test("a DTO read failure after a successful insert does not delete a tracked reader", async () => {
+  const f = fixture({ location: locationRow() });
+  f.terminalStore.findReader = async () => { throw new Error("read failed"); };
+  await assert.rejects(() => f.service.registerReader(registration()), (error) => error.code === "TERMINAL_INTERNAL_ERROR");
+  assert.strictEqual(f.state.readers.length, 1);
+  assert.strictEqual(f.state.remoteReaders.size, 1);
+  assert(!f.state.stripeCalls.some((entry) => entry.name.endsWith(".del")));
+});
+
+test("registration rechecks the administrator and assignee while holding the database lock", async () => {
+  for (const target of [0, 1]) {
+    const f = fixture();
+    f.terminalStore.withRegistrationLock = async (scope, work) => {
+      f.state.users[target].status = 0;
+      return work({ terminalStore: f.terminalStore, staffStore: f.staffStore });
+    };
+    await rejectsWithoutStripe(f, () => f.service.registerReader(registration()), target === 0 ? "TERMINAL_FORBIDDEN" : "TERMINAL_INVALID_ASSIGNEE");
+  }
+});
+
+test("registration lock timeout is sanitized and performs no Stripe mutation", async () => {
+  const f = fixture();
+  f.terminalStore.withRegistrationLock = async () => { throw Object.assign(new Error("raw lock error"), { code: "TERMINAL_REGISTRATION_BUSY" }); };
+  await rejectsWithoutStripe(f, () => f.service.registerReader(registration()), "TERMINAL_REGISTRATION_BUSY");
+});
+
+// Model MySQL named locks at the SQL boundary, shared by independent pool/service instances.
+const databasePools = (f) => {
+  const holders = new Map();
+  const calls = [];
+  let onWait = () => {};
+  const execute = async (sql, params) => {
+    const store = f.terminalStore;
+    if (sql.includes("FROM users")) return [await f.staffStore.findUserByIdAndShop({ id: params[0], shopId: params[1] })].filter(Boolean);
+    if (sql.startsWith("SELECT * FROM stripe_terminal_locations")) return [await store.findLocation({ shopId: params[0] })].filter(Boolean);
+    if (sql.startsWith("INSERT INTO stripe_terminal_locations")) {
+      const data = params[0];
+      return store.createLocation({ shopId: data.shopid, stripeLocationId: data.stripe_location_id, displayName: data.display_name, address: { line1: data.address_line1, postalCode: data.postal_code, city: data.city, country: data.country } });
+    }
+    if (sql.includes("FROM stripe_terminal_readers r")) {
+      const row = sql.includes("assigned_user_id = ?")
+        ? await store.findAssignedReader({ shopId: params[0], userId: params[1] })
+        : await store.findReader({ shopId: params[0], readerId: params[1] });
+      return row ? [row] : [];
+    }
+    if (sql.includes("INSERT INTO stripe_terminal_readers")) {
+      if (f.state.readers.some((r) => r.is_active && r.assigned_user_id === params[5])) {
+        throw Object.assign(new Error("duplicate assignment"), { code: "ER_DUP_ENTRY" });
+      }
+      return store.createReader({ stripeReaderId: params[0], serialNumber: params[1], deviceType: params[2], label: params[3], status: params[4], assignedUserId: params[5], assignedServicePointId: params[6], shopId: params[7], locationId: params[8] });
+    }
+    throw new Error(`Unexpected test SQL: ${sql}`);
+  };
+  const pool = () => ({
+    query: async (sql, params) => [await execute(sql, params)],
+    getConnection: async () => {
+      let unlock;
+      return {
+        query: async (sql, params) => {
+          calls.push({ sql, params });
+          if (sql.includes("GET_LOCK")) {
+            const previous = holders.get(params[0]);
+            let release;
+            const held = new Promise((resolve) => { release = resolve; });
+            holders.set(params[0], held);
+            if (previous) { onWait(); await previous; }
+            unlock = () => { if (holders.get(params[0]) === held) holders.delete(params[0]); release(); };
+            return [[{ acquired: 1 }]];
+          }
+          if (sql.includes("RELEASE_LOCK")) { unlock(); unlock = null; return [[{ released: 1 }]]; }
+          return [await execute(sql, params)];
+        },
+        release: () => { assert.strictEqual(unlock, null); },
+        destroy: () => { if (unlock) unlock(); },
+      };
+    },
+  });
+  return { pool, calls, holders, onWait: (listener) => { onWait = listener; } };
+};
+
+test("concurrent registrations across service instances create one tracked reader and one location", async () => {
+  const f = fixture();
+  const db = databasePools(f);
+  const first = buildStripeTerminalReaderService({ stripe: f.stripe, terminalStore: buildStripeTerminalModule({ connection: db.pool() }), staffStore: f.staffStore });
+  const second = buildStripeTerminalReaderService({ stripe: f.stripe, terminalStore: buildStripeTerminalModule({ connection: db.pool() }), staffStore: f.staffStore });
+  let allowCreate;
+  const gate = new Promise((resolve) => { allowCreate = resolve; });
+  let started;
+  const creating = new Promise((resolve) => { started = resolve; });
+  let waiting;
+  const lockedOut = new Promise((resolve) => { waiting = resolve; });
+  db.onWait(waiting);
+  const create = f.stripe.terminal.readers.create;
+  let attempts = 0;
+  f.stripe.terminal.readers.create = async (...args) => {
+    attempts += 1;
+    if (attempts === 1) { started(); await gate; }
+    return create(...args);
+  };
+  const one = first.registerReader(registration());
+  await creating;
+  const two = second.registerReader(registration());
+  try {
+    await Promise.race([lockedOut, two.catch(() => {})]);
+    assert.strictEqual(attempts, 1, "second registration must wait before Stripe mutation");
+  } finally {
+    allowCreate();
+    const results = await Promise.allSettled([one, two]);
+    assert.strictEqual(results.filter((r) => r.status === "fulfilled").length, 1);
+    assert.strictEqual(results.find((r) => r.status === "rejected").reason.code, "TERMINAL_ASSIGNMENT_CONFLICT");
+  }
+  assert.strictEqual(f.state.remoteReaders.size, 1);
+  assert.strictEqual(f.state.remoteLocations.size, 1);
+  assert.strictEqual(f.state.stripeCalls.filter((entry) => entry.name === "locations.create").length, 1);
+  assert.strictEqual(f.state.readers.length, 1);
+  assert(f.state.remoteReaders.has(f.state.readers[0].stripe_reader_id));
+  assert.strictEqual(db.holders.size, 0);
+  assert.strictEqual(db.calls.filter((entry) => entry.sql.includes("GET_LOCK")).length, 2);
+});
+
 test("router binds all six reader endpoints with auth and preserves web/connect bindings", () => {
   const stripePath = require.resolve("../src/controllers/c_stripe");
   const editingPath = require.resolve("../src/controllers/c_orderEditing");
@@ -413,9 +615,11 @@ test("router binds all six reader endpoints with auth and preserves web/connect 
 });
 
 (async () => {
-  for (const { name, run } of tests) {
+  const selected = tests.filter(({ name }) => !process.argv[2] || name.includes(process.argv[2]));
+  assert(selected.length, "No tests matched the requested filter");
+  for (const { name, run } of selected) {
     await run();
     console.log(`PASS ${name}`);
   }
-  console.log(`stripe terminal reader tests passed (${tests.length} tests)`);
+  console.log(`stripe terminal reader tests passed (${selected.length} tests)`);
 })().catch((error) => { console.error(error); process.exitCode = 1; });

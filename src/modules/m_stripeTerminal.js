@@ -25,6 +25,48 @@ const buildStripeTerminalModule = ({ connection }) => {
   }
   const query = (sql, params) => queryWith(connection, sql, params);
 
+  // A shop lock also serializes first-location creation across application instances.
+  // Locked work never needs a second checkout from a pool occupied by waiters.
+  const withRegistrationLock = async ({ shopId }, work) => {
+    requireShopId(shopId);
+    const dedicated = await connection.getConnection();
+    const lockName = `pos:terminal-registration:${Number(shopId)}`;
+    let acquired = false;
+    let reusable = false;
+    try {
+      const rows = await queryWith(dedicated, "SELECT GET_LOCK(?, 10) AS acquired", [lockName]);
+      acquired = rows[0].acquired === 1;
+      if (!acquired) {
+        reusable = rows[0].acquired === 0;
+        const error = new Error("Terminal registration is busy");
+        error.code = "TERMINAL_REGISTRATION_BUSY";
+        throw error;
+      }
+      return await work({
+        terminalStore: buildStripeTerminalModule({ connection: dedicated }),
+        staffStore: {
+          findUserByIdAndShop: async ({ id, shopId: userShopId }) => first(await queryWith(
+            dedicated,
+            "SELECT id, shopid, access, status FROM users WHERE id = ? AND shopid = ? LIMIT 1",
+            [id, userShopId],
+          )),
+        },
+      });
+    } finally {
+      if (acquired) {
+        try {
+          const rows = await queryWith(dedicated, "SELECT RELEASE_LOCK(?) AS released", [lockName]);
+          reusable = rows[0].released === 1;
+        } catch (error) {
+          reusable = false;
+        }
+      }
+      // A connection with an uncertain lock must never return to the pool.
+      if (reusable) dedicated.release();
+      else dedicated.destroy();
+    }
+  };
+
   const findLocation = async ({ shopId }) => {
     requireShopId(shopId);
     return first(await query(
@@ -342,6 +384,7 @@ const buildStripeTerminalModule = ({ connection }) => {
   };
 
   return {
+    withRegistrationLock,
     findLocation, createLocation, updateLocation,
     listReaders, findReader, findAssignedReader, createReader, updateReader,
     findActivePaymentForReader, createPaymentSession, findPaymentSession,

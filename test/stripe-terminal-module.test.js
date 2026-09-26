@@ -229,5 +229,62 @@ const hasShopFilter = (call, alias, shopId) => {
   assert.strictEqual((await callbackStore.findLocation({ shopId })).id, 2);
   assert.deepStrictEqual(callbackCalls[0].params, [shopId]);
 
+  for (const scenario of ["success", "work-failure", "timeout", "acquire-null", "acquire-failure", "release-failure", "release-null"]) {
+    const events = [];
+    const dedicated = {
+      query: async (sql, params) => {
+        events.push({ sql, params });
+        if (sql.includes("GET_LOCK")) {
+          if (scenario === "acquire-failure") throw new Error("lock transport failure");
+          return [[{ acquired: scenario === "timeout" ? 0 : scenario === "acquire-null" ? null : 1 }]];
+        }
+        if (sql.includes("RELEASE_LOCK")) {
+          if (scenario === "release-failure") throw new Error("release transport failure");
+          return [[{ released: scenario === "release-null" ? null : 1 }]];
+        }
+        if (sql.includes("FROM users")) return [[{ id: userId, shopid: shopId, access: 1, status: 1 }]];
+        return [[{ id: 5, shopid: shopId }]];
+      },
+      release: () => events.push("release"),
+      destroy: () => events.push("destroy"),
+    };
+    const poolStore = buildStripeTerminalModule({ connection: {
+      query: () => { throw new Error("Registration work must use its dedicated connection"); },
+      getConnection: async () => { events.push("checkout"); return dedicated; },
+    } });
+    let ran = false;
+    const run = () => poolStore.withRegistrationLock({ shopId }, async ({ terminalStore, staffStore }) => {
+      ran = true;
+      assert.deepStrictEqual(await staffStore.findUserByIdAndShop({ id: userId, shopId }), {
+        id: userId, shopid: shopId, access: 1, status: 1,
+      });
+      assert.strictEqual((await terminalStore.findLocation({ shopId })).id, 5);
+      if (scenario === "work-failure") throw new Error("work failed");
+      return "saved";
+    });
+    if (scenario === "timeout" || scenario === "acquire-null") {
+      await assert.rejects(run, (error) => error.code === "TERMINAL_REGISTRATION_BUSY");
+      assert.strictEqual(ran, false);
+    } else if (scenario === "acquire-failure") {
+      await assert.rejects(run, /lock transport failure/);
+      assert.strictEqual(ran, false);
+    } else if (scenario === "work-failure") {
+      await assert.rejects(run, /work failed/);
+    } else {
+      assert.strictEqual(await run(), "saved");
+    }
+    assert.match(events[1].sql, /GET_LOCK\(\?, 10\)/);
+    assert.deepStrictEqual(events[1].params, ["pos:terminal-registration:7"]);
+    const unlock = events.find((event) => event.sql && event.sql.includes("RELEASE_LOCK"));
+    if (ran) assert.deepStrictEqual(unlock.params, ["pos:terminal-registration:7"]);
+    else assert.strictEqual(unlock, undefined);
+    assert.strictEqual(events.at(-1), ["acquire-null", "acquire-failure", "release-failure", "release-null"].includes(scenario) ? "destroy" : "release");
+    const userQuery = events.find((event) => event.sql && event.sql.includes("FROM users"));
+    if (ran) {
+      assert.match(userQuery.sql, /id = \? AND shopid = \?/);
+      assert.deepStrictEqual(userQuery.params, [userId, shopId]);
+    }
+  }
+
   console.log("stripe terminal module tests passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
