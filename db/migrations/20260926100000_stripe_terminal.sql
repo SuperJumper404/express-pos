@@ -52,6 +52,7 @@ CREATE TABLE `stripe_terminal_payments` (
   `stripe_payment_intent_id` varchar(191) DEFAULT NULL,
   `stripe_charge_id` varchar(191) DEFAULT NULL,
   `idempotency_key` varchar(191) NOT NULL,
+  `stripe_connected_account_id` varchar(191) NOT NULL,
   `amount_cents` int NOT NULL,
   `application_fee_amount` int NOT NULL,
   `currency` varchar(8) NOT NULL DEFAULT 'eur',

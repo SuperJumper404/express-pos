@@ -19,31 +19,28 @@ const requireShopId = (shopId) => {
 
 const first = (rows) => rows[0] || null;
 
-const buildStripeTerminalModule = ({ connection }) => {
+const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
   if (!connection || typeof connection.query !== "function") {
     throw new Error("A database connection is required");
   }
   const query = (sql, params) => queryWith(connection, sql, params);
 
-  // A nonblocking, connection-owned lock elects one creator across processes.
-  // Use this same connection for all work so lock holders cannot exhaust the pool.
-  const withPaymentCreationLock = async ({ shopId, paymentId }, work) => {
-    requireShopId(shopId);
-    if (!Number.isSafeInteger(paymentId) || paymentId <= 0) throw new Error("paymentId is required");
-    const dedicated = await connection.getConnection();
-    const lockName = `pos:terminal-payment:${Number(shopId)}:${paymentId}`;
+  // Nested creation/reader locks share a connection, without holding row locks
+  // during Stripe calls or checking out another connection from a waiting pool.
+  const withPaymentLock = async (lockName, waitSeconds, work) => {
+    const dedicated = lockContext ? lockContext.connection : await connection.getConnection();
+    const context = lockContext || { connection: dedicated, healthy: true };
     let acquired = false;
     let reusable = false;
-    let rollbackFailed = false;
     try {
-      const rows = await queryWith(dedicated, "SELECT GET_LOCK(?, 0) AS acquired", [lockName]);
+      const rows = await queryWith(dedicated, `SELECT GET_LOCK(?, ${waitSeconds}) AS acquired`, [lockName]);
       acquired = rows[0].acquired === 1;
       if (!acquired) {
         reusable = rows[0].acquired === 0;
         if (reusable) return null;
         throw new Error("Terminal payment lock unavailable");
       }
-      const store = buildStripeTerminalModule({ connection: dedicated });
+      const store = buildStripeTerminalModule({ connection: dedicated, lockContext: context });
       store.withTransaction = async (transactionWork) => {
         try {
           await dedicated.beginTransaction();
@@ -53,7 +50,7 @@ const buildStripeTerminalModule = ({ connection }) => {
         } catch (error) {
           try { await dedicated.rollback(); }
           catch (rollbackError) {
-            rollbackFailed = true;
+            context.healthy = false;
             throw new Error("Terminal transaction rollback failed");
           }
           throw error;
@@ -64,12 +61,27 @@ const buildStripeTerminalModule = ({ connection }) => {
       if (acquired) {
         try {
           const rows = await queryWith(dedicated, "SELECT RELEASE_LOCK(?) AS released", [lockName]);
-          reusable = rows[0].released === 1 && !rollbackFailed;
+          reusable = rows[0].released === 1;
         } catch (error) { reusable = false; }
       }
-      if (reusable) dedicated.release();
-      else dedicated.destroy();
+      context.healthy = context.healthy && reusable;
+      if (!lockContext) {
+        if (context.healthy) dedicated.release();
+        else dedicated.destroy();
+      }
     }
+  };
+
+  const withPaymentCreationLock = ({ shopId, paymentId }, work) => {
+    requireShopId(shopId);
+    if (!Number.isSafeInteger(paymentId) || paymentId <= 0) throw new Error("paymentId is required");
+    return withPaymentLock(`pos:terminal-payment:${Number(shopId)}:${paymentId}`, 0, work);
+  };
+
+  const withReaderActionLock = ({ shopId, readerId }, work) => {
+    requireShopId(shopId);
+    if (!Number.isSafeInteger(Number(readerId)) || Number(readerId) <= 0) throw new Error("readerId is required");
+    return withPaymentLock(`pos:terminal-reader:${Number(shopId)}:${Number(readerId)}`, 10, work);
   };
 
   // A shop lock also serializes first-location creation across application instances.
@@ -224,21 +236,21 @@ const buildStripeTerminalModule = ({ connection }) => {
     ));
   };
 
-  const createPaymentSession = async ({ shopId, readerId, cashierUserId, idempotencyKey,
+  const createPaymentSession = async ({ shopId, readerId, cashierUserId, idempotencyKey, connectedAccountId,
     amountCents, applicationFeeAmount, currency = "eur", discountType = null,
     discountValue = null }) => {
     requireShopId(shopId);
     const result = await query(
       `INSERT INTO stripe_terminal_payments
-         (shopid, terminal_reader_id, cashier_user_id, idempotency_key,
+         (shopid, terminal_reader_id, cashier_user_id, idempotency_key, stripe_connected_account_id,
           amount_cents, application_fee_amount, currency, discount_type,
           discount_value, status)
-       SELECT r.shopid, r.id, u.id, ?, ?, ?, ?, ?, ?, 'creating'
+       SELECT r.shopid, r.id, u.id, ?, ?, ?, ?, ?, ?, ?, 'creating'
        FROM stripe_terminal_readers r
        JOIN users u ON u.id = r.assigned_user_id AND u.shopid = r.shopid
        WHERE r.shopid = ? AND r.id = ? AND r.assigned_user_id = ?
          AND r.is_active = 1 AND u.status = 1`,
-      [idempotencyKey, amountCents, applicationFeeAmount, currency,
+      [idempotencyKey, connectedAccountId, amountCents, applicationFeeAmount, currency,
         discountType, discountValue, shopId, readerId, cashierUserId],
     );
     if (result.affectedRows !== 1) throw new Error("Invalid Terminal reader assignment");
@@ -446,7 +458,7 @@ const buildStripeTerminalModule = ({ connection }) => {
   };
 
   return {
-    withRegistrationLock, withPaymentCreationLock,
+    withRegistrationLock, withPaymentCreationLock, withReaderActionLock,
     findLocation, createLocation, updateLocation,
     listReaders, findReader, findAssignedReader, createReader, updateReader,
     findActivePaymentForReader, createPaymentSession, findPaymentSession,

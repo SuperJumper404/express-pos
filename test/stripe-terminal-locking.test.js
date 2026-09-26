@@ -119,14 +119,14 @@ const run = async () => {
   assert.strictEqual(db.holders.size, 0);
   console.log("PASS overlapping start/finalization waits on rows without a lock cycle and revalidates paid orders");
 
-  for (const scenario of ["success", "work-failure", "busy", "acquire-null", "acquire-failure", "release-failure", "release-null", "rollback-failure"]) {
+  for (const kind of ["creation", "reader"]) for (const scenario of ["success", "work-failure", "busy", "acquire-null", "acquire-failure", "release-failure", "release-null", "rollback-failure"]) {
     const events = [];
     const dedicated = {
       query: async (sql, params) => {
         events.push({ sql, params });
         if (sql.includes("GET_LOCK")) {
-          assert(sql.includes("GET_LOCK(?, 0)"));
-          assert.deepStrictEqual(params, ["pos:terminal-payment:7:41"]);
+          assert(sql.includes(`GET_LOCK(?, ${kind === "creation" ? 0 : 10})`));
+          assert.deepStrictEqual(params, [kind === "creation" ? "pos:terminal-payment:7:41" : "pos:terminal-reader:7:21"]);
           if (scenario === "acquire-failure") throw new Error("lock transport failure");
           return [[{ acquired: scenario === "busy" ? 0 : scenario === "acquire-null" ? null : 1 }]];
         }
@@ -147,7 +147,8 @@ const run = async () => {
       getConnection: async () => { events.push("checkout"); return dedicated; },
     } });
     let workCalls = 0;
-    const create = () => store.withPaymentCreationLock({ shopId: 7, paymentId: 41 }, async (lockedStore) => {
+    const method = kind === "creation" ? "withPaymentCreationLock" : "withReaderActionLock";
+    const create = () => store[method]({ shopId: 7, paymentId: 41, readerId: 21 }, async (lockedStore) => {
       workCalls += 1;
       return lockedStore.withTransaction(async (transactionStore) => {
         assert.strictEqual((await transactionStore.findPaymentSession({ shopId: 7, paymentId: 41 })).id, 41);
@@ -161,7 +162,96 @@ const run = async () => {
     assert.strictEqual(workCalls, ["busy", "acquire-null", "acquire-failure"].includes(scenario) ? 0 : 1);
     assert.strictEqual(events.filter((event) => event === "checkout").length, 1);
     assert.strictEqual(events.at(-1), ["acquire-null", "acquire-failure", "release-failure", "release-null", "rollback-failure"].includes(scenario) ? "destroy" : "release");
-    console.log(`PASS payment creation lock ${scenario}`);
+    console.log(`PASS payment ${kind} lock ${scenario}`);
+  }
+
+  // Two repository instances share only the simulated MySQL lock server.
+  // A nested reader lock must use the creation owner's existing connection.
+  const holders = new Map();
+  const waiting = deferred();
+  const resume = deferred();
+  const acquired = deferred();
+  const events = [];
+  let checkouts = 0;
+  const pool = {
+    query: () => { throw new Error("Use the dedicated lock connection"); },
+    getConnection: async () => {
+      const owner = ++checkouts;
+      const held = new Set();
+      return {
+        query: async (sql, [key]) => {
+          if (sql.includes("GET_LOCK")) {
+            while (holders.has(key)) {
+              waiting.resolve();
+              await holders.get(key).released.promise;
+            }
+            holders.set(key, { owner, released: deferred() });
+            held.add(key);
+            events.push(`acquire:${owner}:${key}`);
+            return [[{ acquired: 1 }]];
+          }
+          assert(sql.includes("RELEASE_LOCK"));
+          assert.strictEqual(holders.get(key).owner, owner);
+          const released = holders.get(key).released;
+          holders.delete(key);
+          held.delete(key);
+          released.resolve();
+          events.push(`release:${owner}:${key}`);
+          return [[{ released: 1 }]];
+        },
+        release: () => { assert.strictEqual(held.size, 0); },
+        destroy: () => assert.fail("No lock uncertainty expected"),
+      };
+    },
+  };
+  const first = buildStripeTerminalModule({ connection: pool });
+  const second = buildStripeTerminalModule({ connection: pool });
+  const process = first.withPaymentCreationLock({ shopId: 7, paymentId: 41 }, (store) =>
+    store.withReaderActionLock({ shopId: 7, readerId: 21 }, async () => {
+      events.push("process"); acquired.resolve(); await resume.promise;
+    }));
+  await acquired.promise;
+  const cancel = second.withReaderActionLock({ shopId: 7, readerId: 21 }, async () => { events.push("cancel"); });
+  await waiting.promise;
+  assert(!events.includes("cancel"));
+  resume.resolve();
+  await Promise.all([process, cancel]);
+  assert.strictEqual(checkouts, 2, "nested lock must not checkout another pool connection");
+  assert(events.indexOf("cancel") > events.indexOf("release:1:pos:terminal-reader:7:21"));
+  assert.strictEqual(holders.size, 0);
+  console.log("PASS reader handoffs serialize across repository instances and nested locks reuse the connection");
+
+  for (const failure of ["release-failure", "release-null", "rollback-failure"]) {
+    const cleanup = [];
+    const store = buildStripeTerminalModule({ connection: {
+      query: () => assert.fail("Use the lock connection"),
+      getConnection: async () => ({
+        query: async (sql, [key]) => {
+          if (sql.includes("GET_LOCK")) return [[{ acquired: 1 }]];
+          if (key.includes("terminal-reader")) {
+            if (failure === "release-failure") throw new Error("reader release uncertain");
+            if (failure === "release-null") return [[{ released: null }]];
+          }
+          return [[{ released: 1 }]];
+        },
+        beginTransaction: async () => {},
+        commit: async () => {},
+        rollback: async () => { throw new Error("rollback uncertain"); },
+        release: () => cleanup.push("release"),
+        destroy: () => cleanup.push("destroy"),
+      }),
+    } });
+    const nested = () => store.withPaymentCreationLock({ shopId: 7, paymentId: 41 }, (lockedStore) =>
+      lockedStore.withReaderActionLock({ shopId: 7, readerId: 21 }, async (readerStore) => {
+        if (failure === "rollback-failure") {
+          await readerStore.withTransaction(async () => { throw new Error("work failed"); });
+        }
+        return "finished";
+      }));
+    if (failure === "rollback-failure") await assert.rejects(nested, /rollback failed/);
+    else assert.strictEqual(await nested(), "finished");
+    assert.deepStrictEqual(cleanup, ["destroy"], "outer release must not clear nested uncertainty");
+    console.log(`PASS nested reader ${failure} destroys the connection`);
   }
 };
 let timer;

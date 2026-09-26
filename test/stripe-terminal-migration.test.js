@@ -24,6 +24,7 @@ assert.match(up, /UNIQUE KEY[^\n]*\(`stripe_location_id`\)/);
 assert.match(up, /UNIQUE KEY[^\n]*\(`stripe_reader_id`\)/);
 assert.match(up, /UNIQUE KEY[^\n]*\(`stripe_payment_intent_id`\)/);
 assert.match(up, /UNIQUE KEY[^\n]*\(`idempotency_key`\)/);
+assert.match(up, /`stripe_connected_account_id` varchar\(191\) NOT NULL/);
 assert.match(up, /UNIQUE KEY[^\n]*\(`terminal_payment_id`,`order_id`\)/);
 assert.match(up, /UNIQUE KEY[^\n]*\(`active_assigned_user_id`\)/);
 assert.match(up, /UNIQUE KEY[^\n]*\(`active_assigned_service_point_id`\)/);

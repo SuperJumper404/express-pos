@@ -47,7 +47,7 @@ const hasShopFilter = (call, alias, shopId) => {
   hasShopFilter(calls.find((call) => /FROM stripe_terminal_payments p/.test(call.sql)), "p", shopId);
 
   const session = { shopId, readerId: 3, cashierUserId: userId,
-    idempotencyKey: "terminal-42", amountCents: 1200, applicationFeeAmount: 20 };
+    idempotencyKey: "terminal-42", connectedAccountId: "acct_reserved", amountCents: 1200, applicationFeeAmount: 20 };
   await store.createPaymentSession(session);
   const insert = calls.find((call) => /INSERT INTO stripe_terminal_payments/.test(call.sql));
   assert.match(insert.sql, /FROM stripe_terminal_readers r/);
@@ -55,6 +55,8 @@ const hasShopFilter = (call, alias, shopId) => {
   assert.match(insert.sql, /r\.assigned_user_id = \?/);
   assert.ok(insert.params.includes(shopId));
   assert.ok(insert.params.includes("terminal-42"));
+  assert.match(insert.sql, /stripe_connected_account_id/);
+  assert.deepStrictEqual(insert.params, ["terminal-42", "acct_reserved", 1200, 20, "eur", null, null, 7, 3, 11]);
 
   await store.findPaymentSession({ shopId, paymentId: 42 });
   hasShopFilter(calls.at(-1), "p", shopId);
