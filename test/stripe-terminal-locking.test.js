@@ -119,14 +119,15 @@ const run = async () => {
   assert.strictEqual(db.holders.size, 0);
   console.log("PASS overlapping start/finalization waits on rows without a lock cycle and revalidates paid orders");
 
-  for (const kind of ["creation", "reader"]) for (const scenario of ["success", "work-failure", "busy", "acquire-null", "acquire-failure", "release-failure", "release-null", "rollback-failure"]) {
+  for (const kind of ["creation", "reader", "refund"]) for (const scenario of ["success", "work-failure", "busy", "acquire-null", "acquire-failure", "release-failure", "release-null", "rollback-failure"]) {
     const events = [];
     const dedicated = {
       query: async (sql, params) => {
         events.push({ sql, params });
         if (sql.includes("GET_LOCK")) {
-          assert(sql.includes(`GET_LOCK(?, ${kind === "creation" ? 0 : 10})`));
-          assert.deepStrictEqual(params, [kind === "creation" ? "pos:terminal-payment:7:41" : "pos:terminal-reader:7:21"]);
+          assert(sql.includes(`GET_LOCK(?, ${kind === "reader" ? 10 : 0})`));
+          assert.deepStrictEqual(params, [{ creation: "pos:terminal-payment:7:41", reader: "pos:terminal-reader:7:21",
+            refund: "pos:terminal-refund:7:41:12" }[kind]]);
           if (scenario === "acquire-failure") throw new Error("lock transport failure");
           return [[{ acquired: scenario === "busy" ? 0 : scenario === "acquire-null" ? null : 1 }]];
         }
@@ -147,8 +148,8 @@ const run = async () => {
       getConnection: async () => { events.push("checkout"); return dedicated; },
     } });
     let workCalls = 0;
-    const method = kind === "creation" ? "withPaymentCreationLock" : "withReaderActionLock";
-    const create = () => store[method]({ shopId: 7, paymentId: 41, readerId: 21 }, async (lockedStore) => {
+    const method = { creation: "withPaymentCreationLock", reader: "withReaderActionLock", refund: "withOrderRefundLock" }[kind];
+    const create = () => store[method]({ shopId: 7, paymentId: 41, readerId: 21, orderId: 12 }, async (lockedStore) => {
       workCalls += 1;
       return lockedStore.withTransaction(async (transactionStore) => {
         assert.strictEqual((await transactionStore.findPaymentSession({ shopId: 7, paymentId: 41 })).id, 41);

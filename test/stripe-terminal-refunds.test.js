@@ -10,6 +10,11 @@ const { buildStripeTerminalPaymentService } = require("../src/services/stripeTer
 const tests = [];
 const test = (name, work) => tests.push({ name, work });
 const clone = (value) => JSON.parse(JSON.stringify(value));
+const deferred = () => {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+};
 const paidOrder = () => ({ id: 12, shopid: 7, status: 1, subtotal: 12, payment_status: "paid",
   payment_provider: "stripe_terminal", payment: "Carte bancaire - TPE Stripe", stripe_terminal_payment_id: 41 });
 const response = () => ({ status(code) { this.statusCode = code; return this; }, json(payload) { this.payload = payload; return this; } });
@@ -159,6 +164,14 @@ const refundFixture = () => {
     });
     queue = run.catch(() => {});
     return run;
+  };
+  let refundLocked = false;
+  terminalStore.withOrderRefundLock = async (scope, work) => {
+    assert.deepStrictEqual(scope, { shopId: 7, orderId: 12, paymentId: 41 });
+    if (refundLocked) return null;
+    refundLocked = true;
+    try { return await work(terminalStore); }
+    finally { refundLocked = false; }
   };
   const idempotency = new Map();
   const stripe = { paymentIntents: { retrieve: async (id) => {
@@ -483,28 +496,163 @@ test("round1 old generations and mismatched refund IDs cannot undo the current r
   assert.strictEqual(current.stripe_refund_id, "re_order12_g1");
 });
 
-test("round1 concurrent retries reserve one next generation and use one provider refund identity", async () => {
+const seedRefundAttempt = (f, status) => {
+  const refund = { id: "re_order12_g1", status: status === "creating" ? "pending" : status,
+    amount: 1000, currency: "eur", payment_intent: "pi_group",
+    metadata: { shop_id: "7", order_id: "12", terminal_payment_id: "41", refund_attempt_generation: "1" } };
+  f.state.refunds.push(refund);
+  Object.assign(f.state.allocation, { refund_generation: 1, refund_status: status,
+    stripe_refund_id: status === "creating" ? null : refund.id });
+  f.state.order.payment_status = ["failed", "canceled"].includes(status) ? "paid" : "refund_pending";
+  return refund;
+};
+
+test("round2 creating/pending observer stays pinned when failure arrives before reservation", async () => {
+  for (const observedStatus of ["creating", "pending"]) for (const failure of ["failed", "canceled"]) {
+    const f = refundFixture();
+    const refund = seedRefundAttempt(f, observedStatus);
+    const observed = deferred();
+    const resume = deferred();
+    const retrieve = f.stripe.paymentIntents.retrieve;
+    let reads = 0;
+    f.stripe.paymentIntents.retrieve = async (...args) => {
+      const intent = await retrieve(...args);
+      if (++reads === 1) { observed.resolve(); await resume.promise; }
+      return intent;
+    };
+    const stale = f.service.refundTerminalOrder(f.input);
+    await observed.promise;
+    try {
+      refund.status = failure;
+      await f.service.reconcileTerminalRefund(clone(refund));
+    } finally { resume.resolve(); }
+    const result = await stale;
+    assert.strictEqual(f.state.allocation.refund_generation, 1, "an ineligible observer must not advance g1");
+    assert.deepStrictEqual(result, { refundId: refund.id, refundStatus: failure });
+    assert.strictEqual(f.state.calls.length, 0);
+    assert.strictEqual(buildCashRegisterArchiveFields({ order: f.state.order }).payment_status, "paid");
+    await f.service.refundTerminalOrder(f.input);
+    assert.strictEqual(f.state.allocation.refund_generation, 2);
+    assert.deepStrictEqual(f.state.calls.map((call) => [call.params.amount, call.options.idempotencyKey]), [
+      [1000, "terminal-refund:7:41:12:g2"],
+    ]);
+  }
+});
+
+test("round2 two failed observers advance once and issue exactly one Stripe creation for g2", async () => {
   const f = refundFixture();
-  await f.service.refundTerminalOrder(f.input);
-  f.state.refunds[0].status = "failed";
-  await f.service.reconcileTerminalRefund(clone(f.state.refunds[0]));
-  let arrivals = 0;
-  let both;
-  const gate = new Promise((resolve) => { both = resolve; });
-  f.stripe.refunds.list = async () => {
-    if (++arrivals === 2) both();
-    await gate;
-    return { data: [clone(f.state.refunds[0])], has_more: false };
+  seedRefundAttempt(f, "failed");
+  const observed = deferred();
+  const callers = [deferred(), deferred()];
+  const listing = deferred();
+  const resumeList = deferred();
+  const retrieve = f.stripe.paymentIntents.retrieve;
+  let reads = 0;
+  f.stripe.paymentIntents.retrieve = async (...args) => {
+    const intent = await retrieve(...args);
+    const index = reads++;
+    if (reads === 2) observed.resolve();
+    if (index < 2) await callers[index].promise;
+    return intent;
   };
-  const results = await Promise.all([
-    f.service.refundTerminalOrder(f.input), f.service.refundTerminalOrder({ ...f.input, actorId: 99 }),
-  ]);
-  assert.strictEqual(f.state.refunds.length, 2);
+  const list = f.stripe.refunds.list;
+  let listings = 0;
+  f.stripe.refunds.list = async (...args) => {
+    const snapshot = await list(...args);
+    if (++listings === 1) { listing.resolve(); await resumeList.promise; }
+    return snapshot;
+  };
+  const winner = f.service.refundTerminalOrder(f.input);
+  const loser = f.service.refundTerminalOrder({ ...f.input, actorId: 99 });
+  let reused;
+  try {
+    await observed.promise;
+    callers[0].resolve();
+    await listing.promise;
+    assert.strictEqual(f.state.allocation.refund_generation, 2);
+    callers[1].resolve();
+    reused = await loser;
+  } finally {
+    callers.forEach((caller) => caller.resolve());
+    resumeList.resolve();
+  }
+  const created = await winner;
+  assert.strictEqual(f.state.calls.length, 1, "one Stripe create call, not two calls sharing an idempotency key");
+  assert.deepStrictEqual(reused, { refundId: null, refundStatus: "creating" });
+  assert.strictEqual(created.refundId, "re_order12_g2");
+  assert.strictEqual(f.state.allocation.refund_generation, 2);
+  assert.strictEqual(f.state.queries.filter(({ sql, params }) => sql.startsWith("UPDATE stripe_terminal_payment_orders")
+    && params[0] === 2 && params[2] === "creating").length, 1);
+  assert.strictEqual(f.state.calls[0].options.idempotencyKey, "terminal-refund:7:41:12:g2");
+  assert.strictEqual((await f.service.refundTerminalOrder(f.input)).refundId, created.refundId);
+  assert.strictEqual(f.state.calls.length, 1);
+});
+
+test("round2 a caller observing g2 creating cannot duplicate its in-flight Stripe creation", async () => {
+  const f = refundFixture();
+  seedRefundAttempt(f, "failed");
+  const listing = deferred();
+  const resume = deferred();
+  const list = f.stripe.refunds.list;
+  let listings = 0;
+  f.stripe.refunds.list = async (...args) => {
+    const snapshot = await list(...args);
+    if (++listings === 1) { listing.resolve(); await resume.promise; }
+    return snapshot;
+  };
+  const owner = f.service.refundTerminalOrder(f.input);
+  let current;
+  try {
+    await listing.promise;
+    assert.strictEqual(f.state.allocation.refund_generation, 2);
+    assert.strictEqual(f.state.allocation.refund_status, "creating");
+    current = await f.service.refundTerminalOrder({ ...f.input, actorId: 99 });
+  } finally { resume.resolve(); }
+  const created = await owner;
+  assert.strictEqual(f.state.calls.length, 1, "the current creating generation has only one provider owner");
+  assert.deepStrictEqual(current, { refundId: null, refundStatus: "creating" });
+  assert.strictEqual(created.refundId, "re_order12_g2");
+  assert.strictEqual(f.state.allocation.refund_generation, 2);
+});
+
+test("round2 stale failed observer cannot take over a newer ambiguous generation after its owner exits", async () => {
+  const f = refundFixture();
+  seedRefundAttempt(f, "failed");
+  const observed = deferred();
+  const resume = deferred();
+  const retrieve = f.stripe.paymentIntents.retrieve;
+  let reads = 0;
+  f.stripe.paymentIntents.retrieve = async (...args) => {
+    const intent = await retrieve(...args);
+    if (++reads === 1) { observed.resolve(); await resume.promise; }
+    return intent;
+  };
+  const stale = f.service.refundTerminalOrder(f.input);
+  await observed.promise;
+  const list = f.stripe.refunds.list;
+  try {
+    f.stripe.refunds.list = async () => { throw new Error("raw Stripe unavailable"); };
+    await assert.rejects(() => f.service.refundTerminalOrder(f.input), (error) => !/raw|Stripe unavailable/.test(error.message));
+    assert.strictEqual(f.state.allocation.refund_generation, 2);
+  } finally { f.stripe.refunds.list = list; resume.resolve(); }
+  assert.deepStrictEqual(await stale, { refundId: null, refundStatus: "creating" });
+  assert.strictEqual(f.state.calls.length, 0, "the losing g1 observer cannot create g2 after lock release");
+  await f.service.refundTerminalOrder(f.input);
+  assert.strictEqual(f.state.allocation.refund_generation, 2);
+  assert.strictEqual(f.state.calls.length, 1);
+  assert.strictEqual(f.state.calls[0].options.idempotencyKey, "terminal-refund:7:41:12:g2");
+});
+
+test("round2 reservation compares the exact observed terminal status as well as generation", async () => {
+  const f = refundFixture();
+  seedRefundAttempt(f, "canceled");
+  const before = clone(f.state.allocation);
+  await f.terminalStore.withTransaction((transaction) => transaction.reserveOrderRefund({
+    shopId: 7, orderId: 12, paymentId: 41, generation: 1, observedStatus: "failed",
+  }));
   assert.strictEqual(f.state.allocation.refund_generation, 1);
-  assert(results.every((result) => result.refundId === "re_order12_g1"));
-  assert.deepStrictEqual(f.state.calls.slice(1).map((call) => call.options.idempotencyKey), [
-    "terminal-refund:7:41:12:g1", "terminal-refund:7:41:12:g1",
-  ]);
+  assert.deepStrictEqual(f.state.allocation, before);
+  assert.strictEqual(f.state.order.payment_status, "paid");
 });
 
 test("round1 delayed pending retrieval cannot undo a confirmed failure", async () => {
@@ -578,8 +726,15 @@ test("round1 missing or mismatched retrieval identity never creates another refu
 (async () => {
   let failures = 0;
   for (const { name, work } of tests) {
-    try { await work(); console.log(`PASS ${name}`); }
+    let timer;
+    try {
+      await Promise.race([work(), new Promise((resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("Refund scheduler stalled")), 3000);
+      })]);
+      console.log(`PASS ${name}`);
+    }
     catch (error) { failures += 1; console.error(`FAIL ${name}: ${error.stack}`); }
+    finally { clearTimeout(timer); }
   }
   console.log(`stripe terminal refund/archive tests: ${tests.length - failures}/${tests.length} passed`);
   process.exitCode = failures ? 1 : 0;

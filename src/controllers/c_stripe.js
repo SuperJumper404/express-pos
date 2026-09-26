@@ -1194,48 +1194,56 @@ const buildTerminalOrderRefundService = ({
       const { paymentId } = scope;
       await validateOwnership(current);
 
-      // Reserve the order before the network call. Archive takes the same order
-      // row lock and rejects refund_pending, including after ambiguous failures.
-      const attempt = await retryTerminalTransaction(store.withTransaction, (transaction) => transaction.reserveOrderRefund({
-        ...scope, generation: allocation.refund_generation,
-      }));
-      const generation = attempt.refund_generation;
-      if (["failed", "canceled"].includes(attempt.refund_status)) return dto(attempt);
-      if (allocation.amount_cents === 0) return await persist(current, { id: null, status: "succeeded" }, generation, false);
-      const stripe = getStripeClient();
-      const metadata = { shop_id: String(shopId), order_id: String(orderId), terminal_payment_id: String(paymentId),
-        refund_attempt_generation: String(generation) };
-      const matches = (refund) => Object.keys(metadata).every((key) => (refund.metadata || {})[key] === metadata[key]);
-      let refund = attempt.stripe_refund_id ? await stripe.refunds.retrieve(attempt.stripe_refund_id) : null;
-      if (attempt.stripe_refund_id && (!refund || refund.id !== attempt.stripe_refund_id)) {
-        throw new Error("Terminal refund identity mismatch");
-      }
-      let cursor;
-      const seen = new Set();
-      // Recover the refund from Stripe even after its idempotency cache expires.
-      while (!attempt.stripe_refund_id) {
-        const page = await stripe.refunds.list({ payment_intent: payment.stripe_payment_intent_id, limit: 100,
-          ...(cursor ? { starting_after: cursor } : {}) });
-        if (!page || !Array.isArray(page.data) || typeof page.has_more !== "boolean") throw new Error("Invalid refund list");
-        for (const candidate of page.data) {
-          if (!candidate.id || seen.has(candidate.id)) throw new Error("Invalid refund page");
-          seen.add(candidate.id);
-          if (matches(candidate)) {
-            if (refund) throw new Error("Ambiguous Terminal refund");
-            refund = candidate;
-          }
+      // Serialize provider work across processes, but release row locks before
+      // Stripe calls. Webhooks can still reconcile while an HTTP call is pending.
+      const result = await store.withOrderRefundLock(scope, async (lockedStore) => {
+        const { attempt, matched } = await retryTerminalTransaction(lockedStore.withTransaction,
+          (transaction) => transaction.reserveOrderRefund({ ...scope, generation: allocation.refund_generation,
+            observedStatus: allocation.refund_status }));
+        // A stale observer may report the current attempt, never create for it.
+        if (!matched) return dto(attempt);
+        const generation = attempt.refund_generation;
+        const locked = { ...current, store: lockedStore };
+        if (allocation.amount_cents === 0) return persist(locked, { id: null, status: "succeeded" }, generation, false);
+        const stripe = getStripeClient();
+        const metadata = { shop_id: String(shopId), order_id: String(orderId), terminal_payment_id: String(paymentId),
+          refund_attempt_generation: String(generation) };
+        const matches = (refund) => Object.keys(metadata).every((key) => (refund.metadata || {})[key] === metadata[key]);
+        let refund = attempt.stripe_refund_id ? await stripe.refunds.retrieve(attempt.stripe_refund_id) : null;
+        if (attempt.stripe_refund_id && (!refund || refund.id !== attempt.stripe_refund_id)) {
+          throw new Error("Terminal refund identity mismatch");
         }
-        if (!page.has_more) break;
-        if (!page.data.length) throw new Error("Incomplete refund page");
-        cursor = page.data[page.data.length - 1].id;
-      }
-      const authoritative = Boolean(refund);
-      if (!refund) refund = await stripe.refunds.create({
-        payment_intent: payment.stripe_payment_intent_id, amount: allocation.amount_cents,
-        reverse_transfer: true, refund_application_fee: true, metadata,
-      }, { idempotencyKey: `terminal-refund:${shopId}:${paymentId}:${orderId}:g${generation}` });
-      if (validateRefund(current, refund) !== generation) throw new Error("Terminal refund generation mismatch");
-      return await persist(current, refund, generation, authoritative);
+        let cursor;
+        const seen = new Set();
+        // Recover the refund from Stripe even after its idempotency cache expires.
+        while (!attempt.stripe_refund_id) {
+          const page = await stripe.refunds.list({ payment_intent: payment.stripe_payment_intent_id, limit: 100,
+            ...(cursor ? { starting_after: cursor } : {}) });
+          if (!page || !Array.isArray(page.data) || typeof page.has_more !== "boolean") throw new Error("Invalid refund list");
+          for (const candidate of page.data) {
+            if (!candidate.id || seen.has(candidate.id)) throw new Error("Invalid refund page");
+            seen.add(candidate.id);
+            if (matches(candidate)) {
+              if (refund) throw new Error("Ambiguous Terminal refund");
+              refund = candidate;
+            }
+          }
+          if (!page.has_more) break;
+          if (!page.data.length) throw new Error("Incomplete refund page");
+          cursor = page.data[page.data.length - 1].id;
+        }
+        const authoritative = Boolean(refund);
+        if (!refund) refund = await stripe.refunds.create({
+          payment_intent: payment.stripe_payment_intent_id, amount: allocation.amount_cents,
+          reverse_transfer: true, refund_application_fee: true, metadata,
+        }, { idempotencyKey: `terminal-refund:${shopId}:${paymentId}:${orderId}:g${generation}` });
+        if (validateRefund(current, refund) !== generation) throw new Error("Terminal refund generation mismatch");
+        return persist(locked, refund, generation, authoritative);
+      });
+      if (result) return result;
+      const attempt = await store.findOrderAllocation(scope);
+      if (!attempt) throw new Error("Missing Terminal refund attempt");
+      return dto(attempt);
     } catch (error) {
       throw new DomainError(502, "TERMINAL_REFUND_FAILED", "Impossible de confirmer le remboursement terminal.");
     }

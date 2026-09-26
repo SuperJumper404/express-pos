@@ -25,7 +25,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
   }
   const query = (sql, params) => queryWith(connection, sql, params);
 
-  // Nested creation/reader locks share a connection, without holding row locks
+  // Named locks share a connection, without holding row locks
   // during Stripe calls or checking out another connection from a waiting pool.
   const withPaymentLock = async (lockName, waitSeconds, work) => {
     const dedicated = lockContext ? lockContext.connection : await connection.getConnection();
@@ -82,6 +82,12 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
     requireShopId(shopId);
     if (!Number.isSafeInteger(Number(readerId)) || Number(readerId) <= 0) throw new Error("readerId is required");
     return withPaymentLock(`pos:terminal-reader:${Number(shopId)}:${Number(readerId)}`, 10, work);
+  };
+
+  const withOrderRefundLock = ({ shopId, paymentId, orderId }, work) => {
+    requireShopId(shopId);
+    if (![paymentId, orderId].every((id) => Number.isSafeInteger(id) && id > 0)) throw new Error("Invalid refund scope");
+    return withPaymentLock(`pos:terminal-refund:${Number(shopId)}:${paymentId}:${orderId}`, 0, work);
   };
 
   // A shop lock also serializes first-location creation across application instances.
@@ -494,16 +500,19 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
   };
 
   // The caller supplies one transaction; no Stripe call runs under these locks.
-  const reserveOrderRefund = async ({ generation, ...scope }) => {
+  const reserveOrderRefund = async ({ generation, observedStatus, ...scope }) => {
     const current = await lockOrderRefund(scope);
     const allocation = current.allocation;
-    if (allocation.refund_generation !== generation) return allocation;
-    const failed = ["failed", "canceled"].includes(allocation.refund_status);
-    if (allocation.refund_status != null && !failed) return allocation;
+    if (allocation.refund_generation !== generation || allocation.refund_status !== observedStatus) {
+      return { attempt: allocation, matched: false };
+    }
+    const failed = ["failed", "canceled"].includes(observedStatus);
+    if (observedStatus != null && !failed) return { attempt: allocation, matched: true };
     if (failed && generation === 4294967295) throw new Error("Terminal refund generation exhausted");
-    return saveOrderRefund(scope, current, {
+    const attempt = await saveOrderRefund(scope, current, {
       generation: failed ? generation + 1 : generation, refundId: null, refundStatus: "creating",
     });
+    return { attempt, matched: true };
   };
 
   const recordOrderRefund = async ({ generation, refundId, refundStatus, authoritative = false, ...scope }) => {
@@ -526,7 +535,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
   };
 
   return {
-    withRegistrationLock, withPaymentCreationLock, withReaderActionLock,
+    withRegistrationLock, withPaymentCreationLock, withReaderActionLock, withOrderRefundLock,
     findLocation, createLocation, updateLocation,
     listReaders, findReader, findAssignedReader, createReader, updateReader,
     findActivePaymentForReader, createPaymentSession, findPaymentSession,
