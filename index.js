@@ -1,6 +1,7 @@
 const express = require("express");
 const path = require("path");
 const bodyParser = require("body-parser");
+const { failed } = require("./src/helpers/response");
 const routerUsers = require("./src/routers/r_users");
 const routerProducts = require("./src/routers/r_products");
 const routerCategory = require("./src/routers/r_category");
@@ -66,6 +67,12 @@ app.use(
 );
 app.use(bodyParser.json({ limit: "1mb" }));
 app.use(bodyParser.urlencoded({ extended: true, limit: "1mb" }));
+app.use((error, req, res, next) => {
+  if (error && error.type === "entity.parse.failed") {
+    return failed(res, "Corps JSON invalide.", "INVALID_JSON", 400);
+  }
+  return next(error);
+});
 app.get(`${prefix}`, function (req, res) {
   res.json({ msg: "Hai" });
 });

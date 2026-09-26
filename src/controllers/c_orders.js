@@ -26,6 +26,7 @@ const { normalizePaymentMethod } = require("../helpers/paymentMethod");
 const { buildOrderDetailStockEntry } = require("../helpers/orderDetailStock");
 const {
   buildCashRegisterCollectionFields,
+  buildCashRegisterArchiveFields,
   shouldCancelPendingStripePayment,
 } = require("../helpers/cashRegisterPayment");
 const { getStripe } = require("../config/stripe");
@@ -429,6 +430,7 @@ const buildArchiveOrderController = ({
     discountValue: req.body.discount_value,
   };
   console.log("ON archive :", id);
+  let terminalOrder = false;
 
   try {
     const orders = await findOrderById(id, req.shopid);
@@ -436,7 +438,9 @@ const buildArchiveOrderController = ({
       return custom(res, 404, "Commande introuvable.", null, null);
     }
 
-    await syncPendingStripe(orders[0]);
+    terminalOrder = orders[0].stripe_terminal_payment_id != null;
+    if (terminalOrder) buildCashRegisterArchiveFields({ order: orders[0] });
+    else await syncPendingStripe(orders[0]);
 
     const response = await archiveOrder(id, payment_method, req.shopid, discount);
     if (response.affectedRows) {
@@ -445,6 +449,10 @@ const buildArchiveOrderController = ({
 
     return custom(res, 404, "Commande introuvable.", null, null);
   } catch (error) {
+    if (terminalOrder) {
+      if (error instanceof DomainError) return custom(res, error.status, error.message, null, { code: error.code });
+      return failed(res, "Impossible d'archiver la commande payee sur le terminal.");
+    }
     if (error instanceof DomainError && error.code === "STRIPE_PAYMENT_NOT_SETTLED") {
       return custom(res, error.status, error.message, null, { code: error.code });
     }

@@ -7,6 +7,8 @@ const {
 const { calculateDiscount } = require("../helpers/discount");
 const { parseMoney } = require("../helpers/money");
 const { withTransaction } = require("../helpers/withTransaction");
+const { buildStripeTerminalModule } = require("./m_stripeTerminal");
+const DomainError = require("../helpers/domainError");
 
 const queryResult = async (connection, sql, params = []) => {
   const [result] = await (connection || pool).query(sql, params);
@@ -14,6 +16,9 @@ const queryResult = async (connection, sql, params = []) => {
 };
 
 const archiveSqlRepository = {
+  findTerminalAllocationForArchive: ({ shopId, orderId, paymentId, connection }) => (
+    buildStripeTerminalModule({ connection }).findOrderAllocation({ shopId, orderId, paymentId })
+  ),
   lockShopForArchive: ({ shopId, connection }) => queryResult(
     connection,
     "SELECT id FROM shop WHERE id = ? FOR UPDATE",
@@ -372,6 +377,18 @@ const buildOrderArchiveModule = ({
       });
       if (!order) throw new Error("Commande introuvable");
 
+      let terminalAllocation;
+      if (order.stripe_terminal_payment_id != null) {
+        buildCashRegisterArchiveFields({ order });
+        terminalAllocation = await repository.findTerminalAllocationForArchive({
+          shopId: order.shopid, orderId: order.id, paymentId: order.stripe_terminal_payment_id, connection,
+        });
+        if (!terminalAllocation || !Number.isSafeInteger(terminalAllocation.amount_cents)
+          || terminalAllocation.amount_cents < 0) {
+          throw new DomainError(409, "TERMINAL_PAYMENT_NOT_SETTLED", "Le paiement terminal ne peut pas etre archive.");
+        }
+      }
+
       const orderDetails = await repository.findOrderDetails({
         orderId: id,
         connection,
@@ -379,8 +396,19 @@ const buildOrderArchiveModule = ({
       const discountApplication = applyArchiveDiscountToDetails({
         order,
         orderDetails,
-        discount,
+        discount: terminalAllocation && orderDetails.length ? {
+          discountType: "amount",
+          discountValue: (orderDetails.reduce((sum, detail) => sum + cents(detail.total), 0)
+            - terminalAllocation.amount_cents) / 100,
+        } : terminalAllocation ? {} : discount,
       });
+      if (terminalAllocation && !orderDetails.length) {
+        const discountAmount = (cents(order.subtotal) - terminalAllocation.amount_cents) / 100;
+        discountApplication.archiveDiscountFields = {
+          subtotal: terminalAllocation.amount_cents / 100, subtotal_before_discount: parseMoney(order.subtotal),
+          discount_type: "amount", discount_value: discountAmount, discount_amount: discountAmount,
+        };
+      }
       const archivePaymentFields = buildCashRegisterArchiveFields({
         order,
         paymentMethod,
@@ -477,9 +505,20 @@ module.exports = {
       conn.query(
         `SELECT orders.*,
                 service_points.name AS service_point_name,
-                stock_reservations.stock_reservation_status
+                stock_reservations.stock_reservation_status,
+                CASE WHEN orders.payment_status = 'paid'
+                  AND orders.payment_provider = 'stripe_terminal'
+                  AND terminal_payment.status = 'succeeded'
+                THEN terminal_allocation.amount_cents ELSE NULL END AS stripe_terminal_amount_cents
          FROM orders
          LEFT JOIN service_points ON service_points.id = orders.service_point_id
+         LEFT JOIN stripe_terminal_payment_orders terminal_allocation
+           ON terminal_allocation.order_id = orders.id
+           AND terminal_allocation.shopid = orders.shopid
+           AND terminal_allocation.terminal_payment_id = orders.stripe_terminal_payment_id
+         LEFT JOIN stripe_terminal_payments terminal_payment
+           ON terminal_payment.id = terminal_allocation.terminal_payment_id
+           AND terminal_payment.shopid = orders.shopid
          LEFT JOIN (
            SELECT order_id, MAX(status) AS stock_reservation_status
            FROM order_stock_reservations
