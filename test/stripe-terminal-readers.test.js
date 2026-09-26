@@ -589,7 +589,7 @@ test("router binds all six reader endpoints with auth and preserves web/connect 
   try {
     const { routers, webhookRouter } = require(routerPath);
     const controller = require("../src/controllers/c_stripeTerminal");
-    const { authentication, authAdmin } = require("../src/helpers/middleware/auth");
+    const { authentication, authAdmin, authorizeCashRegister } = require("../src/helpers/middleware/auth");
     for (const [verb, path, handler, admin] of [
       ["get", "/stripe/terminal/readers", "listReaders", true],
       ["post", "/stripe/terminal/readers", "registerReader", true],
@@ -599,7 +599,7 @@ test("router binds all six reader endpoints with auth and preserves web/connect 
       ["get", "/stripe/terminal/current-reader", "getCurrentReader", false],
     ]) {
       const route = routers.stack.find((layer) => layer.route && layer.route.path === path && layer.route.methods[verb]).route;
-      assert.deepStrictEqual(route.stack.map((layer) => layer.handle), admin ? [authentication, authAdmin, controller[handler]] : [authentication, controller[handler]]);
+      assert.deepStrictEqual(route.stack.map((layer) => layer.handle), admin ? [authentication, authAdmin, controller[handler]] : [authentication, authorizeCashRegister, controller[handler]]);
     }
     const connect = routers.stack.find((layer) => layer.route.path === "/stripe/connect/status").route;
     assert.deepStrictEqual(connect.stack.map((layer) => layer.handle), [authentication, authAdmin, legacy.getConnectStatus]);

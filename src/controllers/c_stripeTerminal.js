@@ -2,6 +2,38 @@ const { custom, failed } = require("../helpers/response");
 const { isStaffAccess } = require("../helpers/staffAccess");
 const { buildStripeTerminalModule } = require("../modules/m_stripeTerminal");
 const { buildStripeTerminalReaderService, TerminalReaderError } = require("../services/stripeTerminalReaders");
+const { buildStripeTerminalPaymentService, TerminalPaymentError } = require("../services/stripeTerminalPayments");
+
+let defaultPaymentService;
+const getDefaultPaymentService = () => {
+  if (!defaultPaymentService) {
+    const connection = require("../config/dbPool");
+    const { withTransaction } = require("../helpers/withTransaction");
+    const { getStripe } = require("../config/stripe");
+    defaultPaymentService = buildStripeTerminalPaymentService({
+      stripe: {
+        get terminal() { return getStripe().terminal; },
+        get paymentIntents() { return getStripe().paymentIntents; },
+      },
+      terminalStore: {
+        ...buildStripeTerminalModule({ connection }),
+        withTransaction: (work) => withTransaction((transaction) => work(
+          buildStripeTerminalModule({ connection: transaction }),
+        )),
+      },
+      shopStore: {
+        findShop: async ({ shopId }) => {
+          const [rows] = await connection.query(
+            "SELECT id, stripe_account_id, stripe_charges_enabled, stripe_commission_percent FROM shop WHERE id = ? LIMIT 1",
+            [shopId],
+          );
+          return rows[0] || null;
+        },
+      },
+    });
+  }
+  return defaultPaymentService;
+};
 
 let defaultReaderService;
 const getDefaultReaderService = () => {
@@ -25,21 +57,21 @@ const getDefaultReaderService = () => {
   return defaultReaderService;
 };
 
-const buildStripeTerminalController = ({ readerService } = {}) => {
-  const handle = (method, parameters, { admin = true, status = 200 } = {}) => async (req, res) => {
+const buildStripeTerminalController = ({ readerService, paymentService } = {}) => {
+  const handle = (method, parameters, { admin = true, status = 200, payment = false } = {}) => async (req, res) => {
     if (req.sessionSubject === "service_point" || req.access == null
       || !isStaffAccess(req.access) || (admin && req.access !== 0)) {
       return failed(res, "Acces au terminal refuse.", "TERMINAL_FORBIDDEN", 403);
     }
     try {
-      const service = readerService || getDefaultReaderService();
+      const service = payment ? paymentService || getDefaultPaymentService() : readerService || getDefaultReaderService();
       const data = await service[method]({
-        ...parameters(req), shopId: req.shopid, actorUserId: req.id,
+        ...parameters(req), shopId: req.shopid, ...(payment ? { cashierUserId: req.id } : { actorUserId: req.id }),
       });
       return custom(res, status, "Terminal mis a jour.", null, data);
     } catch (error) {
-      const safeError = error instanceof TerminalReaderError
-        ? error : new TerminalReaderError("TERMINAL_INTERNAL_ERROR");
+      const safeError = error instanceof TerminalReaderError || error instanceof TerminalPaymentError
+        ? error : new (payment ? TerminalPaymentError : TerminalReaderError)("TERMINAL_INTERNAL_ERROR");
       return failed(res, safeError.message, safeError.code, safeError.statusCode);
     }
   };
@@ -62,6 +94,12 @@ const buildStripeTerminalController = ({ readerService } = {}) => {
     })),
     refreshReaders: handle("refreshReaders", () => ({})),
     getCurrentReader: handle("getCurrentReader", (req) => ({ userId: req.id }), { admin: false }),
+    startPayment: handle("startPayment", (req) => {
+      const body = req.body || {};
+      return { orderIds: body.orderIds, discountType: body.discountType, discountValue: body.discountValue };
+    }, { admin: false, payment: true }),
+    getPaymentStatus: handle("getPaymentStatus", (req) => ({ paymentId: req.params.id }), { admin: false, payment: true }),
+    cancelPayment: handle("cancelPayment", (req) => ({ paymentId: req.params.id }), { admin: false, payment: true }),
   };
 };
 

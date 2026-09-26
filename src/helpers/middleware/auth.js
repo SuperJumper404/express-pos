@@ -32,14 +32,16 @@ const buildModuleAuthorization = ({
     if (Array.isArray(permissions) && permissions.includes(moduleKey)) return next();
     return custom(res, 403, "Acces refuse.", {}, null);
   } catch (error) {
-    return failed(res, "Erreur serveur.", error.message);
+    return failed(res, "Erreur serveur.", moduleKey === "cashregister" ? "TERMINAL_INTERNAL_ERROR" : error.message);
   }
 };
 
 const authorizeStocks = buildModuleAuthorization({ moduleKey: "stocks" });
+const authorizeCashRegister = buildModuleAuthorization({ moduleKey: "cashregister" });
 module.exports = {
   buildModuleAuthorization,
   authorizeStocks,
+  authorizeCashRegister,
   authentication: (req, res, next) => {
     const authorization = req.headers.authorization;
     if (authorization) {
