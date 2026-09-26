@@ -125,7 +125,7 @@ const run = async () => {
       query: async (sql, params) => {
         events.push({ sql, params });
         if (sql.includes("GET_LOCK")) {
-          assert(sql.includes(`GET_LOCK(?, ${kind === "reader" ? 10 : 0})`));
+          assert(sql.includes(`GET_LOCK(?, ${kind === "creation" ? 0 : 10})`));
           assert.deepStrictEqual(params, [{ creation: "pos:terminal-payment:7:41", reader: "pos:terminal-reader:7:21",
             refund: "pos:terminal-refund:7:41:12" }[kind]]);
           if (scenario === "acquire-failure") throw new Error("lock transport failure");

@@ -87,7 +87,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
   const withOrderRefundLock = ({ shopId, paymentId, orderId }, work) => {
     requireShopId(shopId);
     if (![paymentId, orderId].every((id) => Number.isSafeInteger(id) && id > 0)) throw new Error("Invalid refund scope");
-    return withPaymentLock(`pos:terminal-refund:${Number(shopId)}:${paymentId}:${orderId}`, 0, work);
+    return withPaymentLock(`pos:terminal-refund:${Number(shopId)}:${paymentId}:${orderId}`, 10, work);
   };
 
   // A shop lock also serializes first-location creation across application instances.

@@ -891,7 +891,16 @@ const buildRefundPaidOrderController = ({
 
     const payment = rows[0];
     if (payment.stripe_terminal_payment_id != null) {
-      const data = await refundTerminal({ shopId: req.shopid, orderId, actorId: req.id });
+      let data;
+      try { data = await refundTerminal({ shopId: req.shopid, orderId, actorId: req.id }); }
+      catch (error) {
+        if (error instanceof DomainError && error.code === "TERMINAL_REFUND_BUSY") {
+          return custom(res, 409, "Remboursement terminal en cours. Veuillez reessayer.", null, {
+            code: "TERMINAL_REFUND_BUSY", retryable: true,
+          });
+        }
+        throw error;
+      }
       return success(res, data.refundStatus === "succeeded"
         ? "Commande remboursee." : "Demande de remboursement enregistree.", null, data);
     }
@@ -1183,6 +1192,7 @@ const buildTerminalOrderRefundService = ({
     }
   };
   const refundTerminalOrder = async ({ shopId, orderId, actorId }) => {
+    let result;
     try {
       if (![shopId, orderId, actorId].every((id) => Number.isSafeInteger(Number(id)) && Number(id) > 0)) {
         throw new Error("Invalid refund scope");
@@ -1194,9 +1204,9 @@ const buildTerminalOrderRefundService = ({
       const { paymentId } = scope;
       await validateOwnership(current);
 
-      // Serialize provider work across processes, but release row locks before
-      // Stripe calls. Webhooks can still reconcile while an HTTP call is pending.
-      const result = await store.withOrderRefundLock(scope, async (lockedStore) => {
+      // Wait for the owner before comparing the observed attempt. Row locks are
+      // released before Stripe calls, so webhooks can still reconcile in flight.
+      result = await store.withOrderRefundLock(scope, async (lockedStore) => {
         const { attempt, matched } = await retryTerminalTransaction(lockedStore.withTransaction,
           (transaction) => transaction.reserveOrderRefund({ ...scope, generation: allocation.refund_generation,
             observedStatus: allocation.refund_status }));
@@ -1240,13 +1250,13 @@ const buildTerminalOrderRefundService = ({
         if (validateRefund(current, refund) !== generation) throw new Error("Terminal refund generation mismatch");
         return persist(locked, refund, generation, authoritative);
       });
-      if (result) return result;
-      const attempt = await store.findOrderAllocation(scope);
-      if (!attempt) throw new Error("Missing Terminal refund attempt");
-      return dto(attempt);
     } catch (error) {
       throw new DomainError(502, "TERMINAL_REFUND_FAILED", "Impossible de confirmer le remboursement terminal.");
     }
+    if (result === null) {
+      throw new DomainError(409, "TERMINAL_REFUND_BUSY", "Remboursement terminal en cours. Veuillez reessayer.", { retryable: true });
+    }
+    return result;
   };
   return { refundTerminalOrder, reconcileTerminalRefund };
 };
