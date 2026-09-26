@@ -41,6 +41,21 @@ const {
 } = require("../modules/m_checkout");
 
 const getBaseUrl = (req) => `${req.protocol}://${req.get("host")}`;
+const { mFindOrderById, mUpdateTerminalRefundState } = require("../modules/m_orders");
+const { buildStripeTerminalModule } = require("../modules/m_stripeTerminal");
+const { buildStripeTerminalWebhookHandler } = require("../services/stripeTerminalWebhooks");
+
+const getTerminalStore = () => {
+  const connection = require("../config/dbPool");
+  const { withTransaction } = require("../helpers/withTransaction");
+  return {
+    ...buildStripeTerminalModule({ connection }),
+    withTransaction: (work) => withTransaction((transaction) => work(
+      buildStripeTerminalModule({ connection: transaction }),
+    )),
+  };
+};
+const handleTerminalWebhookEvent = (event) => buildStripeTerminalWebhookHandler({ terminalStore: getTerminalStore() })(event);
 
 const syncStripeAccountStatus = async (shop, stripeAccount) => {
   const status = {
@@ -763,6 +778,8 @@ const refundIdempotencyKey = (shopId, orderId, generation) => (
 );
 
 const buildStripeWebhookEventHandler = ({
+  handleTerminalEvent = handleTerminalWebhookEvent,
+  reconcileTerminalRefund = (refund) => terminalOrderRefundService.reconcileTerminalRefund(refund),
   getStripe: getStripeClient = getStripe,
   markPaymentAttemptFailed: markAttemptFailed = markPaymentAttemptFailed,
   markPaymentCanceled: markCanceled = markPaymentCanceled,
@@ -792,8 +809,18 @@ const buildStripeWebhookEventHandler = ({
   };
 
   return async (event) => {
+    const terminalResult = await handleTerminalEvent(event);
+    if (terminalResult) return terminalResult;
     const paymentIntent = event.data.object;
     if (["refund.created", "refund.updated", "refund.failed"].includes(event.type)) {
+      if (Object.prototype.hasOwnProperty.call(paymentIntent.metadata || {}, "terminal_payment_id")) {
+        try {
+          const refund = await getStripeClient().refunds.retrieve(paymentIntent.id);
+          return await reconcileTerminalRefund(refund);
+        } catch (error) {
+          throw new Error("Impossible de rapprocher le remboursement terminal.");
+        }
+      }
       const stripe = getStripeClient();
       const refund = await stripe.refunds.retrieve(event.data.object.id);
       const authoritativeRefund = await enrichRefundWithCumulativeAmount(stripe, refund);
@@ -834,7 +861,13 @@ exports.handleWebhook = async (req, res) => {
 };
 
 const buildRefundPaidOrderController = ({
-  getPaidOrderForRefund: findPaidOrder = getPaidOrderForRefund,
+  getPaidOrderForRefund: findPaidOrder = async (orderId, shopId) => {
+    const payments = await getPaidOrderForRefund(orderId, shopId);
+    if (payments.length) return payments;
+    const orders = await mFindOrderById(orderId, shopId);
+    return orders[0] && orders[0].stripe_terminal_payment_id != null ? orders : payments;
+  },
+  refundTerminalOrder: refundTerminal = (input) => terminalOrderRefundService.refundTerminalOrder(input),
   getStripe: getStripeClient = getStripe,
   recordRefundState: persistRefundState = recordRefundState,
 } = {}) => async (req, res) => {
@@ -857,6 +890,11 @@ const buildRefundPaidOrderController = ({
     }
 
     const payment = rows[0];
+    if (payment.stripe_terminal_payment_id != null) {
+      const data = await refundTerminal({ shopId: req.shopid, orderId, actorId: req.id });
+      return success(res, data.refundStatus === "succeeded"
+        ? "Commande remboursee." : "Demande de remboursement enregistree.", null, data);
+    }
     const coherentRefunded = payment.payment_status === "refunded"
       && payment.payment_record_status === "refunded";
     const legacyUnknown = coherentRefunded
@@ -1078,3 +1116,119 @@ exports.markQrTablePaymentAtCounter = buildMarkQrTablePaymentAtCounter();
 
 exports.buildRefundPaidOrderController = buildRefundPaidOrderController;
 exports.refundPaidOrder = buildRefundPaidOrderController();
+
+const buildTerminalOrderRefundService = ({
+  getStripe: getStripeClient = getStripe,
+  terminalStore,
+  findOrderById = mFindOrderById,
+  updateRefundState = mUpdateTerminalRefundState,
+} = {}) => {
+  const context = async (shopId, orderId) => {
+    const [order] = await findOrderById(orderId, shopId);
+    if (!order || Number(order.shopid) !== shopId || Number(order.id) !== orderId
+      || order.stripe_terminal_payment_id == null
+      || !["paid", "refund_pending", "refunded"].includes(order.payment_status)) throw new Error("Invalid Terminal order");
+    const paymentId = Number(order.stripe_terminal_payment_id);
+    const store = terminalStore || getTerminalStore();
+    const payment = await store.findPaymentSession({ shopId, paymentId });
+    const allocation = await store.findOrderAllocation({ shopId, orderId, paymentId });
+    if (!payment || payment.status !== "succeeded" || !payment.stripe_payment_intent_id
+      || Number(payment.shopid) !== shopId || Number(payment.id) !== paymentId
+      || !allocation || !Number.isSafeInteger(allocation.amount_cents) || allocation.amount_cents < 0
+      || Number(allocation.shopid) !== shopId || Number(allocation.order_id) !== orderId
+      || Number(allocation.terminal_payment_id) !== paymentId) throw new Error("Invalid Terminal allocation");
+    return { order, payment, allocation, scope: { shopId, orderId, paymentId } };
+  };
+  const persist = async ({ scope }, refund) => {
+    const paymentStatus = refund.status === "succeeded" ? "refunded"
+      : ["failed", "canceled"].includes(refund.status) ? "paid" : "refund_pending";
+    const saved = await updateRefundState({ ...scope, paymentStatus });
+    if (!saved || saved.affectedRows !== 1) {
+      const [current] = await findOrderById(scope.orderId, scope.shopId);
+      if (!current || current.payment_status !== "refunded"
+        || Number(current.stripe_terminal_payment_id) !== scope.paymentId) throw new Error("Terminal refund persistence failed");
+      return { refundId: refund.id, refundStatus: "succeeded", already_refunded: true };
+    }
+    return { refundId: refund.id, refundStatus: refund.status };
+  };
+  const validateRefund = ({ scope, payment, allocation }, refund) => {
+    const metadata = refund && refund.metadata || {};
+    if (!refund || !refund.id || metadata.shop_id !== String(scope.shopId)
+      || metadata.order_id !== String(scope.orderId) || metadata.terminal_payment_id !== String(scope.paymentId)
+      || refund.amount !== allocation.amount_cents || stripeObjectId(refund.payment_intent) !== payment.stripe_payment_intent_id
+      || refund.currency !== payment.currency
+      || !["succeeded", "pending", "requires_action", "failed", "canceled"].includes(refund.status)) {
+      throw new Error("Terminal refund mismatch");
+    }
+  };
+  const reconcileTerminalRefund = async (refund) => {
+    try {
+      const metadata = refund.metadata || {};
+      const shopId = Number(metadata.shop_id);
+      const orderId = Number(metadata.order_id);
+      if (![shopId, orderId].every((id) => Number.isSafeInteger(id) && id > 0)) throw new Error("Invalid refund scope");
+      const current = await context(shopId, orderId);
+      validateRefund(current, refund);
+      return await persist(current, refund);
+    } catch (error) {
+      throw new DomainError(502, "TERMINAL_REFUND_FAILED", "Impossible de confirmer le remboursement terminal.");
+    }
+  };
+  const refundTerminalOrder = async ({ shopId, orderId, actorId }) => {
+    try {
+      if (![shopId, orderId, actorId].every((id) => Number.isSafeInteger(Number(id)) && Number(id) > 0)) {
+        throw new Error("Invalid refund scope");
+      }
+      shopId = Number(shopId);
+      orderId = Number(orderId);
+      const current = await context(shopId, orderId);
+      const { order, payment, allocation, scope } = current;
+      const { paymentId } = scope;
+      if (order.payment_status === "refunded") {
+        return { refundId: null, refundStatus: "succeeded", already_refunded: true };
+      }
+
+      // Reserve the order before the network call. Archive takes the same order
+      // row lock and rejects refund_pending, including after ambiguous failures.
+      const reserved = await updateRefundState({ ...scope, paymentStatus: "refund_pending" });
+      if (!reserved || reserved.affectedRows !== 1) throw new Error("Terminal refund reservation failed");
+      if (allocation.amount_cents === 0) return await persist(current, { id: null, status: "succeeded" });
+      const stripe = getStripeClient();
+      const metadata = { shop_id: String(shopId), order_id: String(orderId), terminal_payment_id: String(paymentId) };
+      const matches = (refund) => Object.keys(metadata).every((key) => (refund.metadata || {})[key] === metadata[key]);
+      let refund;
+      let cursor;
+      const seen = new Set();
+      // Recover the refund from Stripe even after its idempotency cache expires.
+      for (;;) {
+        const page = await stripe.refunds.list({ payment_intent: payment.stripe_payment_intent_id, limit: 100,
+          ...(cursor ? { starting_after: cursor } : {}) });
+        if (!page || !Array.isArray(page.data) || typeof page.has_more !== "boolean") throw new Error("Invalid refund list");
+        for (const candidate of page.data) {
+          if (!candidate.id || seen.has(candidate.id)) throw new Error("Invalid refund page");
+          seen.add(candidate.id);
+          if (matches(candidate)) {
+            if (refund) throw new Error("Ambiguous Terminal refund");
+            refund = candidate;
+          }
+        }
+        if (!page.has_more) break;
+        if (!page.data.length) throw new Error("Incomplete refund page");
+        cursor = page.data[page.data.length - 1].id;
+      }
+      if (!refund) refund = await stripe.refunds.create({
+        payment_intent: payment.stripe_payment_intent_id, amount: allocation.amount_cents,
+        reverse_transfer: true, refund_application_fee: true, metadata,
+      }, { idempotencyKey: `terminal-refund:${shopId}:${paymentId}:${orderId}` });
+      validateRefund(current, refund);
+      return await persist(current, refund);
+    } catch (error) {
+      throw new DomainError(502, "TERMINAL_REFUND_FAILED", "Impossible de confirmer le remboursement terminal.");
+    }
+  };
+  return { refundTerminalOrder, reconcileTerminalRefund };
+};
+
+const terminalOrderRefundService = buildTerminalOrderRefundService();
+exports.buildTerminalOrderRefundService = buildTerminalOrderRefundService;
+exports.refundTerminalOrder = terminalOrderRefundService.refundTerminalOrder;

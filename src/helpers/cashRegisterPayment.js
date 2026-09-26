@@ -3,6 +3,8 @@ const PAYMENT_STATUSES = {
   REQUIRES_PAYMENT: "requires_payment",
 };
 const { normalizePaymentMethod } = require("./paymentMethod");
+const DomainError = require("./domainError");
+const { TERMINAL_PAYMENT_METHOD } = require("./stripeTerminal");
 
 const normalizeCashPaymentMethod = (paymentMethod) =>
   normalizePaymentMethod(paymentMethod);
@@ -43,6 +45,20 @@ const buildCashRegisterCollectionFields = (paymentMethod) => {
 };
 
 const buildCashRegisterArchiveFields = ({ order = {}, paymentMethod } = {}) => {
+  if (order.stripe_terminal_payment_id != null) {
+    if (order.payment_status !== PAYMENT_STATUSES.PAID) {
+      throw new DomainError(409, "TERMINAL_PAYMENT_NOT_SETTLED", "Le paiement terminal ne peut pas etre archive.");
+    }
+    return {
+      payment: TERMINAL_PAYMENT_METHOD,
+      payment_status: PAYMENT_STATUSES.PAID,
+      payment_provider: "stripe_terminal",
+      stripe_payment_intent_id: order.stripe_payment_intent_id || null,
+      stripe_terminal_payment_id: order.stripe_terminal_payment_id,
+      used_payment_method: TERMINAL_PAYMENT_METHOD,
+    };
+  }
+
   if (order.payment_status === PAYMENT_STATUSES.PAID && isTemporaryCounterPayment(order)) {
     return {
       ...buildCashRegisterCollectionFields(paymentMethod),

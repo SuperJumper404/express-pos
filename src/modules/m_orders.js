@@ -7,6 +7,9 @@ const {
 const { calculateDiscount } = require("../helpers/discount");
 const { parseMoney } = require("../helpers/money");
 const { withTransaction } = require("../helpers/withTransaction");
+const { buildStripeTerminalModule } = require("./m_stripeTerminal");
+const { retryTerminalTransaction } = require("../services/stripeTerminalWebhooks");
+const DomainError = require("../helpers/domainError");
 
 const queryResult = async (connection, sql, params = []) => {
   const [result] = await (connection || pool).query(sql, params);
@@ -14,6 +17,9 @@ const queryResult = async (connection, sql, params = []) => {
 };
 
 const archiveSqlRepository = {
+  findTerminalAllocationForArchive: ({ shopId, orderId, paymentId, connection }) => (
+    buildStripeTerminalModule({ connection }).findOrderAllocation({ shopId, orderId, paymentId })
+  ),
   lockShopForArchive: ({ shopId, connection }) => queryResult(
     connection,
     "SELECT id FROM shop WHERE id = ? FOR UPDATE",
@@ -372,6 +378,18 @@ const buildOrderArchiveModule = ({
       });
       if (!order) throw new Error("Commande introuvable");
 
+      let terminalAllocation;
+      if (order.stripe_terminal_payment_id != null) {
+        buildCashRegisterArchiveFields({ order });
+        terminalAllocation = await repository.findTerminalAllocationForArchive({
+          shopId: order.shopid, orderId: order.id, paymentId: order.stripe_terminal_payment_id, connection,
+        });
+        if (!terminalAllocation || !Number.isSafeInteger(terminalAllocation.amount_cents)
+          || terminalAllocation.amount_cents < 0) {
+          throw new DomainError(409, "TERMINAL_PAYMENT_NOT_SETTLED", "Le paiement terminal ne peut pas etre archive.");
+        }
+      }
+
       const orderDetails = await repository.findOrderDetails({
         orderId: id,
         connection,
@@ -379,8 +397,19 @@ const buildOrderArchiveModule = ({
       const discountApplication = applyArchiveDiscountToDetails({
         order,
         orderDetails,
-        discount,
+        discount: terminalAllocation && orderDetails.length ? {
+          discountType: "amount",
+          discountValue: (orderDetails.reduce((sum, detail) => sum + cents(detail.total), 0)
+            - terminalAllocation.amount_cents) / 100,
+        } : terminalAllocation ? {} : discount,
       });
+      if (terminalAllocation && !orderDetails.length) {
+        const discountAmount = (cents(order.subtotal) - terminalAllocation.amount_cents) / 100;
+        discountApplication.archiveDiscountFields = {
+          subtotal: terminalAllocation.amount_cents / 100, subtotal_before_discount: parseMoney(order.subtotal),
+          discount_type: "amount", discount_value: discountAmount, discount_amount: discountAmount,
+        };
+      }
       const archivePaymentFields = buildCashRegisterArchiveFields({
         order,
         paymentMethod,
@@ -1155,6 +1184,18 @@ module.exports = {
 
 const legacyAllArchivedOrdersWithDetails = module.exports.mAllArchivedOrdersWithDetails;
 module.exports.buildOrderArchiveModule = buildOrderArchiveModule;
+module.exports.mUpdateTerminalRefundState = ({ shopId, orderId, paymentId, paymentStatus }) => {
+  if (!["refund_pending", "refunded", "paid"].includes(paymentStatus)) {
+    throw new Error("Invalid Terminal refund state");
+  }
+  return retryTerminalTransaction((work) => work(), () => queryResult(
+    null,
+    `UPDATE orders SET payment_status = ?
+     WHERE shopid = ? AND id = ? AND stripe_terminal_payment_id = ?
+       AND payment_status IN ('paid', 'refund_pending')`,
+    [paymentStatus, shopId, orderId, paymentId],
+  ));
+};
 module.exports.pickArchiveOrderFields = pickArchiveOrderFields;
 module.exports.mArchiveOrder = orderArchiveModule.mArchiveOrder;
 module.exports.mDetailArchivedOrder = orderArchiveModule.mDetailArchivedOrder;
