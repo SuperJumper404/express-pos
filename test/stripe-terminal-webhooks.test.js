@@ -12,7 +12,7 @@ const fixture = () => {
   let state = {
     payment: { id: 41, shopid: 7, status: "processing", amount_cents: 1500,
       currency: "eur", stripe_payment_intent_id: "pi_terminal" },
-    orders: [12, 31].map((id) => ({ id, shopid: 7, status: 1, payment_status: "unpaid", stripe_terminal_payment_id: null })),
+    orders: [12, 31].map((id) => ({ id, shopid: 7, status: 3, payment_status: "unpaid", stripe_terminal_payment_id: null })),
     updates: 0,
   };
   const queries = [];
@@ -76,7 +76,7 @@ test("browser-independent success finalizes linked orders once under duplicate d
   await Promise.all([f.handle(f.event()), f.handle(f.event())]);
   await f.handle(f.event());
   assert.strictEqual(f.state().updates, 1);
-  assert(f.state().orders.every((o) => o.payment_status === "paid" && o.stripe_terminal_payment_id === 41 && o.status === 1));
+  assert(f.state().orders.every((o) => o.payment_status === "paid" && o.stripe_terminal_payment_id === 41 && o.status === 3));
   assert.strictEqual(f.state().payment.stripe_charge_id, "ch_terminal");
   const locks = f.queries.filter((q) => q.sql.includes("FOR UPDATE"));
   assert(locks[0].sql.includes("FROM orders o"));

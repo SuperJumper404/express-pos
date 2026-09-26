@@ -16,7 +16,7 @@ const deferred = () => {
 const fixture = () => {
   const state = {
     reader: { id: 21, shopid: 7, assigned_user_id: 11, is_active: 1, stripe_reader_id: "tmr_server" },
-    orders: [12, 31].map((id, i) => ({ id, shopid: 7, status: 1, payment_status: "unpaid", subtotal: i ? "12.00" : "8.00", stripe_terminal_payment_id: null })),
+    orders: [12, 31].map((id, i) => ({ id, shopid: 7, status: 3, payment_status: "unpaid", subtotal: i ? "12.00" : "8.00", stripe_terminal_payment_id: null })),
     shop: { id: 7, stripe_account_id: "acct_shop", stripe_charges_enabled: 1, stripe_commission_percent: 5 },
     sessions: [], allocations: [], calls: [], events: [], remote: { id: "tmr_server", status: "online", action: null },
     intent: null, locked: false, intentsByKey: new Map(), intentsById: new Map(), creationLocks: new Set(),
@@ -60,7 +60,7 @@ const fixture = () => {
       const reader = await terminalStore.findAssignedReader({ shopId, userId });
       if (!reader) throw new Error("No active assigned Terminal reader");
       const orders = state.orders.filter((o) => o.shopid === shopId && orderIds.includes(o.id));
-      if (orders.length !== orderIds.length || orders.some((o) => o.status !== 1 || o.payment_status !== "unpaid" || o.stripe_terminal_payment_id != null)) throw new Error("Invalid Terminal order selection");
+      if (orders.length !== orderIds.length || orders.some((o) => o.status !== 3 || o.payment_status !== "unpaid" || o.stripe_terminal_payment_id != null)) throw new Error("Invalid Terminal order selection");
       if (state.competing) throw new Error("Order has an active Terminal payment");
       return { reader: clone(reader), orders: clone(orders), activePayment: clone(state.sessions.find((s) => s.shopid === shopId && s.terminal_reader_id === reader.id && ["creating", "processing"].includes(s.status)) || null) };
     },
@@ -116,7 +116,7 @@ const fixture = () => {
       create: call("create", (params, options) => {
         assert(state.events.indexOf("commit") > state.events.indexOf("session"), "commit creating session before Stripe");
         assert.strictEqual(state.sessions.at(-1).status, "creating");
-        assert.strictEqual(state.allocations.filter((a) => a.terminal_payment_id === state.sessions.at(-1).id).length, 2);
+        assert.strictEqual(state.allocations.filter((a) => a.terminal_payment_id === state.sessions.at(-1).id).length, state.expectedAllocationCount || 2);
         assert.strictEqual(options.idempotencyKey, state.sessions.at(-1).idempotency_key);
         if (state.intentsByKey.has(options.idempotencyKey)) {
           const previous = state.intentsByKey.get(options.idempotencyKey);
@@ -173,6 +173,22 @@ test("aggregates persisted order amounts, allocates discount and creates a platf
   assert(f.state.events.indexOf("commit") < f.state.events.indexOf("create"));
   assert(f.state.events.indexOf("intent-saved") < f.state.events.indexOf("process"));
   assert(f.state.events.indexOf("process") < f.state.events.indexOf("status:processing"));
+});
+
+test("cash-register success exposes only authoritative settled allocations for a discounted receipt", async () => {
+  const f = fixture();
+  f.state.orders = [{ ...f.state.orders[0], status: 3, subtotal: "12.00" }];
+  f.state.expectedAllocationCount = 1;
+  const result = await f.service.startPayment({ ...input, orderIds: [12], discountType: "amount", discountValue: 125 });
+  assert.strictEqual(result.amountCents, 1075);
+  f.state.intent.status = "succeeded";
+  const paid = await f.service.getPaymentStatus(scope);
+  assert.strictEqual(paid.amountCents, 1075);
+  assert.deepStrictEqual(paid.allocations, [{ orderId: 12, amountCents: 1075 }]);
+  assert.strictEqual(paid.allocations.reduce((sum, a) => sum + a.amountCents, 0), paid.amountCents);
+  assert.strictEqual(f.state.orders[0].status, 3);
+  f.state.allocations[0].amount_cents = 1074;
+  await rejects(() => f.service.getPaymentStatus(scope), "TERMINAL_RECOVERY_REQUIRED");
 });
 
 test("idempotent retry returns the active session without additional Stripe calls", async () => {
@@ -252,7 +268,7 @@ for (const pauseAt of ["reader-read", "cancel-action"]) test(`round2 delayed can
   f.state.intent.status = "succeeded";
   f.state.remote.action = null;
   assert.strictEqual((await other.getPaymentStatus(scope)).status, "succeeded");
-  f.state.orders.push(...[52, 71].map((id) => ({ id, shopid: 7, status: 1, payment_status: "unpaid", subtotal: "10.00", stripe_terminal_payment_id: null })));
+  f.state.orders.push(...[52, 71].map((id) => ({ id, shopid: 7, status: 3, payment_status: "unpaid", subtotal: "10.00", stripe_terminal_payment_id: null })));
   const starting = other.startPayment({ ...input, orderIds: [52, 71] });
   // Wait for B to reach the reader lock (or, on broken code, process B).
   await handoff.promise;
@@ -525,7 +541,7 @@ test("polling success finalizes paid orders atomically without archiving them", 
   f.state.intent.status = "succeeded"; f.state.intent.latest_charge = { id: "ch_terminal", raw: "raw-secret" };
   assert.strictEqual((await f.service.getPaymentStatus(scope)).status, "succeeded");
   assert.strictEqual(f.state.sessions[0].stripe_charge_id, "ch_terminal");
-  assert(f.state.orders.every((o) => o.payment_status === "paid" && o.status === 1 && o.stripe_terminal_payment_id === 41));
+  assert(f.state.orders.every((o) => o.payment_status === "paid" && o.status === 3 && o.stripe_terminal_payment_id === 41));
   const count = f.state.calls.length;
   assert.strictEqual((await f.service.getPaymentStatus(scope)).status, "succeeded");
   assert.strictEqual(f.state.calls.length, count);

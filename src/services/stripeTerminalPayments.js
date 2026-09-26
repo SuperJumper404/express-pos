@@ -64,17 +64,29 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
     try { return await operation(); }
     catch (error) { fail("TERMINAL_STRIPE_ERROR"); }
   };
-  const dto = async (session, store = terminalStore) => ({
-    id: session.id,
-    readerId: session.terminal_reader_id,
-    status: session.status,
-    amountCents: session.amount_cents,
-    currency: session.currency,
-    orderIds: (await store.listPaymentAllocations({ shopId: session.shopid, paymentId: session.id }))
-      .map((a) => a.order_id).sort((a, b) => a - b),
-    failureCode: ERRORS[session.failure_code] ? session.failure_code : null,
-    failureMessage: ERRORS[session.failure_code] ? ERRORS[session.failure_code][1] : null,
-  });
+  const dto = async (session, store = terminalStore) => {
+    const allocations = (await store.listPaymentAllocations({ shopId: session.shopid, paymentId: session.id }))
+      .map((a) => ({ orderId: a.order_id, amountCents: a.amount_cents }))
+      .sort((a, b) => a.orderId - b.orderId);
+    if (session.status === "succeeded" && (!allocations.length
+      || allocations.some((a) => !Number.isSafeInteger(a.orderId) || a.orderId <= 0
+        || !Number.isSafeInteger(a.amountCents) || a.amountCents < 0)
+      || new Set(allocations.map((a) => a.orderId)).size !== allocations.length
+      || allocations.reduce((sum, a) => sum + a.amountCents, 0) !== session.amount_cents)) {
+      fail("TERMINAL_RECOVERY_REQUIRED");
+    }
+    return {
+      id: session.id,
+      readerId: session.terminal_reader_id,
+      status: session.status,
+      amountCents: session.amount_cents,
+      currency: session.currency,
+      orderIds: allocations.map((a) => a.orderId),
+      ...(session.status === "succeeded" && { allocations }),
+      failureCode: ERRORS[session.failure_code] ? session.failure_code : null,
+      failureMessage: ERRORS[session.failure_code] ? ERRORS[session.failure_code][1] : null,
+    };
+  };
   const payment = async (input, store = terminalStore, forUpdate = false) => {
     const shopId = positiveId(input.shopId);
     const cashierUserId = positiveId(input.cashierUserId);

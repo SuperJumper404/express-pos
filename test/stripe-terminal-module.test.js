@@ -21,11 +21,36 @@ const hasShopFilter = (call, alias, shopId) => {
   const shopId = 7;
   const userId = 11;
   const reader = { id: 3, shopid: shopId, assigned_user_id: userId, is_active: 1 };
+  for (const status of [3, 0, 1, 2, 4, 5]) {
+    const realistic = makeStore((sql) => {
+      if (/FROM stripe_terminal_readers r/.test(sql)) return [reader];
+      if (/FROM orders o/.test(sql)) return [{ id: 21, shopid: shopId, status,
+        payment_status: "unpaid", subtotal: "12.00", payment: "Paiement au comptoir" }];
+      if (/FROM stripe_terminal_payment_orders a/.test(sql)) return /SELECT a\.\*/.test(sql)
+        ? [{ order_id: 21, amount_cents: 1075 }] : [];
+      if (/FROM stripe_terminal_payments p/.test(sql)) return /status IN/.test(sql) ? [] : [{
+        id: 42, shopid: shopId, stripe_payment_intent_id: "pi_test", status: "processing",
+      }];
+      return { affectedRows: 1 };
+    });
+    const reserve = () => realistic.store.lockReaderAndOrders({ shopId, userId, orderIds: [21] });
+    const settle = () => realistic.store.finalizePaymentSucceeded({
+      shopId, paymentId: 42, stripePaymentIntentId: "pi_test", timestamp: new Date(),
+    });
+    if (status === 3) {
+      assert.strictEqual((await reserve()).orders[0].status, 3);
+      assert.deepStrictEqual(await settle(), { finalized: true });
+    } else {
+      await assert.rejects(reserve, /Invalid Terminal order selection/);
+      await assert.rejects(settle, /Terminal order finalization incomplete/);
+      assert(!realistic.calls.some((call) => /UPDATE orders/.test(call.sql)));
+    }
+  }
   const { store, calls } = makeStore((sql) => {
     if (/^INSERT INTO stripe_terminal_payments/.test(sql)) return { affectedRows: 1, insertId: 42 };
     if (/^INSERT INTO stripe_terminal_payment_orders/.test(sql)) return { affectedRows: 1 };
     if (/FROM stripe_terminal_readers r/.test(sql)) return [reader];
-    if (/FROM orders o/.test(sql)) return [{ id: 21, shopid: shopId, status: 1, payment_status: "unpaid" }];
+    if (/FROM orders o/.test(sql)) return [{ id: 21, shopid: shopId, status: 3, payment_status: "unpaid" }];
     if (/FROM stripe_terminal_payments p/.test(sql)) return [];
     if (/FROM stripe_terminal_payment_orders a/.test(sql)) return [];
     return { affectedRows: 1, insertId: 42 };
@@ -38,7 +63,7 @@ const hasShopFilter = (call, alias, shopId) => {
   const locked = await store.lockReaderAndOrders({ shopId, userId, orderIds: [21] });
   assert.deepStrictEqual(locked, {
     reader,
-    orders: [{ id: 21, shopid: shopId, status: 1, payment_status: "unpaid" }],
+    orders: [{ id: 21, shopid: shopId, status: 3, payment_status: "unpaid" }],
     activePayment: null,
   });
   assert.ok(calls.every((call) => !/BEGIN|COMMIT|ROLLBACK/.test(call.sql)));
@@ -71,7 +96,7 @@ const hasShopFilter = (call, alias, shopId) => {
     if (/FROM stripe_terminal_payments p/.test(sql)) return [{ id: 42, shopid: shopId,
       stripe_payment_intent_id: "pi_test", status: "processing" }];
     if (/FROM stripe_terminal_payment_orders a/.test(sql)) return [{ order_id: 21 }];
-    if (/FROM orders o/.test(sql)) return [{ id: 21, shopid: shopId, status: 1, payment_status: "unpaid" }];
+    if (/FROM orders o/.test(sql)) return [{ id: 21, shopid: shopId, status: 3, payment_status: "unpaid" }];
     return { affectedRows: 1 };
   });
   assert.deepStrictEqual(await final.store.finalizePaymentSucceeded({
@@ -104,7 +129,7 @@ const hasShopFilter = (call, alias, shopId) => {
       if (/FROM stripe_terminal_payments p/.test(sql)) return [{ id: 42, shopid: shopId,
         stripe_payment_intent_id: "pi_test", status }];
       if (/FROM stripe_terminal_payment_orders a/.test(sql)) return [{ order_id: 21 }];
-      if (/FROM orders o/.test(sql)) return [{ id: 21, shopid: shopId, status: 1, payment_status: "unpaid" }];
+      if (/FROM orders o/.test(sql)) return [{ id: 21, shopid: shopId, status: 3, payment_status: "unpaid" }];
       return { affectedRows: 1 };
     });
     assert.deepStrictEqual(await lateSuccess.store.finalizePaymentSucceeded({
@@ -118,7 +143,7 @@ const hasShopFilter = (call, alias, shopId) => {
 
   const invalid = makeStore((sql) => {
     if (/FROM stripe_terminal_readers r/.test(sql)) return [reader];
-    if (/FROM orders o/.test(sql)) return [{ id: 21, shopid: shopId, status: 1, payment_status: "unpaid" }];
+    if (/FROM orders o/.test(sql)) return [{ id: 21, shopid: shopId, status: 3, payment_status: "unpaid" }];
     return [];
   });
   await assert.rejects(() => invalid.store.lockReaderAndOrders({
@@ -127,9 +152,9 @@ const hasShopFilter = (call, alias, shopId) => {
   assert.strictEqual(invalid.calls.filter((call) => /FROM stripe_terminal_payments p/.test(call.sql)).length, 0);
 
   for (const badOrder of [
-    { id: 21, shopid: 8, status: 1, payment_status: "unpaid" },
+    { id: 21, shopid: 8, status: 3, payment_status: "unpaid" },
     { id: 21, shopid: 7, status: 2, payment_status: "unpaid" },
-    { id: 21, shopid: 7, status: 1, payment_status: "paid" },
+    { id: 21, shopid: 7, status: 3, payment_status: "paid" },
   ]) {
     const rejected = makeStore((sql) => {
       if (/FROM stripe_terminal_readers r/.test(sql)) return [reader];
@@ -144,7 +169,7 @@ const hasShopFilter = (call, alias, shopId) => {
   const active = makeStore((sql) => {
     if (/FROM stripe_terminal_readers r/.test(sql)) return [reader];
     if (/FROM orders o/.test(sql)) return [{ id: 21, shopid: shopId,
-      status: 1, payment_status: "unpaid" }];
+      status: 3, payment_status: "unpaid" }];
     if (/FROM stripe_terminal_payments p/.test(sql)) return [{ id: 42, status: "creating" }];
     return [];
   });
@@ -155,7 +180,7 @@ const hasShopFilter = (call, alias, shopId) => {
   const competing = makeStore((sql) => {
     if (/FROM stripe_terminal_readers r/.test(sql)) return [reader];
     if (/FROM orders o/.test(sql)) return [{ id: 21, shopid: shopId,
-      status: 1, payment_status: "unpaid" }];
+      status: 3, payment_status: "unpaid" }];
     if (/FROM stripe_terminal_payments p/.test(sql)) return [];
     if (/FROM stripe_terminal_payment_orders a/.test(sql)) return [{ order_id: 21 }];
     return [];
@@ -168,7 +193,7 @@ const hasShopFilter = (call, alias, shopId) => {
     if (/FROM stripe_terminal_payments p/.test(sql)) return [{ id: 42,
       stripe_payment_intent_id: "pi_test", status: "processing" }];
     if (/FROM stripe_terminal_payment_orders a/.test(sql)) return [{ order_id: 21 }, { order_id: 22 }];
-    if (/FROM orders o/.test(sql)) return [21, 22].map((id) => ({ id, shopid: shopId, status: 1, payment_status: "unpaid" }));
+    if (/FROM orders o/.test(sql)) return [21, 22].map((id) => ({ id, shopid: shopId, status: 3, payment_status: "unpaid" }));
     return { affectedRows: 1 };
   });
   await assert.rejects(() => shortUpdate.store.finalizePaymentSucceeded({

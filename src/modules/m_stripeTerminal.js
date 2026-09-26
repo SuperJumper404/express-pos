@@ -384,7 +384,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
     if (orders.length !== sortedIds.length || orders.some((order, index) => (
       order.id !== sortedIds[index]
       || Number(order.shopid) !== Number(shopId)
-      || Number(order.status) !== 1
+      || Number(order.status) !== 3
       || order.payment_status !== "unpaid"
       || order.stripe_terminal_payment_id != null
     ))) throw new Error("Invalid Terminal order selection");
@@ -435,7 +435,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
     const count = allocations.length;
     if (!count) throw new Error("Terminal payment has no allocations");
     if (lockedOrders.length !== count || lockedOrders.some((order) => (
-      Number(order.shopid) !== Number(shopId) || Number(order.status) !== 1
+      Number(order.shopid) !== Number(shopId) || Number(order.status) !== 3
       || order.payment_status !== "unpaid" || order.stripe_terminal_payment_id != null
     ))) throw new Error("Terminal order finalization incomplete");
     const orders = await query(

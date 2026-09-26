@@ -18,7 +18,7 @@ const overlappingTransactions = () => {
   const events = [];
   const state = {
     payment: { id: 41, shopid: 7, terminal_reader_id: 21, cashier_user_id: 11, status: "processing", stripe_payment_intent_id: "pi_terminal" },
-    orders: [12, 31].map((id) => ({ id, shopid: 7, status: 1, payment_status: "unpaid", stripe_terminal_payment_id: null })),
+    orders: [12, 31].map((id) => ({ id, shopid: 7, status: 3, payment_status: "unpaid", stripe_terminal_payment_id: null })),
     allocations: [12, 31].map((id) => ({ order_id: id, shopid: 7, terminal_payment_id: 41, amount_cents: 100 })),
     deadlocks: 0,
   };
