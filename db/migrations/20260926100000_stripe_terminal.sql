@@ -78,7 +78,11 @@ CREATE TABLE `stripe_terminal_payment_orders` (
   `order_id` int NOT NULL,
   `shopid` int NOT NULL,
   `amount_cents` int NOT NULL,
+  `refund_generation` int unsigned NOT NULL DEFAULT 0,
+  `stripe_refund_id` varchar(191) DEFAULT NULL,
+  `refund_status` varchar(32) DEFAULT NULL,
   UNIQUE KEY `uq_terminal_payment_order` (`terminal_payment_id`,`order_id`),
+  UNIQUE KEY `uq_terminal_order_refund` (`stripe_refund_id`),
   KEY `idx_terminal_allocation_order` (`order_id`),
   KEY `idx_terminal_allocation_shop_payment` (`shopid`,`terminal_payment_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -8,7 +8,6 @@ const { calculateDiscount } = require("../helpers/discount");
 const { parseMoney } = require("../helpers/money");
 const { withTransaction } = require("../helpers/withTransaction");
 const { buildStripeTerminalModule } = require("./m_stripeTerminal");
-const { retryTerminalTransaction } = require("../services/stripeTerminalWebhooks");
 const DomainError = require("../helpers/domainError");
 
 const queryResult = async (connection, sql, params = []) => {
@@ -1184,18 +1183,6 @@ module.exports = {
 
 const legacyAllArchivedOrdersWithDetails = module.exports.mAllArchivedOrdersWithDetails;
 module.exports.buildOrderArchiveModule = buildOrderArchiveModule;
-module.exports.mUpdateTerminalRefundState = ({ shopId, orderId, paymentId, paymentStatus }) => {
-  if (!["refund_pending", "refunded", "paid"].includes(paymentStatus)) {
-    throw new Error("Invalid Terminal refund state");
-  }
-  return retryTerminalTransaction((work) => work(), () => queryResult(
-    null,
-    `UPDATE orders SET payment_status = ?
-     WHERE shopid = ? AND id = ? AND stripe_terminal_payment_id = ?
-       AND payment_status IN ('paid', 'refund_pending')`,
-    [paymentStatus, shopId, orderId, paymentId],
-  ));
-};
 module.exports.pickArchiveOrderFields = pickArchiveOrderFields;
 module.exports.mArchiveOrder = orderArchiveModule.mArchiveOrder;
 module.exports.mDetailArchivedOrder = orderArchiveModule.mDetailArchivedOrder;

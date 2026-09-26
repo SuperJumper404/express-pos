@@ -224,6 +224,8 @@ const hasShopFilter = (call, alias, shopId) => {
   }), attempts[1]);
   assert.deepStrictEqual(allocationLookup.calls[0].params, [shopId, 21, 42, shopId]);
   assert.match(allocationLookup.calls[0].sql, /p\.status = 'succeeded'/);
+  await allocationLookup.store.findOrderAllocation({ shopId, orderId: 21, paymentId: 42, forUpdate: true });
+  assert.match(allocationLookup.calls[1].sql, /FOR UPDATE/);
   await assert.rejects(() => allocationLookup.store.findOrderAllocation({
     shopId, orderId: 21,
   }), /paymentId is required/);

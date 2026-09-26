@@ -41,9 +41,9 @@ const {
 } = require("../modules/m_checkout");
 
 const getBaseUrl = (req) => `${req.protocol}://${req.get("host")}`;
-const { mFindOrderById, mUpdateTerminalRefundState } = require("../modules/m_orders");
+const { mFindOrderById } = require("../modules/m_orders");
 const { buildStripeTerminalModule } = require("../modules/m_stripeTerminal");
-const { buildStripeTerminalWebhookHandler } = require("../services/stripeTerminalWebhooks");
+const { buildStripeTerminalWebhookHandler, retryTerminalTransaction } = require("../services/stripeTerminalWebhooks");
 
 const getTerminalStore = () => {
   const connection = require("../config/dbPool");
@@ -1121,7 +1121,6 @@ const buildTerminalOrderRefundService = ({
   getStripe: getStripeClient = getStripe,
   terminalStore,
   findOrderById = mFindOrderById,
-  updateRefundState = mUpdateTerminalRefundState,
 } = {}) => {
   const context = async (shopId, orderId) => {
     const [order] = await findOrderById(orderId, shopId);
@@ -1132,34 +1131,42 @@ const buildTerminalOrderRefundService = ({
     const store = terminalStore || getTerminalStore();
     const payment = await store.findPaymentSession({ shopId, paymentId });
     const allocation = await store.findOrderAllocation({ shopId, orderId, paymentId });
-    if (!payment || payment.status !== "succeeded" || !payment.stripe_payment_intent_id
+    if (!payment || payment.status !== "succeeded" || !payment.stripe_payment_intent_id || !payment.stripe_connected_account_id
       || Number(payment.shopid) !== shopId || Number(payment.id) !== paymentId
       || !allocation || !Number.isSafeInteger(allocation.amount_cents) || allocation.amount_cents < 0
       || Number(allocation.shopid) !== shopId || Number(allocation.order_id) !== orderId
       || Number(allocation.terminal_payment_id) !== paymentId) throw new Error("Invalid Terminal allocation");
-    return { order, payment, allocation, scope: { shopId, orderId, paymentId } };
+    return { store, payment, allocation, scope: { shopId, orderId, paymentId } };
   };
-  const persist = async ({ scope }, refund) => {
-    const paymentStatus = refund.status === "succeeded" ? "refunded"
-      : ["failed", "canceled"].includes(refund.status) ? "paid" : "refund_pending";
-    const saved = await updateRefundState({ ...scope, paymentStatus });
-    if (!saved || saved.affectedRows !== 1) {
-      const [current] = await findOrderById(scope.orderId, scope.shopId);
-      if (!current || current.payment_status !== "refunded"
-        || Number(current.stripe_terminal_payment_id) !== scope.paymentId) throw new Error("Terminal refund persistence failed");
-      return { refundId: refund.id, refundStatus: "succeeded", already_refunded: true };
+  const validateOwnership = async ({ payment, scope }) => {
+    const intent = await getStripeClient().paymentIntents.retrieve(payment.stripe_payment_intent_id);
+    if (!intent || intent.id !== payment.stripe_payment_intent_id || intent.status !== "succeeded"
+      || intent.amount !== payment.amount_cents || intent.currency !== payment.currency
+      || stripeObjectId(intent.on_behalf_of) !== payment.stripe_connected_account_id
+      || stripeObjectId(intent.transfer_data && intent.transfer_data.destination) !== payment.stripe_connected_account_id
+      || !intent.metadata || intent.metadata.shop_id !== String(scope.shopId)
+      || intent.metadata.terminal_payment_id !== String(scope.paymentId)) {
+      throw new Error("Terminal payment ownership mismatch");
     }
-    return { refundId: refund.id, refundStatus: refund.status };
   };
+  const dto = (allocation) => ({ refundId: allocation.stripe_refund_id, refundStatus: allocation.refund_status });
+  const persist = async ({ scope, store }, refund, generation, authoritative) => dto(await retryTerminalTransaction(
+    store.withTransaction,
+    (transaction) => transaction.recordOrderRefund({ ...scope, generation,
+      refundId: refund.id, refundStatus: refund.status, authoritative }),
+  ));
   const validateRefund = ({ scope, payment, allocation }, refund) => {
     const metadata = refund && refund.metadata || {};
+    const generation = Number(metadata.refund_attempt_generation);
     if (!refund || !refund.id || metadata.shop_id !== String(scope.shopId)
       || metadata.order_id !== String(scope.orderId) || metadata.terminal_payment_id !== String(scope.paymentId)
+      || !Number.isSafeInteger(generation) || generation < 0 || String(generation) !== metadata.refund_attempt_generation
       || refund.amount !== allocation.amount_cents || stripeObjectId(refund.payment_intent) !== payment.stripe_payment_intent_id
       || refund.currency !== payment.currency
       || !["succeeded", "pending", "requires_action", "failed", "canceled"].includes(refund.status)) {
       throw new Error("Terminal refund mismatch");
     }
+    return generation;
   };
   const reconcileTerminalRefund = async (refund) => {
     try {
@@ -1168,8 +1175,9 @@ const buildTerminalOrderRefundService = ({
       const orderId = Number(metadata.order_id);
       if (![shopId, orderId].every((id) => Number.isSafeInteger(id) && id > 0)) throw new Error("Invalid refund scope");
       const current = await context(shopId, orderId);
-      validateRefund(current, refund);
-      return await persist(current, refund);
+      const generation = validateRefund(current, refund);
+      await validateOwnership(current);
+      return await persist(current, refund, generation, true);
     } catch (error) {
       throw new DomainError(502, "TERMINAL_REFUND_FAILED", "Impossible de confirmer le remboursement terminal.");
     }
@@ -1182,25 +1190,30 @@ const buildTerminalOrderRefundService = ({
       shopId = Number(shopId);
       orderId = Number(orderId);
       const current = await context(shopId, orderId);
-      const { order, payment, allocation, scope } = current;
+      const { store, payment, allocation, scope } = current;
       const { paymentId } = scope;
-      if (order.payment_status === "refunded") {
-        return { refundId: null, refundStatus: "succeeded", already_refunded: true };
-      }
+      await validateOwnership(current);
 
       // Reserve the order before the network call. Archive takes the same order
       // row lock and rejects refund_pending, including after ambiguous failures.
-      const reserved = await updateRefundState({ ...scope, paymentStatus: "refund_pending" });
-      if (!reserved || reserved.affectedRows !== 1) throw new Error("Terminal refund reservation failed");
-      if (allocation.amount_cents === 0) return await persist(current, { id: null, status: "succeeded" });
+      const attempt = await retryTerminalTransaction(store.withTransaction, (transaction) => transaction.reserveOrderRefund({
+        ...scope, generation: allocation.refund_generation,
+      }));
+      const generation = attempt.refund_generation;
+      if (["failed", "canceled"].includes(attempt.refund_status)) return dto(attempt);
+      if (allocation.amount_cents === 0) return await persist(current, { id: null, status: "succeeded" }, generation, false);
       const stripe = getStripeClient();
-      const metadata = { shop_id: String(shopId), order_id: String(orderId), terminal_payment_id: String(paymentId) };
+      const metadata = { shop_id: String(shopId), order_id: String(orderId), terminal_payment_id: String(paymentId),
+        refund_attempt_generation: String(generation) };
       const matches = (refund) => Object.keys(metadata).every((key) => (refund.metadata || {})[key] === metadata[key]);
-      let refund;
+      let refund = attempt.stripe_refund_id ? await stripe.refunds.retrieve(attempt.stripe_refund_id) : null;
+      if (attempt.stripe_refund_id && (!refund || refund.id !== attempt.stripe_refund_id)) {
+        throw new Error("Terminal refund identity mismatch");
+      }
       let cursor;
       const seen = new Set();
       // Recover the refund from Stripe even after its idempotency cache expires.
-      for (;;) {
+      while (!attempt.stripe_refund_id) {
         const page = await stripe.refunds.list({ payment_intent: payment.stripe_payment_intent_id, limit: 100,
           ...(cursor ? { starting_after: cursor } : {}) });
         if (!page || !Array.isArray(page.data) || typeof page.has_more !== "boolean") throw new Error("Invalid refund list");
@@ -1216,12 +1229,13 @@ const buildTerminalOrderRefundService = ({
         if (!page.data.length) throw new Error("Incomplete refund page");
         cursor = page.data[page.data.length - 1].id;
       }
+      const authoritative = Boolean(refund);
       if (!refund) refund = await stripe.refunds.create({
         payment_intent: payment.stripe_payment_intent_id, amount: allocation.amount_cents,
         reverse_transfer: true, refund_application_fee: true, metadata,
-      }, { idempotencyKey: `terminal-refund:${shopId}:${paymentId}:${orderId}` });
-      validateRefund(current, refund);
-      return await persist(current, refund);
+      }, { idempotencyKey: `terminal-refund:${shopId}:${paymentId}:${orderId}:g${generation}` });
+      if (validateRefund(current, refund) !== generation) throw new Error("Terminal refund generation mismatch");
+      return await persist(current, refund, generation, authoritative);
     } catch (error) {
       throw new DomainError(502, "TERMINAL_REFUND_FAILED", "Impossible de confirmer le remboursement terminal.");
     }

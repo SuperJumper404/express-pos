@@ -342,7 +342,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
     );
   };
 
-  const findOrderAllocation = async ({ shopId, orderId, paymentId }) => {
+  const findOrderAllocation = async ({ shopId, orderId, paymentId, forUpdate = false }) => {
     requireShopId(shopId);
     if (!Number.isSafeInteger(Number(paymentId)) || Number(paymentId) <= 0) {
       throw new Error("paymentId is required");
@@ -353,7 +353,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
          AND p.shopid = a.shopid
        WHERE a.shopid = ? AND a.order_id = ?
          AND a.terminal_payment_id = ? AND p.shopid = ?
-         AND p.status = 'succeeded' LIMIT 1`,
+         AND p.status = 'succeeded' LIMIT 1${forUpdate ? " FOR UPDATE" : ""}`,
       [shopId, orderId, paymentId, shopId],
     ));
   };
@@ -400,7 +400,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
     return { reader, orders, activePayment };
   };
 
-  // Allocations are immutable after reservation. Lock their orders in the same
+  // Allocation amounts/order IDs are immutable. Lock their orders in the same
   // order as start, then read the current payment (never payment -> orders).
   const lockPaymentSession = async ({ shopId, paymentId }) => {
     requireShopId(shopId);
@@ -457,6 +457,74 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
     return { finalized: true };
   };
 
+  const lockOrderRefund = async (scope) => {
+    const { payment, orders } = await lockPaymentSession(scope);
+    const order = orders.find((candidate) => Number(candidate.id) === Number(scope.orderId));
+    if (!payment || payment.status !== "succeeded" || !order
+      || Number(order.stripe_terminal_payment_id) !== Number(scope.paymentId)
+      || !["paid", "refund_pending", "refunded"].includes(order.payment_status)) {
+      throw new Error("Invalid Terminal refund order");
+    }
+    // Refund state is mutable: re-read it under a lock after orders/payment,
+    // rather than using the allocation snapshot that identified the order IDs.
+    const allocation = await findOrderAllocation({ ...scope, forUpdate: true });
+    if (!allocation || !Number.isSafeInteger(allocation.refund_generation)) throw new Error("Invalid Terminal refund allocation");
+    return { order, allocation };
+  };
+
+  const saveOrderRefund = async (scope, current, { generation, refundId, refundStatus }) => {
+    const result = await query(
+      `UPDATE stripe_terminal_payment_orders
+       SET refund_generation = ?, stripe_refund_id = ?, refund_status = ?
+       WHERE shopid = ? AND order_id = ? AND terminal_payment_id = ? AND refund_generation = ?`,
+      [generation, refundId, refundStatus, scope.shopId, scope.orderId, scope.paymentId, current.allocation.refund_generation],
+    );
+    if (result.affectedRows !== 1) throw new Error("Terminal refund attempt update failed");
+    const paymentStatus = refundStatus === "succeeded" ? "refunded"
+      : ["failed", "canceled"].includes(refundStatus) ? "paid" : "refund_pending";
+    if (current.order.payment_status !== paymentStatus) {
+      const saved = await query(
+        `UPDATE orders SET payment_status = ?
+         WHERE shopid = ? AND id = ? AND stripe_terminal_payment_id = ?`,
+        [paymentStatus, scope.shopId, scope.orderId, scope.paymentId],
+      );
+      if (saved.affectedRows !== 1) throw new Error("Terminal refund order update failed");
+    }
+    return { ...current.allocation, refund_generation: generation, stripe_refund_id: refundId, refund_status: refundStatus };
+  };
+
+  // The caller supplies one transaction; no Stripe call runs under these locks.
+  const reserveOrderRefund = async ({ generation, ...scope }) => {
+    const current = await lockOrderRefund(scope);
+    const allocation = current.allocation;
+    if (allocation.refund_generation !== generation) return allocation;
+    const failed = ["failed", "canceled"].includes(allocation.refund_status);
+    if (allocation.refund_status != null && !failed) return allocation;
+    if (failed && generation === 4294967295) throw new Error("Terminal refund generation exhausted");
+    return saveOrderRefund(scope, current, {
+      generation: failed ? generation + 1 : generation, refundId: null, refundStatus: "creating",
+    });
+  };
+
+  const recordOrderRefund = async ({ generation, refundId, refundStatus, authoritative = false, ...scope }) => {
+    if (!Number.isSafeInteger(generation) || generation < 0
+      || !["pending", "requires_action", "succeeded", "failed", "canceled"].includes(refundStatus)) {
+      throw new Error("Invalid Terminal refund state");
+    }
+    const current = await lockOrderRefund(scope);
+    const allocation = current.allocation;
+    if (allocation.refund_generation !== generation || allocation.refund_status == null
+      || (allocation.stripe_refund_id && allocation.stripe_refund_id !== refundId)) return allocation;
+    if (!refundId && (allocation.amount_cents !== 0 || refundStatus !== "succeeded")) throw new Error("Missing Terminal refund identity");
+    // A terminal failure seals this generation, even if an earlier HTTP result
+    // arrives later. Only a fresh authoritative failure may correct success.
+    if (["failed", "canceled"].includes(allocation.refund_status)) return allocation;
+    if (allocation.refund_status === "succeeded" && !(authoritative
+      && ["failed", "canceled"].includes(refundStatus) && allocation.stripe_refund_id === refundId)) return allocation;
+    if (allocation.refund_status === refundStatus && allocation.stripe_refund_id === refundId) return allocation;
+    return saveOrderRefund(scope, current, { generation, refundId, refundStatus });
+  };
+
   return {
     withRegistrationLock, withPaymentCreationLock, withReaderActionLock,
     findLocation, createLocation, updateLocation,
@@ -465,6 +533,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
     findPaymentByIntent, findPaymentByIdempotencyKey, updatePaymentSession,
     createAllocations, listPaymentAllocations, findOrderAllocation,
     lockReaderAndOrders, lockPaymentSession, finalizePaymentSucceeded,
+    reserveOrderRefund, recordOrderRefund,
   };
 };
 

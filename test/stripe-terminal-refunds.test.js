@@ -1,6 +1,6 @@
 const assert = require("assert");
 require.cache[require.resolve("../src/config/db")] = { exports: {} };
-const { buildOrderArchiveModule, mUpdateTerminalRefundState } = require("../src/modules/m_orders");
+const { buildOrderArchiveModule } = require("../src/modules/m_orders");
 const { buildArchiveOrderController } = require("../src/controllers/c_orders");
 const stripeController = require("../src/controllers/c_stripe");
 const { buildCashRegisterArchiveFields } = require("../src/helpers/cashRegisterPayment");
@@ -99,44 +99,100 @@ test("Terminal archive controller bypasses web synchronization and rejects unpai
 
 const refundFixture = () => {
   assert.strictEqual(typeof stripeController.buildTerminalOrderRefundService, "function", "Terminal refund service must exist");
-  const state = { order: paidOrder(), refunds: [], calls: [], transitions: [], status: "succeeded", amount: 1000, failPersist: false };
-  const terminalStore = buildStripeTerminalModule({ connection: { query: async (sql, params) => {
+  const state = { order: paidOrder(), refunds: [], calls: [], queries: [], transitions: [], status: "succeeded", amount: 1000, failPersist: false,
+    allocation: { shopid: 7, order_id: 12, terminal_payment_id: 41, amount_cents: 1000,
+      stripe_refund_id: null, refund_status: null, refund_generation: 0 },
+    inTransaction: false, contention: 0, attempts: 0, destination: "acct_restaurant" };
+  const connection = { query: async (sql, params) => {
+    state.queries.push({ sql, params });
     if (sql.includes("FROM stripe_terminal_payment_orders a")) {
-      assert.deepStrictEqual(params, [7, 12, 41, 7]);
-      assert(sql.includes("p.status = 'succeeded'"));
-      return [[{ shopid: 7, order_id: 12, terminal_payment_id: 41, amount_cents: state.amount }]];
+      if (sql.includes("a.order_id = ?")) {
+        assert.deepStrictEqual(params, [7, 12, 41, 7]);
+        assert(sql.includes("p.status = 'succeeded'"));
+      } else assert.deepStrictEqual(params, [7, 41, 7]);
+      return [[{ ...clone(state.allocation), amount_cents: state.amount }]];
     }
     if (sql.includes("FROM stripe_terminal_payments p")) {
       assert.deepStrictEqual(params, [7, 41]);
-      return [[{ id: 41, shopid: 7, status: state.status, stripe_payment_intent_id: "pi_group", amount_cents: 1500, currency: "eur" }]];
+      return [[{ id: 41, shopid: 7, status: state.status, stripe_payment_intent_id: "pi_group",
+        stripe_connected_account_id: "acct_restaurant", amount_cents: 1500, currency: "eur" }]];
+    }
+    if (sql.includes("FROM orders o")) {
+      assert.deepStrictEqual(params, [7, 12]);
+      assert(sql.includes("FOR UPDATE"));
+      return [state.order ? [clone(state.order)] : []];
+    }
+    if (sql.startsWith("UPDATE stripe_terminal_payment_orders")) {
+      assert(state.inTransaction);
+      assert.match(sql, /shopid = \? AND order_id = \? AND terminal_payment_id = \?/);
+      const [generation, refundId, status, shopId, orderId, paymentId, expectedGeneration] = params;
+      assert.deepStrictEqual([shopId, orderId, paymentId], [7, 12, 41]);
+      if (state.allocation.refund_generation !== expectedGeneration) return [{ affectedRows: 0 }];
+      Object.assign(state.allocation, { refund_generation: generation, stripe_refund_id: refundId, refund_status: status });
+      return [{ affectedRows: 1 }];
+    }
+    if (sql.startsWith("UPDATE orders SET payment_status")) {
+      assert(state.inTransaction);
+      const [paymentStatus, shopId, orderId, paymentId] = params;
+      assert.deepStrictEqual([shopId, orderId, paymentId], [7, 12, 41]);
+      assert.match(sql, /shopid = \? AND id = \? AND stripe_terminal_payment_id = \?/);
+      if (state.failPersist && paymentStatus === "refunded") throw new Error("raw SQL secret");
+      if (!state.order) return [{ affectedRows: 0 }];
+      state.order.payment_status = paymentStatus;
+      state.transitions.push({ paymentStatus });
+      return [{ affectedRows: 1 }];
     }
     throw new Error(`Unexpected SQL ${sql}`);
-  } } });
-  const stripe = { refunds: {
+  } };
+  const terminalStore = buildStripeTerminalModule({ connection });
+  assert.strictEqual(typeof terminalStore.reserveOrderRefund, "function", "Refund attempts must be reserved transactionally");
+  let queue = Promise.resolve();
+  terminalStore.withTransaction = (work) => {
+    const run = queue.then(async () => {
+      state.attempts += 1;
+      if (state.contention-- > 0) throw Object.assign(new Error("raw DB contention"), { errno: 1205 });
+      const before = clone({ order: state.order, allocation: state.allocation });
+      state.inTransaction = true;
+      try { return await work(terminalStore); }
+      catch (error) { Object.assign(state, before); throw error; }
+      finally { state.inTransaction = false; }
+    });
+    queue = run.catch(() => {});
+    return run;
+  };
+  const idempotency = new Map();
+  const stripe = { paymentIntents: { retrieve: async (id) => {
+    assert(!state.inTransaction);
+    assert.strictEqual(id, "pi_group");
+    return { id, status: "succeeded", amount: 1500, currency: "eur", on_behalf_of: "acct_restaurant",
+      transfer_data: { destination: state.destination }, metadata: { shop_id: "7", terminal_payment_id: "41" } };
+  } }, refunds: {
+    retrieve: async (id) => {
+      assert(!state.inTransaction);
+      const found = state.refunds.find((refund) => refund.id === id);
+      assert(found, "retrieval must use a tracked refund ID");
+      return clone(found);
+    },
     list: async (params) => {
+      assert(!state.inTransaction);
       assert.deepStrictEqual(params, { payment_intent: "pi_group", limit: 100 });
       return { data: clone(state.refunds), has_more: false };
     },
     create: async (params, options) => {
+      assert(!state.inTransaction);
       state.calls.push({ params, options });
-      const refund = { id: "re_order12", status: "succeeded", amount: params.amount,
+      if (idempotency.has(options.idempotencyKey)) return clone(idempotency.get(options.idempotencyKey));
+      const generation = params.metadata.refund_attempt_generation || "0";
+      const refund = { id: generation === "0" ? "re_order12" : `re_order12_g${generation}`, status: "succeeded", amount: params.amount,
         payment_intent: params.payment_intent, currency: "eur", metadata: params.metadata };
       state.refunds.push(refund);
+      idempotency.set(options.idempotencyKey, clone(refund));
       return clone(refund);
     },
   } };
   const service = stripeController.buildTerminalOrderRefundService({
     terminalStore, getStripe: () => stripe,
     findOrderById: async (id, shopId) => state.order && state.order.id === id && state.order.shopid === shopId ? [clone(state.order)] : [],
-    updateRefundState: async (scope) => {
-      state.transitions.push(scope);
-      assert.deepStrictEqual([scope.shopId, scope.orderId, scope.paymentId], [7, 12, 41]);
-      if (state.failPersist && scope.paymentStatus === "refunded") throw new Error("raw SQL secret");
-      if (!state.order) return { affectedRows: 0 };
-      if (state.order.payment_status === "refunded") return { affectedRows: 0 };
-      state.order.payment_status = scope.paymentStatus;
-      return { affectedRows: 1 };
-    },
   });
   return { state, stripe, terminalStore, service, input: { shopId: 7, orderId: 12, actorId: 11 } };
 };
@@ -147,8 +203,8 @@ test("refund uses successful shop/order/payment allocation and a stable key, nev
   assert.deepStrictEqual(result, { refundId: "re_order12", refundStatus: "succeeded" });
   assert.deepStrictEqual(f.state.calls, [{ params: { payment_intent: "pi_group", amount: 1000,
     reverse_transfer: true, refund_application_fee: true,
-    metadata: { shop_id: "7", order_id: "12", terminal_payment_id: "41" } },
-  options: { idempotencyKey: "terminal-refund:7:41:12" } }]);
+    metadata: { shop_id: "7", order_id: "12", terminal_payment_id: "41", refund_attempt_generation: "0" } },
+  options: { idempotencyKey: "terminal-refund:7:41:12:g0" } }]);
   assert.deepStrictEqual(f.state.transitions.map((t) => t.paymentStatus), ["refund_pending", "refunded"]);
   await f.service.refundTerminalOrder({ ...f.input, actorId: 99 });
   assert.strictEqual(f.state.calls.length, 1);
@@ -269,28 +325,22 @@ test("archive without line details still preserves the successful allocated amou
 });
 
 test("refund state SQL remains scoped and monotonic and retries DB contention only", async () => {
-  const pool = require("../src/config/dbPool");
-  const original = pool.query;
-  let attempts = 0;
-  pool.query = async (sql, params) => {
-    assert.match(sql, /shopid = \? AND id = \? AND stripe_terminal_payment_id = \?/);
-    assert.match(sql, /payment_status IN \('paid', 'refund_pending'\)/);
-    assert.deepStrictEqual(params, ["refunded", 7, 12, 41]);
-    attempts += 1;
-    if (attempts <= 2) throw Object.assign(new Error("raw DB error"), { errno: 1205 });
-    return [{ affectedRows: 1 }];
-  };
-  try {
-    assert.deepStrictEqual(await mUpdateTerminalRefundState({ shopId: 7, orderId: 12, paymentId: 41, paymentStatus: "refunded" }), { affectedRows: 1 });
-    assert.strictEqual(attempts, 3);
-  } finally { pool.query = original; }
+  const f = refundFixture();
+  f.state.contention = 2;
+  await f.service.refundTerminalOrder(f.input);
+  assert.strictEqual(f.state.attempts, 4);
+  assert.strictEqual(f.state.calls.length, 1);
+  const locks = f.state.queries.filter((query) => query.sql.includes("FOR UPDATE"));
+  assert(locks[0].sql.includes("FROM orders o"));
+  assert(locks[1].sql.includes("FROM stripe_terminal_payments p"));
+  assert(locks[2].sql.includes("FROM stripe_terminal_payment_orders a"));
 });
 
 test("refund pagination recovers its own allocation without refunding another grouped order", async () => {
   const f = refundFixture();
   const queries = [];
   const own = { id: "re_12", status: "succeeded", amount: 1000, currency: "eur", payment_intent: "pi_group",
-    metadata: { shop_id: "7", order_id: "12", terminal_payment_id: "41" } };
+    metadata: { shop_id: "7", order_id: "12", terminal_payment_id: "41", refund_attempt_generation: "0" } };
   f.stripe.refunds.list = async (params) => {
     queries.push(params);
     return params.starting_after
@@ -306,7 +356,7 @@ test("malformed or mismatched Stripe refund snapshots never trigger another refu
   for (const patch of [{ amount: 1500 }, { currency: "usd" }, { payment_intent: "pi_other" }, { status: "unknown" }]) {
     const f = refundFixture();
     f.state.refunds = [{ id: "re_wrong", status: "succeeded", amount: 1000, currency: "eur", payment_intent: "pi_group",
-      metadata: { shop_id: "7", order_id: "12", terminal_payment_id: "41" }, ...patch }];
+      metadata: { shop_id: "7", order_id: "12", terminal_payment_id: "41", refund_attempt_generation: "0" }, ...patch }];
     await assert.rejects(() => f.service.refundTerminalOrder(f.input));
     assert.strictEqual(f.state.calls.length, 0);
     assert.strictEqual(f.state.order.payment_status, "refund_pending");
@@ -346,6 +396,182 @@ test("default refund lookup preserves eligible web orders without an extra Termi
     orders.mFindOrderById = original.find;
     payments.getPaidOrderForRefund = original.paid;
     require.cache[controllerPath] = original.controller;
+  }
+});
+
+test("round1 authoritative failure of the same refund corrects local success to paid", async () => {
+  for (const status of ["failed", "canceled"]) {
+    const f = refundFixture();
+    await f.service.refundTerminalOrder(f.input);
+    assert.strictEqual(f.state.order.payment_status, "refunded");
+    const eventSnapshot = clone(f.state.refunds[0]);
+    f.state.refunds[0].status = status;
+    const handler = stripeController.buildStripeWebhookEventHandler({
+      getStripe: () => f.stripe, reconcileTerminalRefund: f.service.reconcileTerminalRefund,
+      reconcileStripeRefund: () => assert.fail("Terminal refunds must not enter web reconciliation"),
+    });
+    await handler({ type: "refund.updated", data: { object: eventSnapshot } });
+    assert.strictEqual(f.state.order.payment_status, "paid");
+    assert.strictEqual(f.state.allocation.stripe_refund_id, "re_order12");
+    assert.strictEqual(f.state.allocation.refund_status, status);
+  }
+});
+
+test("round1 failed or canceled refund advances generation and creates a new exact allocation refund", async () => {
+  for (const status of ["failed", "canceled"]) {
+    const f = refundFixture();
+    const create = f.stripe.refunds.create;
+    f.stripe.refunds.create = async (...args) => {
+      const refund = await create(...args);
+      refund.status = f.state.calls.length === 1 ? status : "succeeded";
+      f.state.refunds[f.state.refunds.length - 1] = clone(refund);
+      return refund;
+    };
+    await f.service.refundTerminalOrder(f.input);
+    await f.service.refundTerminalOrder(f.input);
+    assert.strictEqual(f.state.calls.length, 2);
+    assert.deepStrictEqual(f.state.calls.map((call) => call.options.idempotencyKey), [
+      "terminal-refund:7:41:12:g0", "terminal-refund:7:41:12:g1",
+    ]);
+    assert(f.state.calls.every((call) => call.params.amount === 1000));
+    assert.strictEqual(f.state.allocation.refund_generation, 1);
+  }
+});
+
+test("round1 delayed pending creation response cannot overwrite webhook failure or block archive", async () => {
+  for (const status of ["failed", "canceled"]) {
+    const f = refundFixture();
+    let release;
+    const released = new Promise((resolve) => { release = resolve; });
+    let started;
+    const created = new Promise((resolve) => { started = resolve; });
+    const create = f.stripe.refunds.create;
+    f.stripe.refunds.create = async (...args) => {
+      const refund = await create(...args);
+      refund.status = "pending";
+      f.state.refunds[0] = clone(refund);
+      started();
+      await released;
+      return refund;
+    };
+    const pending = f.service.refundTerminalOrder(f.input);
+    await created;
+    try {
+      f.state.refunds[0].status = status;
+      await f.service.reconcileTerminalRefund(clone(f.state.refunds[0]));
+    } finally { release(); }
+    const result = await pending;
+    assert.strictEqual(f.state.order.payment_status, "paid");
+    assert.strictEqual(f.state.allocation.refund_status, status);
+    assert.strictEqual(result.refundStatus, status);
+    assert.strictEqual(buildCashRegisterArchiveFields({ order: f.state.order }).payment_status, "paid");
+  }
+});
+
+test("round1 old generations and mismatched refund IDs cannot undo the current refund", async () => {
+  const f = refundFixture();
+  await f.service.refundTerminalOrder(f.input);
+  const previous = { ...f.state.refunds[0], status: "failed" };
+  f.state.refunds[0] = previous;
+  await f.service.reconcileTerminalRefund(previous);
+  await f.service.refundTerminalOrder(f.input);
+  const current = clone(f.state.allocation);
+  await f.service.reconcileTerminalRefund(previous);
+  await f.service.reconcileTerminalRefund({ ...f.state.refunds[1], id: "re_wrong", status: "failed" });
+  assert.strictEqual(f.state.order.payment_status, "refunded");
+  assert.deepStrictEqual(f.state.allocation, current);
+  assert.strictEqual(current.stripe_refund_id, "re_order12_g1");
+});
+
+test("round1 concurrent retries reserve one next generation and use one provider refund identity", async () => {
+  const f = refundFixture();
+  await f.service.refundTerminalOrder(f.input);
+  f.state.refunds[0].status = "failed";
+  await f.service.reconcileTerminalRefund(clone(f.state.refunds[0]));
+  let arrivals = 0;
+  let both;
+  const gate = new Promise((resolve) => { both = resolve; });
+  f.stripe.refunds.list = async () => {
+    if (++arrivals === 2) both();
+    await gate;
+    return { data: [clone(f.state.refunds[0])], has_more: false };
+  };
+  const results = await Promise.all([
+    f.service.refundTerminalOrder(f.input), f.service.refundTerminalOrder({ ...f.input, actorId: 99 }),
+  ]);
+  assert.strictEqual(f.state.refunds.length, 2);
+  assert.strictEqual(f.state.allocation.refund_generation, 1);
+  assert(results.every((result) => result.refundId === "re_order12_g1"));
+  assert.deepStrictEqual(f.state.calls.slice(1).map((call) => call.options.idempotencyKey), [
+    "terminal-refund:7:41:12:g1", "terminal-refund:7:41:12:g1",
+  ]);
+});
+
+test("round1 delayed pending retrieval cannot undo a confirmed failure", async () => {
+  const f = refundFixture();
+  const create = f.stripe.refunds.create;
+  f.stripe.refunds.create = async (...args) => {
+    await create(...args);
+    f.state.refunds[0].status = "pending";
+    return clone(f.state.refunds[0]);
+  };
+  await f.service.refundTerminalOrder(f.input);
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let started;
+  const retrieved = new Promise((resolve) => { started = resolve; });
+  f.stripe.refunds.retrieve = async () => {
+    const snapshot = clone(f.state.refunds[0]);
+    started();
+    await gate;
+    return snapshot;
+  };
+  const request = f.service.refundTerminalOrder(f.input);
+  await retrieved;
+  try {
+    f.state.refunds[0].status = "failed";
+    await f.service.reconcileTerminalRefund(clone(f.state.refunds[0]));
+  } finally { release(); }
+  assert.strictEqual((await request).refundStatus, "failed");
+  assert.strictEqual(f.state.order.payment_status, "paid");
+  assert.strictEqual(f.state.allocation.refund_generation, 0);
+});
+
+test("round1 ambiguous outcomes retain their generation and persisted refund identity", async () => {
+  const f = refundFixture();
+  const create = f.stripe.refunds.create;
+  f.stripe.refunds.create = async (...args) => { await create(...args); throw new Error("raw timeout"); };
+  await assert.rejects(() => f.service.refundTerminalOrder(f.input));
+  assert.strictEqual(f.state.allocation.refund_generation, 0);
+  assert.strictEqual(f.state.allocation.refund_status, "creating");
+  f.stripe.refunds.list = async () => { throw new Error("raw unavailable"); };
+  await assert.rejects(() => f.service.refundTerminalOrder(f.input));
+  assert.strictEqual(f.state.allocation.refund_generation, 0);
+  f.stripe.refunds.list = async () => ({ data: clone(f.state.refunds), has_more: false });
+  await f.service.refundTerminalOrder(f.input);
+  assert.strictEqual(f.state.calls.length, 1);
+  assert.strictEqual(f.state.allocation.stripe_refund_id, "re_order12");
+});
+
+test("round1 destination ownership is verified against the persisted connected account", async () => {
+  for (const destination of ["acct_other", null]) {
+    const f = refundFixture();
+    f.state.destination = destination;
+    await assert.rejects(() => f.service.refundTerminalOrder(f.input), (error) => !/raw|acct_other/.test(error.message));
+    assert.strictEqual(f.state.calls.length, 0);
+    assert.strictEqual(f.state.order.payment_status, "paid");
+  }
+});
+
+test("round1 missing or mismatched retrieval identity never creates another refund", async () => {
+  for (const missing of [true, false]) {
+    const f = refundFixture();
+    await f.service.refundTerminalOrder(f.input);
+    f.stripe.refunds.retrieve = async () => missing ? null : { ...f.state.refunds[0], id: "re_other" };
+    await assert.rejects(() => f.service.refundTerminalOrder(f.input));
+    assert.strictEqual(f.state.calls.length, 1);
+    assert.strictEqual(f.state.allocation.stripe_refund_id, "re_order12");
+    assert.strictEqual(f.state.order.payment_status, "refunded");
   }
 });
 
