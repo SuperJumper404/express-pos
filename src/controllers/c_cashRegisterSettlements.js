@@ -11,18 +11,114 @@ const settlementFields = [
   "discountAmount",
   "totalAmount",
   "terminalPaymentId",
-  "archivedOrders",
-  "vatBreakdown",
+  "createdAt",
   "idempotentReplay",
 ];
+
+const archivedOrderFields = [
+  "id",
+  "token",
+  "ordernumber",
+  "orderNumber",
+  "customer",
+  "customer_name",
+  "service_point_name",
+  "table",
+  "username",
+  "subtotal",
+  "subtotal_before_discount",
+  "discount_type",
+  "discount_value",
+  "discount_amount",
+  "payment",
+  "used_payment_method",
+  "status",
+  "created",
+  "finished",
+  "archived_at",
+  "remark",
+  "is_takeaway",
+  "order_source",
+  "source",
+  "sale_mode",
+  "saleMode",
+  "taken_by_name",
+  "prepared_by_name",
+  "seller_name",
+  "cash_register_number",
+  "cashRegisterNumber",
+  "service_point_cash_register_number",
+];
+
+const archivedDetailFields = [
+  "name",
+  "qty",
+  "price",
+  "total",
+  "remark",
+  "vat_rate",
+  "vatRate",
+  "unit_price_ht",
+  "unitPriceHt",
+  "unit_vat",
+  "unitVat",
+  "total_ht",
+  "totalHt",
+  "total_vat",
+  "totalVat",
+];
+
+const customizationFields = [
+  "step_name",
+  "stepName",
+  "step_position",
+  "stepPosition",
+  "name",
+  "choice_name",
+  "choiceName",
+  "choice_position",
+  "choicePosition",
+  "price",
+  "unit_extra_price",
+  "extra_price",
+];
+
+const vatFields = ["vatRate", "totalHt", "totalVat", "totalTtc"];
 
 const isPositiveInteger = (value) => Number.isSafeInteger(Number(value))
   && Number(value) > 0 && typeof value !== "boolean";
 
-const sanitizeSettlement = (settlement) => settlementFields.reduce((result, field) => {
-  if (Object.prototype.hasOwnProperty.call(settlement, field)) result[field] = settlement[field];
+const pickFields = (value, fields) => fields.reduce((result, field) => {
+  if (value && Object.prototype.hasOwnProperty.call(value, field)) {
+    result[field] = value[field];
+  }
   return result;
 }, {});
+
+const sanitizeCustomization = (customization) => pickFields(
+  customization,
+  customizationFields,
+);
+
+const sanitizeArchivedDetail = (detail) => ({
+  ...pickFields(detail, archivedDetailFields),
+  customizationList: Array.isArray(detail && detail.customizationList)
+    ? detail.customizationList.map(sanitizeCustomization) : [],
+});
+
+const sanitizeArchivedOrder = (order) => ({
+  ...pickFields(order, archivedOrderFields),
+  details: Array.isArray(order && order.details)
+    ? order.details.map(sanitizeArchivedDetail) : [],
+});
+
+const sanitizeSettlement = (settlement) => ({
+  ...pickFields(settlement, settlementFields),
+  archivedOrders: Array.isArray(settlement && settlement.archivedOrders)
+    ? settlement.archivedOrders.map(sanitizeArchivedOrder) : [],
+  vatBreakdown: Array.isArray(settlement && settlement.vatBreakdown)
+    ? settlement.vatBreakdown.map((row) => pickFields(row, vatFields)) : [],
+});
 
 const invalidInput = () => new DomainError(
   400,
