@@ -1,5 +1,9 @@
 const pool = require("../config/dbPool");
 const { createTransactionRunner } = require("../helpers/withTransaction");
+const {
+  CASH_REGISTER_DUE_AND_ARCHIVABLE_SQL,
+  isCashRegisterOrderDueAndArchivable,
+} = require("../helpers/cashRegisterPayment");
 
 const queryResult = async (connection, sql, params = []) => {
   const [result] = await connection.query(sql, params);
@@ -96,29 +100,42 @@ const buildCashRegisterSettlementModule = ({ connection = pool } = {}) => {
     )),
     lockOrders: ({ shopId, orderIds }) => query(
       `SELECT orders.*, service_points.name AS service_point_name,
-              service_points.type AS service_point_type
+              service_points.type AS service_point_type,
+              stock_reservations.stock_reservation_status
        FROM orders
        LEFT JOIN service_points ON service_points.id = orders.service_point_id
          AND service_points.shopid = orders.shopid
+       LEFT JOIN (
+         SELECT order_id, MAX(status) AS stock_reservation_status
+         FROM order_stock_reservations
+         GROUP BY order_id
+       ) stock_reservations ON stock_reservations.order_id = orders.id
        WHERE orders.shopid = ? AND orders.id IN (?)
        ORDER BY orders.id FOR UPDATE`,
       [shopId, orderIds],
     ),
-    listEligibleTableOrders: ({ shopId, servicePointId, customerId }) => {
+    listEligibleTableOrders: async ({ shopId, servicePointId, customerId }) => {
       const tableClause = servicePointId == null
         ? "orders.service_point_id IS NULL AND orders.customerID = ?"
         : "orders.service_point_id = ?";
-      return query(
+      const rows = await query(
         `SELECT orders.*, service_points.name AS service_point_name,
-                service_points.type AS service_point_type
+                service_points.type AS service_point_type,
+                stock_reservations.stock_reservation_status
          FROM orders
          LEFT JOIN service_points ON service_points.id = orders.service_point_id
            AND service_points.shopid = orders.shopid
+         LEFT JOIN (
+           SELECT order_id, MAX(status) AS stock_reservation_status
+           FROM order_stock_reservations
+           GROUP BY order_id
+         ) stock_reservations ON stock_reservations.order_id = orders.id
          WHERE orders.shopid = ? AND ${tableClause}
-           AND orders.status = 3 AND orders.payment_status = 'unpaid'
+           AND orders.status = 3 AND ${CASH_REGISTER_DUE_AND_ARCHIVABLE_SQL}
          ORDER BY orders.id FOR UPDATE`,
         [shopId, servicePointId == null ? customerId : servicePointId],
       );
+      return rows.filter(isCashRegisterOrderDueAndArchivable);
     },
     findByIdempotencyKey,
     insertSettlement: async (data) => {

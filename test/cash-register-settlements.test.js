@@ -2,6 +2,9 @@ const assert = require("assert");
 const DomainError = require("../src/helpers/domainError");
 const { normalizePaymentMethod } = require("../src/helpers/paymentMethod");
 const {
+  isCashRegisterOrderDueAndArchivable,
+} = require("../src/helpers/cashRegisterPayment");
+const {
   buildCashRegisterSettlementModule,
 } = require("../src/modules/m_cashRegisterSettlements");
 const legacyDbPath = require.resolve("../src/config/db");
@@ -98,7 +101,7 @@ const fixture = ({ orders = baseOrders(), terminalPayment = null, terminalAlloca
     listEligibleTableOrders: async ({ shopId, servicePointId, customerId }) => clone(
       (state.events.push(`eligible:${servicePointId == null ? `legacy-${customerId}` : servicePointId}`),
       state.orders.filter((order) => order.shopid === shopId
-        && order.status === 3 && order.payment_status === "unpaid"
+        && isCashRegisterOrderDueAndArchivable(order)
         && (servicePointId == null
           ? order.service_point_id == null && order.customerID === customerId
           : order.service_point_id === servicePointId))
@@ -193,6 +196,51 @@ const expectCode = (run, code, status) => assert.rejects(run, (error) => {
   assert.strictEqual(error.code, code);
   assert.strictEqual(error.status, status);
   return true;
+});
+
+test("uses one cash-register eligibility predicate for every due and rejected state", () => {
+  const common = { shopid: 7, status: 3 };
+  const accepted = [
+    { ...common, payment_status: "unpaid" },
+    { ...common, payment_status: "requires_payment", payment_provider: "stripe", stock_reservation_status: "reserved" },
+    { ...common, payment_status: "requires_payment", payment_provider: "stripe", stock_reservation_status: null },
+    { ...common, payment_status: "paid", payment: "Paiement au comptoir" },
+    { ...common, payment_status: "paid", used_payment_method: "A encaisser" },
+  ];
+  const rejected = [
+    { ...common, payment_status: "paid", payment: "Carte bancaire" },
+    { ...common, payment_status: "refunded", payment: "Carte bancaire" },
+    { ...common, payment_status: "requires_payment", payment_provider: "stripe", stock_reservation_status: "released" },
+    { ...common, status: 2, payment_status: "unpaid" },
+  ];
+  accepted.forEach((order) => assert.strictEqual(isCashRegisterOrderDueAndArchivable(order), true));
+  rejected.forEach((order) => assert.strictEqual(isCashRegisterOrderDueAndArchivable(order), false));
+});
+
+test("settles valid pending Stripe and temporary counter orders together", async () => {
+  const orders = [
+    { ...baseOrders()[0], payment_status: "requires_payment", payment_provider: "stripe", stock_reservation_status: "reserved" },
+    { ...baseOrders()[1], payment_status: "paid", payment: "Paiement au comptoir" },
+  ];
+  const f = fixture({ orders });
+  const result = await f.service.createSettlement(manualInput({ orderIds: [31, 12] }));
+  assert.deepStrictEqual(result.archivedOrders.map((order) => order.sourceOrderId), [12, 31]);
+});
+
+test("rejects paid, refunded, released, inactive and foreign submitted orders", async () => {
+  const rejected = [
+    { payment_status: "paid", payment: "Carte bancaire" },
+    { payment_status: "refunded" },
+    { payment_status: "requires_payment", payment_provider: "stripe", stock_reservation_status: "released" },
+    { status: 2, payment_status: "unpaid" },
+    { shopid: 8, payment_status: "unpaid" },
+  ];
+  for (const state of rejected) {
+    const orders = baseOrders();
+    orders[0] = { ...orders[0], ...state };
+    const f = fixture({ orders });
+    await expectCode(() => f.service.createSettlement(manualInput()), "TABLE_ORDERS_CHANGED", 409);
+  }
 });
 
 test("settles every eligible order at a table in one transaction", async () => {
@@ -373,6 +421,16 @@ test("rejects Terminal payments owned by another cashier or using another curren
   }
 });
 
+test("rejects a frozen Terminal allocation when an order is no longer finished", async () => {
+  const f = terminalFixture();
+  f.state.orders[0].status = 2;
+  await expectCode(
+    () => f.service.createSettlement(terminalInput()),
+    "TABLE_ORDERS_CHANGED",
+    409,
+  );
+});
+
 test("allows a newly eligible order outside frozen Terminal allocations", async () => {
   const f = terminalFixture();
   f.state.orders.push({
@@ -410,6 +468,7 @@ test("accepts table service points and legacy table identity but rejects non-tab
 
 test("production store forwards its exact transaction connection and locks completeness before archival", async () => {
   const events = [];
+  let eligibleSql = "";
   const settlementRow = {
     id: 501,
     shopid: 7,
@@ -437,6 +496,7 @@ test("production store forwards its exact transaction connection and locks compl
       if (/orders\.id IN/.test(sql)) { events.push("submitted-lock"); return [baseOrders().sort((a, b) => a.id - b.id)]; }
       if (/orders\.status = 3/.test(sql)) {
         assert.match(sql, /FOR UPDATE\s*$/);
+        eligibleSql = sql;
         events.push("eligible-lock");
         return [baseOrders().sort((a, b) => a.id - b.id)];
       }
@@ -463,6 +523,10 @@ test("production store forwards its exact transaction connection and locks compl
   assert(events.indexOf("shop-lock") < events.indexOf("idempotency"));
   assert(events.indexOf("submitted-lock") < events.indexOf("eligible-lock"));
   assert(events.indexOf("eligible-lock") < events.indexOf("archive:12"));
+  assert.match(eligibleSql, /payment_status = 'requires_payment'/);
+  assert.match(eligibleSql, /payment_status = 'paid'/);
+  assert.match(eligibleSql, /stock_reservation_status/);
+  assert.match(eligibleSql, /used_payment_method/);
   assert.deepStrictEqual(events.slice(-2), ["commit", "release"]);
 });
 

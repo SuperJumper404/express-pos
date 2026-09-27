@@ -2,6 +2,9 @@ const crypto = require("crypto");
 const DomainError = require("../helpers/domainError");
 const { parseMoney } = require("../helpers/money");
 const { normalizePaymentMethod } = require("../helpers/paymentMethod");
+const {
+  isCashRegisterOrderDueAndArchivable,
+} = require("../helpers/cashRegisterPayment");
 
 const fail = (status, code, message) => {
   throw new DomainError(status, code, message);
@@ -102,7 +105,7 @@ const assertLockedOrders = ({ orders, orderIds, shopId, terminalPaymentId }) => 
     || Number(order.shopid) !== shopId
     || Number(order.status) !== 3
     || (terminalPaymentId == null
-      ? order.payment_status !== "unpaid"
+      ? !isCashRegisterOrderDueAndArchivable(order)
       : order.payment_status !== "paid"
         || Number(order.stripe_terminal_payment_id) !== terminalPaymentId)
   ))) fail(409, "TABLE_ORDERS_CHANGED", "Table orders changed.");
