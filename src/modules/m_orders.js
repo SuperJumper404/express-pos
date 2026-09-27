@@ -40,6 +40,11 @@ const archiveSqlRepository = {
     "INSERT INTO archives SET ?",
     [archive],
   ),
+  findArchiveById: ({ archiveId, connection }) => queryResult(
+    connection,
+    "SELECT * FROM archives WHERE id = ? LIMIT 1",
+    [archiveId],
+  ).then((rows) => rows[0] || null),
   findOrderDetails: ({ orderId, connection }) => queryResult(
     connection,
     "SELECT * FROM orderdetail WHERE orderid = ? ORDER BY id FOR UPDATE",
@@ -58,6 +63,11 @@ const archiveSqlRepository = {
     connection,
     "INSERT INTO archivesdetail SET ?",
     [detail],
+  ),
+  findArchiveDetailsByArchiveId: ({ archiveId, connection }) => queryResult(
+    connection,
+    "SELECT * FROM archivesdetail WHERE orderId = ? ORDER BY id",
+    [archiveId],
   ),
   insertArchiveSnapshot: ({ snapshot, connection }) => queryResult(
     connection,
@@ -323,6 +333,7 @@ const buildOrderArchiveModule = ({
   withTransaction: runInTransaction = withTransaction,
   createToken = nanoid,
 } = {}) => {
+  const legacyArchiveCall = Symbol("legacyArchiveCall");
   const hydrateActiveDetails = async (rows, orderId, connection) => {
     const detailIds = rows.map((row) => row.orderDetailsId).filter(Boolean);
     const snapshots = await repository.findActiveSnapshots({ detailIds, connection });
@@ -373,7 +384,16 @@ const buildOrderArchiveModule = ({
     discount = {},
     settlementId,
     lockedOrder,
-  }) => {
+  }, callMode) => {
+    if (!connection) {
+      throw new TypeError("archiveOrderInTransaction requires a connection");
+    }
+    if (lockedOrder && Number(lockedOrder.id) !== Number(orderId)) {
+      throw new Error("Locked order does not match orderId");
+    }
+    if (lockedOrder && shopId != null && Number(lockedOrder.shopid) !== Number(shopId)) {
+      throw new Error("Locked order does not match shopId");
+    }
     if (!lockedOrder && shopId != null && repository.lockShopForArchive) {
       await repository.lockShopForArchive({ shopId, connection });
     }
@@ -479,6 +499,24 @@ const buildOrderArchiveModule = ({
       }
     }
 
+    let persistedArchive = { id: archiveOrderId, ...archive };
+    let persistedDetails = archivedDetails;
+    if (callMode !== legacyArchiveCall) {
+      if (typeof repository.findArchiveById !== "function"
+        || typeof repository.findArchiveDetailsByArchiveId !== "function") {
+        throw new TypeError("Archive repository requires read-back interfaces");
+      }
+      persistedArchive = await repository.findArchiveById({
+        archiveId: archiveOrderId,
+        connection,
+      });
+      persistedDetails = await repository.findArchiveDetailsByArchiveId({
+        archiveId: archiveOrderId,
+        connection,
+      });
+      if (!persistedArchive) throw new Error("Archive introuvable apres insertion");
+    }
+
     await repository.deleteActiveSnapshots({ detailIds, connection });
     await repository.deleteLegacyCustomizations({ orderId, connection });
     await repository.deleteOrderDetails({ orderId, connection });
@@ -486,9 +524,9 @@ const buildOrderArchiveModule = ({
 
     return {
       archiveId: archiveOrderId,
-      token: archive.token,
-      archive: { id: archiveOrderId, ...archive },
-      details: archivedDetails,
+      token: persistedArchive.token,
+      archive: persistedArchive,
+      details: persistedDetails,
     };
   };
 
@@ -500,7 +538,7 @@ const buildOrderArchiveModule = ({
         paymentMethod,
         shopId,
         discount,
-      });
+      }, legacyArchiveCall);
       return { affectedRows: 1 };
     },
   );
