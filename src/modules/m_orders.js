@@ -365,111 +365,143 @@ const buildOrderArchiveModule = ({
     });
   };
 
-  const mArchiveOrder = (id, paymentMethod, shopId, discount = {}) => runInTransaction(
-    async (connection) => {
-      if (shopId != null && repository.lockShopForArchive) {
-        await repository.lockShopForArchive({ shopId, connection });
-      }
-      const order = await repository.findOrderForArchive({
-        orderId: id,
-        shopId,
-        connection,
-      });
-      if (!order) throw new Error("Commande introuvable");
+  const archiveOrderInTransaction = async ({
+    connection,
+    orderId,
+    paymentMethod,
+    shopId,
+    discount = {},
+    settlementId,
+    lockedOrder,
+  }) => {
+    if (!lockedOrder && shopId != null && repository.lockShopForArchive) {
+      await repository.lockShopForArchive({ shopId, connection });
+    }
+    const order = lockedOrder || await repository.findOrderForArchive({
+      orderId,
+      shopId,
+      connection,
+    });
+    if (!order) throw new Error("Commande introuvable");
 
-      let terminalAllocation;
-      if (order.stripe_terminal_payment_id != null) {
-        buildCashRegisterArchiveFields({ order });
-        terminalAllocation = await repository.findTerminalAllocationForArchive({
-          shopId: order.shopid, orderId: order.id, paymentId: order.stripe_terminal_payment_id, connection,
-        });
-        if (!terminalAllocation || !Number.isSafeInteger(terminalAllocation.amount_cents)
-          || terminalAllocation.amount_cents < 0) {
-          throw new DomainError(409, "TERMINAL_PAYMENT_NOT_SETTLED", "Le paiement terminal ne peut pas etre archive.");
-        }
+    let terminalAllocation;
+    if (order.stripe_terminal_payment_id != null) {
+      buildCashRegisterArchiveFields({ order });
+      terminalAllocation = await repository.findTerminalAllocationForArchive({
+        shopId: order.shopid, orderId: order.id, paymentId: order.stripe_terminal_payment_id, connection,
+      });
+      if (!terminalAllocation || !Number.isSafeInteger(terminalAllocation.amount_cents)
+        || terminalAllocation.amount_cents < 0) {
+        throw new DomainError(409, "TERMINAL_PAYMENT_NOT_SETTLED", "Le paiement terminal ne peut pas etre archive.");
       }
+    }
 
-      const orderDetails = await repository.findOrderDetails({
-        orderId: id,
-        connection,
-      });
-      const discountApplication = applyArchiveDiscountToDetails({
-        order,
-        orderDetails,
-        discount: terminalAllocation && orderDetails.length ? {
-          discountType: "amount",
-          discountValue: (orderDetails.reduce((sum, detail) => sum + cents(detail.total), 0)
-            - terminalAllocation.amount_cents) / 100,
-        } : terminalAllocation ? {} : discount,
-      });
-      if (terminalAllocation && !orderDetails.length) {
-        const discountAmount = (cents(order.subtotal) - terminalAllocation.amount_cents) / 100;
-        discountApplication.archiveDiscountFields = {
-          subtotal: terminalAllocation.amount_cents / 100, subtotal_before_discount: parseMoney(order.subtotal),
-          discount_type: "amount", discount_value: discountAmount, discount_amount: discountAmount,
-        };
-      }
-      const archivePaymentFields = buildCashRegisterArchiveFields({
-        order,
-        paymentMethod,
-      });
-      const archive = {
-        ...pickArchiveOrderFields(order),
-        ...discountApplication.archiveDiscountFields,
-        ...archivePaymentFields,
-        token: createToken(),
+    const orderDetails = await repository.findOrderDetails({
+      orderId,
+      connection,
+    });
+    const discountApplication = applyArchiveDiscountToDetails({
+      order,
+      orderDetails,
+      discount: terminalAllocation && orderDetails.length ? {
+        discountType: "amount",
+        discountValue: (orderDetails.reduce((sum, detail) => sum + cents(detail.total), 0)
+          - terminalAllocation.amount_cents) / 100,
+      } : terminalAllocation ? {} : discount,
+    });
+    if (terminalAllocation && !orderDetails.length) {
+      const discountAmount = (cents(order.subtotal) - terminalAllocation.amount_cents) / 100;
+      discountApplication.archiveDiscountFields = {
+        subtotal: terminalAllocation.amount_cents / 100, subtotal_before_discount: parseMoney(order.subtotal),
+        discount_type: "amount", discount_value: discountAmount, discount_amount: discountAmount,
       };
-      const archiveResult = await repository.insertArchive({ archive, connection });
-      const archiveOrderId = archiveResult.insertId;
+    }
+    const archivePaymentFields = buildCashRegisterArchiveFields({
+      order,
+      paymentMethod,
+    });
+    const archive = {
+      ...pickArchiveOrderFields(order),
+      ...discountApplication.archiveDiscountFields,
+      ...archivePaymentFields,
+      token: createToken(),
+    };
+    if (settlementId != null) {
+      archive.cash_register_settlement_id = settlementId;
+    }
+    const archiveResult = await repository.insertArchive({ archive, connection });
+    const archiveOrderId = archiveResult.insertId;
 
-      const detailIds = orderDetails.map((detail) => detail.id);
-      const activeSnapshots = await repository.findActiveSnapshots({
-        detailIds,
+    const detailIds = orderDetails.map((detail) => detail.id);
+    const activeSnapshots = await repository.findActiveSnapshots({
+      detailIds,
+      connection,
+    });
+    const snapshotsByDetail = groupBy(activeSnapshots, "orderdetail_id");
+    const archivedDetails = [];
+
+    for (const detail of discountApplication.details) {
+      const archiveDetail = {
+        orderId: archiveOrderId,
+        productid: detail.productid,
+        qty: detail.qty,
+        total: detail.total,
+        price: detail.price,
+        vat_rate: detail.vat_rate,
+        unit_price_ht: detail.unit_price_ht,
+        unit_vat: detail.unit_vat,
+        total_ht: detail.total_ht,
+        total_vat: detail.total_vat,
+      };
+      const archiveDetailResult = await repository.insertArchiveDetail({
+        detail: archiveDetail,
         connection,
       });
-      const snapshotsByDetail = groupBy(activeSnapshots, "orderdetail_id");
-
-      for (const detail of discountApplication.details) {
-        const archiveDetailResult = await repository.insertArchiveDetail({
-          detail: {
-            orderId: archiveOrderId,
-            productid: detail.productid,
-            qty: detail.qty,
-            total: detail.total,
-            price: detail.price,
-            vat_rate: detail.vat_rate,
-            unit_price_ht: detail.unit_price_ht,
-            unit_vat: detail.unit_vat,
-            total_ht: detail.total_ht,
-            total_vat: detail.total_vat,
+      archivedDetails.push({ id: archiveDetailResult.insertId, ...archiveDetail });
+      for (const snapshot of snapshotsByDetail.get(detail.id) || []) {
+        await repository.insertArchiveSnapshot({
+          snapshot: {
+            archivesdetail_id: archiveDetailResult.insertId,
+            product_customization_step_id: snapshot.product_customization_step_id,
+            product_customization_step_choice_id:
+              snapshot.product_customization_step_choice_id,
+            step_name: snapshot.step_name,
+            step_position: snapshot.step_position,
+            choice_type: snapshot.choice_type,
+            choice_name: snapshot.choice_name,
+            choice_position: snapshot.choice_position,
+            unit_extra_price: snapshot.unit_extra_price,
+            linked_product_id: snapshot.linked_product_id,
+            created: snapshot.created,
           },
           connection,
         });
-        for (const snapshot of snapshotsByDetail.get(detail.id) || []) {
-          await repository.insertArchiveSnapshot({
-            snapshot: {
-              archivesdetail_id: archiveDetailResult.insertId,
-              product_customization_step_id: snapshot.product_customization_step_id,
-              product_customization_step_choice_id:
-                snapshot.product_customization_step_choice_id,
-              step_name: snapshot.step_name,
-              step_position: snapshot.step_position,
-              choice_type: snapshot.choice_type,
-              choice_name: snapshot.choice_name,
-              choice_position: snapshot.choice_position,
-              unit_extra_price: snapshot.unit_extra_price,
-              linked_product_id: snapshot.linked_product_id,
-              created: snapshot.created,
-            },
-            connection,
-          });
-        }
       }
+    }
 
-      await repository.deleteActiveSnapshots({ detailIds, connection });
-      await repository.deleteLegacyCustomizations({ orderId: id, connection });
-      await repository.deleteOrderDetails({ orderId: id, connection });
-      return repository.deleteOrder({ orderId: id, connection });
+    await repository.deleteActiveSnapshots({ detailIds, connection });
+    await repository.deleteLegacyCustomizations({ orderId, connection });
+    await repository.deleteOrderDetails({ orderId, connection });
+    await repository.deleteOrder({ orderId, connection });
+
+    return {
+      archiveId: archiveOrderId,
+      token: archive.token,
+      archive: { id: archiveOrderId, ...archive },
+      details: archivedDetails,
+    };
+  };
+
+  const mArchiveOrder = (id, paymentMethod, shopId, discount = {}) => runInTransaction(
+    async (connection) => {
+      await archiveOrderInTransaction({
+        connection,
+        orderId: id,
+        paymentMethod,
+        shopId,
+        discount,
+      });
+      return { affectedRows: 1 };
     },
   );
 
@@ -489,6 +521,7 @@ const buildOrderArchiveModule = ({
   };
 
   return {
+    archiveOrderInTransaction,
     hydrateArchivedDetails,
     mArchiveOrder,
     mDetailArchivedOrder,
@@ -1193,6 +1226,7 @@ module.exports = {
 };
 
 const legacyAllArchivedOrdersWithDetails = module.exports.mAllArchivedOrdersWithDetails;
+module.exports.archiveOrderInTransaction = orderArchiveModule.archiveOrderInTransaction;
 module.exports.buildOrderArchiveModule = buildOrderArchiveModule;
 module.exports.pickArchiveOrderFields = pickArchiveOrderFields;
 module.exports.mArchiveOrder = orderArchiveModule.mArchiveOrder;
