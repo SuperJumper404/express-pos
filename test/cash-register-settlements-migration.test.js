@@ -36,6 +36,7 @@ for (const pattern of [
   /`total_amount` DECIMAL\(10,2\) NOT NULL/i,
   /`stripe_terminal_payment_id` INT DEFAULT NULL/i,
   /`idempotency_key` VARCHAR\(191\) NOT NULL/i,
+  /`request_fingerprint` CHAR\(64\) NOT NULL/i,
   /`created_by_user_id` INT\(11\) DEFAULT NULL/i,
   /`created_at` DATETIME\(6\) NOT NULL DEFAULT CURRENT_TIMESTAMP\(6\)/i,
   /`updated_at` DATETIME\(6\) NOT NULL DEFAULT CURRENT_TIMESTAMP\(6\) ON UPDATE CURRENT_TIMESTAMP\(6\)/i,

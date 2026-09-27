@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const DomainError = require("../helpers/domainError");
 const { parseMoney } = require("../helpers/money");
 const { normalizePaymentMethod } = require("../helpers/paymentMethod");
@@ -107,10 +108,23 @@ const assertLockedOrders = ({ orders, orderIds, shopId, terminalPaymentId }) => 
   ))) fail(409, "TABLE_ORDERS_CHANGED", "Table orders changed.");
   const tableKeys = new Set(orders.map(orderTableKey));
   if (tableKeys.size !== 1) fail(409, "TABLE_ORDERS_CHANGED", "Table orders changed.");
+  if (orders.some((order) => order.service_point_id != null
+    && order.service_point_type !== "table")) {
+    fail(409, "TABLE_ORDERS_CHANGED", "Table orders changed.");
+  }
 };
 
 const sameIds = (left, right) => left.length === right.length
   && left.every((id, index) => id === right[index]);
+
+const requestFingerprint = (input) => crypto.createHash("sha256").update(JSON.stringify([
+  input.orderIds,
+  input.actorId,
+  input.paymentMethod,
+  input.discountType,
+  input.discountValue.toFixed(2),
+  input.terminalPaymentId,
+])).digest("hex");
 
 const receiptDto = (receipt, idempotentReplay) => ({
   id: Number(receipt.id),
@@ -134,20 +148,6 @@ const receiptDto = (receipt, idempotentReplay) => ({
   idempotentReplay,
 });
 
-const replayMatches = (stored, receipt, input) => {
-  const storedDto = receiptDto(receipt, true);
-  const sourceOrderIds = storedDto.archivedOrders
-    .map((order) => Number(order.sourceOrderId))
-    .filter((id) => Number.isSafeInteger(id) && id > 0)
-    .sort((left, right) => left - right);
-  return storedDto.paymentMethod === input.paymentMethod
-    && storedDto.discountType === input.discountType
-    && toCents(storedDto.discountValue) === toCents(input.discountValue)
-    && storedDto.terminalPaymentId === input.terminalPaymentId
-    && (!sourceOrderIds.length || sameIds(sourceOrderIds, input.orderIds))
-    && Number(stored.shopid) === input.shopId;
-};
-
 const buildCashRegisterSettlementService = ({
   settlementStore,
   archiveOrderInTransaction,
@@ -168,6 +168,7 @@ const buildCashRegisterSettlementService = ({
 
   const createSettlement = async (rawInput) => {
     const input = normalizeInput(rawInput);
+    const fingerprint = requestFingerprint(input);
     return settlementStore.withTransaction(async (store) => {
       await store.lockShop({ shopId: input.shopId });
       const existing = await store.findByIdempotencyKey({
@@ -179,7 +180,7 @@ const buildCashRegisterSettlementService = ({
           shopId: input.shopId,
           settlementId: existing.id,
         });
-        if (!receipt || !replayMatches(existing, receipt, input)) {
+        if (!receipt || existing.request_fingerprint !== fingerprint) {
           fail(409, "SETTLEMENT_IDEMPOTENCY_CONFLICT", "Idempotency key already used.");
         }
         return receiptDto(receipt, true);
@@ -233,6 +234,8 @@ const buildCashRegisterSettlementService = ({
           && orders.some((order) => order.id === Number(row.order_id)
             && row.amount_cents <= order.amountCents));
         if (!payment || payment.status !== "succeeded"
+          || Number(payment.cashier_user_id) !== input.actorId
+          || String(payment.currency || "").toLowerCase() !== "eur"
           || !Number.isSafeInteger(payment.amount_cents) || payment.amount_cents <= 0
           || !sameIds(allocationIds, input.orderIds) || !allocationsValid
           || allocationTotal !== payment.amount_cents) {
@@ -278,6 +281,7 @@ const buildCashRegisterSettlementService = ({
         total_amount: fromCents(subtotalCents - discountCents),
         stripe_terminal_payment_id: input.terminalPaymentId,
         idempotency_key: input.idempotencyKey,
+        request_fingerprint: fingerprint,
         created_by_user_id: input.actorId,
       });
 

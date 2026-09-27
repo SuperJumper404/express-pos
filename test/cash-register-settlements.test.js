@@ -2,6 +2,9 @@ const assert = require("assert");
 const DomainError = require("../src/helpers/domainError");
 const { normalizePaymentMethod } = require("../src/helpers/paymentMethod");
 const {
+  buildCashRegisterSettlementModule,
+} = require("../src/modules/m_cashRegisterSettlements");
+const {
   buildCashRegisterSettlementService,
 } = require("../src/services/cashRegisterSettlements");
 
@@ -10,9 +13,9 @@ const test = (name, run) => tests.push({ name, run });
 const clone = (value) => JSON.parse(JSON.stringify(value));
 
 const baseOrders = () => [
-  { id: 31, shopid: 7, status: 3, payment_status: "unpaid", subtotal: "6.67", service_point_id: 9, service_point_name: "Table 9", customerID: 90 },
-  { id: 12, shopid: 7, status: 3, payment_status: "unpaid", subtotal: "6.67", service_point_id: 9, service_point_name: "Table 9", customerID: 90 },
-  { id: 22, shopid: 7, status: 3, payment_status: "unpaid", subtotal: "6.66", service_point_id: 9, service_point_name: "Table 9", customerID: 90 },
+  { id: 31, shopid: 7, status: 3, payment_status: "unpaid", subtotal: "6.67", service_point_id: 9, service_point_name: "Table 9", service_point_type: "table", customerID: 90 },
+  { id: 12, shopid: 7, status: 3, payment_status: "unpaid", subtotal: "6.67", service_point_id: 9, service_point_name: "Table 9", service_point_type: "table", customerID: 90 },
+  { id: 22, shopid: 7, status: 3, payment_status: "unpaid", subtotal: "6.66", service_point_id: 9, service_point_name: "Table 9", service_point_type: "table", customerID: 90 },
 ];
 
 const fixture = ({ orders = baseOrders(), terminalPayment = null, terminalAllocations = [] } = {}) => {
@@ -87,12 +90,13 @@ const fixture = ({ orders = baseOrders(), terminalPayment = null, terminalAlloca
       )).sort((left, right) => left.id - right.id));
     },
     listEligibleTableOrders: async ({ shopId, servicePointId, customerId }) => clone(
+      (state.events.push(`eligible:${servicePointId == null ? `legacy-${customerId}` : servicePointId}`),
       state.orders.filter((order) => order.shopid === shopId
         && order.status === 3 && order.payment_status === "unpaid"
         && (servicePointId == null
           ? order.service_point_id == null && order.customerID === customerId
           : order.service_point_id === servicePointId))
-        .sort((left, right) => left.id - right.id),
+        .sort((left, right) => left.id - right.id)),
     ),
     findByIdempotencyKey: async ({ shopId, idempotencyKey }) => clone(
       state.settlements.find((row) => row.shopid === shopId
@@ -189,7 +193,7 @@ test("settles every eligible order at a table in one transaction", async () => {
   const f = fixture();
   const result = await f.service.createSettlement(manualInput());
   assert.deepStrictEqual(f.state.events, [
-    "begin", "shop:7", "orders:12,22,31", "settlement:501",
+    "begin", "shop:7", "orders:12,22,31", "eligible:9", "settlement:501",
     "archive:12", "archive:22", "archive:31", "commit",
   ]);
   assert.strictEqual(result.id, 501);
@@ -221,9 +225,9 @@ test("uses largest remainders with order ID tie-breaking and exact cent sums", a
 
 test("rejects mixed table, foreign shop and ineligible status selections", async () => {
   for (const replacement of [
-    { id: 31, shopid: 7, status: 3, payment_status: "unpaid", subtotal: 6.67, service_point_id: 10, service_point_name: "Table 10", customerID: 91 },
-    { id: 31, shopid: 8, status: 3, payment_status: "unpaid", subtotal: 6.67, service_point_id: 9, service_point_name: "Table 9", customerID: 90 },
-    { id: 31, shopid: 7, status: 2, payment_status: "unpaid", subtotal: 6.67, service_point_id: 9, service_point_name: "Table 9", customerID: 90 },
+    { id: 31, shopid: 7, status: 3, payment_status: "unpaid", subtotal: 6.67, service_point_id: 10, service_point_name: "Table 10", service_point_type: "table", customerID: 91 },
+    { id: 31, shopid: 8, status: 3, payment_status: "unpaid", subtotal: 6.67, service_point_id: 9, service_point_name: "Table 9", service_point_type: "table", customerID: 90 },
+    { id: 31, shopid: 7, status: 2, payment_status: "unpaid", subtotal: 6.67, service_point_id: 9, service_point_name: "Table 9", service_point_type: "table", customerID: 90 },
   ]) {
     const orders = baseOrders();
     orders[0] = replacement;
@@ -262,12 +266,31 @@ test("returns the stored authoritative receipt on an exact idempotent replay", a
 });
 
 test("rejects conflicting reuse of an idempotency key", async () => {
+  const changes = [
+    { orderIds: [12, 22] },
+    { actorId: 45 },
+    { paymentMethod: "Cheque" },
+    { discountType: "percent", discountValue: 0.02 },
+    { discountValue: 0.03 },
+    { terminalPaymentId: 42 },
+  ];
+  for (const change of changes) {
+    const f = fixture();
+    await f.service.createSettlement(manualInput());
+    await expectCode(
+      () => f.service.createSettlement(manualInput(change)),
+      "SETTLEMENT_IDEMPOTENCY_CONFLICT",
+      409,
+    );
+  }
+});
+
+test("persists a deterministic fingerprint of every normalized request field", async () => {
   const f = fixture();
-  await f.service.createSettlement(manualInput());
-  await expectCode(
-    () => f.service.createSettlement(manualInput({ paymentMethod: "Cheque" })),
-    "SETTLEMENT_IDEMPOTENCY_CONFLICT",
-    409,
+  await f.service.createSettlement(manualInput({ orderIds: [31, 12, 22, 12] }));
+  assert.strictEqual(
+    f.state.settlements[0].request_fingerprint,
+    "ca4d94d3c920c2977702a3b5facf8db762c25243b195affe3d8ee5dd088f46f7",
   );
 });
 
@@ -281,7 +304,7 @@ const terminalFixture = (overrides = {}) => fixture({
   })),
   terminalPayment: {
     id: 41, shopid: 7, status: "succeeded", amount_cents: 1332,
-    discount_type: "amount", discount_value: 2,
+    discount_type: "amount", discount_value: 2, cashier_user_id: 44, currency: "eur",
     ...overrides.payment,
   },
   terminalAllocations: overrides.allocations || [
@@ -333,15 +356,123 @@ test("rejects foreign, incomplete, unsuccessful or amount-mismatched Terminal pa
   }
 });
 
+test("rejects Terminal payments owned by another cashier or using another currency", async () => {
+  for (const payment of [{ cashier_user_id: 45 }, { currency: "usd" }]) {
+    const f = terminalFixture({ payment });
+    await expectCode(
+      () => f.service.createSettlement(terminalInput()),
+      "TERMINAL_PAYMENT_NOT_SETTLED",
+      409,
+    );
+  }
+});
+
 test("allows a newly eligible order outside frozen Terminal allocations", async () => {
   const f = terminalFixture();
   f.state.orders.push({
     id: 55, shopid: 7, status: 3, payment_status: "unpaid", subtotal: "4.00",
-    service_point_id: 9, service_point_name: "Table 9", customerID: 90,
+    service_point_id: 9, service_point_name: "Table 9", service_point_type: "table", customerID: 90,
   });
   const result = await f.service.createSettlement(terminalInput());
   assert.deepStrictEqual(result.archivedOrders.map((row) => row.sourceOrderId), [12, 31]);
   assert.strictEqual(f.state.orders.some((order) => order.id === 55), true);
+});
+
+test("accepts table service points and legacy table identity but rejects non-table points", async () => {
+  for (const type of ["counter", "kiosk", "click_collect"]) {
+    const f = fixture({ orders: baseOrders().map((order) => ({
+      ...order,
+      service_point_type: type,
+    })) });
+    await expectCode(
+      () => f.service.createSettlement(manualInput()),
+      "TABLE_ORDERS_CHANGED",
+      409,
+    );
+  }
+
+  const legacyOrders = baseOrders().map((order) => ({
+    ...order,
+    service_point_id: null,
+    service_point_name: null,
+    service_point_type: null,
+  }));
+  const legacy = fixture({ orders: legacyOrders });
+  const receipt = await legacy.service.createSettlement(manualInput());
+  assert.strictEqual(receipt.tableReference, "90");
+});
+
+test("production store forwards its exact transaction connection and locks completeness before archival", async () => {
+  const events = [];
+  const settlementRow = {
+    id: 501,
+    shopid: 7,
+    service_point_id: 9,
+    table_reference: "Table 9",
+    payment_method: normalizePaymentMethod("Especes"),
+    subtotal_before_discount: "20.00",
+    discount_type: "amount",
+    discount_value: "0.02",
+    discount_amount: "0.02",
+    total_amount: "19.98",
+    stripe_terminal_payment_id: null,
+    idempotency_key: "settlement-manual-1",
+    request_fingerprint: "ca4d94d3c920c2977702a3b5facf8db762c25243b195affe3d8ee5dd088f46f7",
+    created_by_user_id: 44,
+  };
+  const transactionConnection = {
+    beginTransaction: async () => events.push("begin"),
+    commit: async () => events.push("commit"),
+    rollback: async () => events.push("rollback"),
+    release: () => events.push("release"),
+    query: async (sql) => {
+      if (/FROM shop/.test(sql)) { events.push("shop-lock"); return [[{ id: 7 }]]; }
+      if (/idempotency_key = \?/.test(sql)) { events.push("idempotency"); return [[]]; }
+      if (/orders\.id IN/.test(sql)) { events.push("submitted-lock"); return [baseOrders().sort((a, b) => a.id - b.id)]; }
+      if (/orders\.status = 3/.test(sql)) {
+        assert.match(sql, /FOR UPDATE\s*$/);
+        events.push("eligible-lock");
+        return [baseOrders().sort((a, b) => a.id - b.id)];
+      }
+      if (/INSERT INTO cash_register_settlements/.test(sql)) { events.push("insert"); return [{ insertId: 501 }]; }
+      if (/cash_register_settlements WHERE shopid = \? AND id = \?/.test(sql)) return [[settlementRow]];
+      if (/FROM cash_register_settlements/.test(sql)) return [[settlementRow]];
+      if (/FROM archives/.test(sql)) return [[]];
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+  };
+  const pool = { getConnection: async () => transactionConnection };
+  const store = buildCashRegisterSettlementModule({ connection: pool });
+  const service = buildCashRegisterSettlementService({
+    settlementStore: store,
+    archiveOrderInTransaction: async ({ connection, orderId }) => {
+      assert.strictEqual(connection, transactionConnection);
+      assert(events.includes("eligible-lock"));
+      events.push(`archive:${orderId}`);
+      return { archiveId: 800 + orderId, archive: {}, details: [] };
+    },
+  });
+
+  await service.createSettlement(manualInput());
+  assert(events.indexOf("shop-lock") < events.indexOf("idempotency"));
+  assert(events.indexOf("submitted-lock") < events.indexOf("eligible-lock"));
+  assert(events.indexOf("eligible-lock") < events.indexOf("archive:12"));
+  assert.deepStrictEqual(events.slice(-2), ["commit", "release"]);
+});
+
+test("production transaction-bound store exposes the exact acquired connection", async () => {
+  const transactionConnection = {
+    beginTransaction: async () => {},
+    commit: async () => {},
+    rollback: async () => {},
+    release: () => {},
+  };
+  const store = buildCashRegisterSettlementModule({
+    connection: { getConnection: async () => transactionConnection },
+  });
+  await store.withTransaction(async (transactionStore) => {
+    assert.strictEqual(transactionStore.connection, transactionConnection);
+  });
 });
 
 test("validates input and reports missing receipts with domain errors", async () => {
@@ -359,7 +490,10 @@ test("validates input and reports missing receipts with domain errors", async ()
 });
 
 (async () => {
-  for (const entry of tests) {
+  const selectedTests = process.env.TEST_NAME
+    ? tests.filter((entry) => entry.name.includes(process.env.TEST_NAME))
+    : tests;
+  for (const entry of selectedTests) {
     try {
       await entry.run();
       console.log(`PASS ${entry.name}`);

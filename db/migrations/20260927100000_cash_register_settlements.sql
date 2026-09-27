@@ -13,6 +13,7 @@ CREATE TABLE `cash_register_settlements` (
   `total_amount` DECIMAL(10,2) NOT NULL,
   `stripe_terminal_payment_id` INT DEFAULT NULL,
   `idempotency_key` VARCHAR(191) NOT NULL,
+  `request_fingerprint` CHAR(64) NOT NULL,
   `created_by_user_id` INT(11) DEFAULT NULL,
   `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),

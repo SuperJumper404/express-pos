@@ -84,6 +84,7 @@ const buildCashRegisterSettlementModule = ({ connection = pool } = {}) => {
   };
 
   return {
+    connection,
     withTransaction: (work) => createTransactionRunner(connection)(
       (transactionConnection) => work(buildCashRegisterSettlementModule({
         connection: transactionConnection,
@@ -94,7 +95,8 @@ const buildCashRegisterSettlementModule = ({ connection = pool } = {}) => {
       [shopId],
     )),
     lockOrders: ({ shopId, orderIds }) => query(
-      `SELECT orders.*, service_points.name AS service_point_name
+      `SELECT orders.*, service_points.name AS service_point_name,
+              service_points.type AS service_point_type
        FROM orders
        LEFT JOIN service_points ON service_points.id = orders.service_point_id
          AND service_points.shopid = orders.shopid
@@ -107,13 +109,14 @@ const buildCashRegisterSettlementModule = ({ connection = pool } = {}) => {
         ? "orders.service_point_id IS NULL AND orders.customerID = ?"
         : "orders.service_point_id = ?";
       return query(
-        `SELECT orders.*, service_points.name AS service_point_name
+        `SELECT orders.*, service_points.name AS service_point_name,
+                service_points.type AS service_point_type
          FROM orders
          LEFT JOIN service_points ON service_points.id = orders.service_point_id
            AND service_points.shopid = orders.shopid
          WHERE orders.shopid = ? AND ${tableClause}
            AND orders.status = 3 AND orders.payment_status = 'unpaid'
-         ORDER BY orders.id`,
+         ORDER BY orders.id FOR UPDATE`,
         [shopId, servicePointId == null ? customerId : servicePointId],
       );
     },
@@ -124,8 +127,8 @@ const buildCashRegisterSettlementModule = ({ connection = pool } = {}) => {
            (shopid, service_point_id, table_reference, payment_method,
             subtotal_before_discount, discount_type, discount_value,
             discount_amount, total_amount, stripe_terminal_payment_id,
-            idempotency_key, created_by_user_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            idempotency_key, request_fingerprint, created_by_user_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           data.shopid,
           data.service_point_id,
@@ -138,6 +141,7 @@ const buildCashRegisterSettlementModule = ({ connection = pool } = {}) => {
           data.total_amount,
           data.stripe_terminal_payment_id,
           data.idempotency_key,
+          data.request_fingerprint,
           data.created_by_user_id,
         ],
       );
