@@ -4,6 +4,12 @@ const { normalizePaymentMethod } = require("../src/helpers/paymentMethod");
 const {
   buildCashRegisterSettlementModule,
 } = require("../src/modules/m_cashRegisterSettlements");
+const legacyDbPath = require.resolve("../src/config/db");
+const previousLegacyDb = require.cache[legacyDbPath];
+require.cache[legacyDbPath] = { exports: { query: () => {} } };
+const { buildAllArchivedOrdersQuery } = require("../src/modules/m_orders");
+if (previousLegacyDb) require.cache[legacyDbPath] = previousLegacyDb;
+else delete require.cache[legacyDbPath];
 const {
   buildCashRegisterSettlementService,
 } = require("../src/services/cashRegisterSettlements");
@@ -487,6 +493,25 @@ test("validates input and reports missing receipts with domain errors", async ()
     "SETTLEMENT_NOT_FOUND",
     404,
   );
+});
+
+test("grouped history preserves legacy archives and exposes nullable settlement summaries", () => {
+  const { sql, params } = buildAllArchivedOrdersQuery(7);
+  assert.deepStrictEqual(params, [7]);
+  assert.match(sql, /FROM archives/);
+  assert.match(
+    sql,
+    /LEFT JOIN cash_register_settlements AS settlements\s+ON settlements\.id = archives\.cash_register_settlement_id\s+AND settlements\.shopid = archives\.shopid/,
+  );
+  for (const alias of [
+    "cash_register_settlement_id",
+    "settlement_table_reference",
+    "settlement_total_amount",
+    "settlement_payment_method",
+    "settlement_created_at",
+  ]) assert.match(sql, new RegExp(`\\b${alias}\\b`));
+  assert.doesNotMatch(sql, /WHERE\s+settlements\./);
+  assert.match(sql, /ORDER BY archives\.archived_at DESC, archives\.id DESC/);
 });
 
 (async () => {

@@ -1089,13 +1089,10 @@ module.exports = {
   },
   mAllArchivedOrders: (shopid) => {
     return new Promise((resolve, reject) => {
+      const { sql, params } = buildAllArchivedOrdersQuery(shopid);
       conn.query(
-        `SELECT archives.*, service_points.name AS service_point_name
-         FROM archives
-         LEFT JOIN service_points ON service_points.id = archives.service_point_id
-         WHERE archives.shopid = ?
-         ORDER BY archives.archived_at DESC, archives.id DESC`,
-        [shopid],
+        sql,
+        params,
         (err, result) => {
           if (!err) {
             resolve(result);
@@ -1263,9 +1260,27 @@ module.exports = {
   },
 };
 
+const buildAllArchivedOrdersQuery = (shopid) => ({
+  sql: `SELECT archives.*, service_points.name AS service_point_name,
+               archives.cash_register_settlement_id AS cash_register_settlement_id,
+               settlements.table_reference AS settlement_table_reference,
+               settlements.total_amount AS settlement_total_amount,
+               settlements.payment_method AS settlement_payment_method,
+               settlements.created_at AS settlement_created_at
+        FROM archives
+        LEFT JOIN service_points ON service_points.id = archives.service_point_id
+        LEFT JOIN cash_register_settlements AS settlements
+          ON settlements.id = archives.cash_register_settlement_id
+         AND settlements.shopid = archives.shopid
+        WHERE archives.shopid = ?
+        ORDER BY archives.archived_at DESC, archives.id DESC`,
+  params: [shopid],
+});
+
 const legacyAllArchivedOrdersWithDetails = module.exports.mAllArchivedOrdersWithDetails;
 module.exports.archiveOrderInTransaction = orderArchiveModule.archiveOrderInTransaction;
 module.exports.buildOrderArchiveModule = buildOrderArchiveModule;
+module.exports.buildAllArchivedOrdersQuery = buildAllArchivedOrdersQuery;
 module.exports.pickArchiveOrderFields = pickArchiveOrderFields;
 module.exports.mArchiveOrder = orderArchiveModule.mArchiveOrder;
 module.exports.mDetailArchivedOrder = orderArchiveModule.mDetailArchivedOrder;
