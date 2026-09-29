@@ -13,11 +13,12 @@ const queryResult = async (connection, sql, params = []) => {
 const first = (rows) => rows[0] || null;
 const decimal = (cents) => Number((cents / 100).toFixed(2));
 const cents = (value) => Math.round(Number(value || 0) * 100);
+const hasVatRate = (value) => value != null && String(value).trim() !== "";
 
 const buildVatBreakdown = (details) => {
   const totals = new Map();
   for (const detail of details) {
-    const numericRate = Number(detail.vat_rate);
+    const numericRate = hasVatRate(detail.vat_rate) ? Number(detail.vat_rate) : NaN;
     const vatRate = Number.isFinite(numericRate) ? numericRate.toFixed(2) : "Non renseignee";
     const current = totals.get(vatRate) || {
       vatRate,
@@ -65,15 +66,49 @@ const buildCashRegisterSettlementModule = ({ connection = pool } = {}) => {
     );
     const archiveIds = archivedOrders.map((order) => order.id);
     const details = archiveIds.length ? await query(
-      `SELECT * FROM archivesdetail
-       WHERE orderId IN (?)
-       ORDER BY orderId, id`,
+      `SELECT archivesdetail.*,
+              archivesdetail.id AS archiveDetailsId,
+              archivesdetail.orderid AS orderId,
+              products.name AS name
+       FROM archivesdetail
+       LEFT JOIN products ON products.id = archivesdetail.productid
+       WHERE archivesdetail.orderid IN (?)
+       ORDER BY archivesdetail.orderid, archivesdetail.id`,
       [archiveIds],
     ) : [];
+    const detailIds = details.map((detail) => detail.archiveDetailsId);
+    const snapshots = detailIds.length ? await query(
+      `SELECT * FROM archivesdetail_customization_snapshots
+       WHERE archivesdetail_id IN (?)
+       ORDER BY archivesdetail_id, step_position, choice_position, id`,
+      [detailIds],
+    ) : [];
+    const snapshotsByDetail = new Map();
+    const orderedSnapshots = [...snapshots].sort((left, right) => (
+      Number(left.archivesdetail_id) - Number(right.archivesdetail_id)
+      || Number(left.step_position) - Number(right.step_position)
+      || Number(left.choice_position) - Number(right.choice_position)
+      || Number(left.id) - Number(right.id)
+    ));
+    for (const snapshot of orderedSnapshots) {
+      const customizations = snapshotsByDetail.get(snapshot.archivesdetail_id) || [];
+      customizations.push({
+        product_customization_step_id: snapshot.product_customization_step_id,
+        step_name: snapshot.step_name,
+        step_position: snapshot.step_position,
+        name: snapshot.choice_name,
+        choice_position: snapshot.choice_position,
+        price: Number(snapshot.unit_extra_price),
+      });
+      snapshotsByDetail.set(snapshot.archivesdetail_id, customizations);
+    }
     const detailsByOrder = new Map();
     for (const detail of details) {
       const orderDetails = detailsByOrder.get(detail.orderId) || [];
-      orderDetails.push(detail);
+      orderDetails.push({
+        ...detail,
+        customizationList: snapshotsByDetail.get(detail.archiveDetailsId) || [],
+      });
       detailsByOrder.set(detail.orderId, orderDetails);
     }
 
@@ -112,6 +147,35 @@ const buildCashRegisterSettlementModule = ({ connection = pool } = {}) => {
        ) stock_reservations ON stock_reservations.order_id = orders.id
        WHERE orders.shopid = ? AND orders.id IN (?)
        ORDER BY orders.id FOR UPDATE`,
+      [shopId, orderIds],
+    ),
+    listOrdersForSettlement: ({ shopId, orderIds }) => query(
+      `SELECT orders.*, service_points.name AS service_point_name,
+              service_points.type AS service_point_type,
+              stock_reservations.stock_reservation_status
+       FROM orders
+       LEFT JOIN service_points ON service_points.id = orders.service_point_id
+         AND service_points.shopid = orders.shopid
+       LEFT JOIN (
+         SELECT order_id, MAX(status) AS stock_reservation_status
+         FROM order_stock_reservations
+         GROUP BY order_id
+       ) stock_reservations ON stock_reservations.order_id = orders.id
+       WHERE orders.shopid = ? AND orders.id IN (?)
+       ORDER BY orders.id`,
+      [shopId, orderIds],
+    ),
+    lockActiveTerminalAllocations: ({ shopId, orderIds }) => query(
+      `SELECT allocations.*, payments.status
+       FROM stripe_terminal_payment_orders AS allocations
+       JOIN stripe_terminal_payments AS payments
+         ON payments.id = allocations.terminal_payment_id
+        AND payments.shopid = allocations.shopid
+       WHERE allocations.shopid = ?
+         AND allocations.order_id IN (?)
+         AND payments.status IN ('creating', 'processing')
+       ORDER BY allocations.order_id, allocations.terminal_payment_id
+       FOR UPDATE`,
       [shopId, orderIds],
     ),
     listEligibleTableOrders: async ({ shopId, servicePointId, customerId }) => {
@@ -170,13 +234,13 @@ const buildCashRegisterSettlementModule = ({ connection = pool } = {}) => {
     findTerminalPayment: async ({ shopId, paymentId }) => first(await query(
       `SELECT * FROM stripe_terminal_payments
        WHERE shopid = ? AND id = ?
-       LIMIT 1`,
+       LIMIT 1 FOR UPDATE`,
       [shopId, paymentId],
     )),
     listTerminalAllocations: ({ shopId, paymentId }) => query(
       `SELECT * FROM stripe_terminal_payment_orders
        WHERE shopid = ? AND terminal_payment_id = ?
-       ORDER BY order_id`,
+       ORDER BY order_id FOR UPDATE`,
       [shopId, paymentId],
     ),
     getSettlementReceipt,

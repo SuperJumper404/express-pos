@@ -27,13 +27,20 @@ const baseOrders = () => [
   { id: 22, shopid: 7, status: 3, payment_status: "unpaid", subtotal: "6.66", service_point_id: 9, service_point_name: "Table 9", service_point_type: "table", customerID: 90 },
 ];
 
-const fixture = ({ orders = baseOrders(), terminalPayment = null, terminalAllocations = [] } = {}) => {
+const fixture = ({
+  orders = baseOrders(),
+  terminalPayment = null,
+  terminalAllocations = [],
+  activeTerminalAllocations = [],
+  reconcile = async (order) => order,
+} = {}) => {
   const state = {
     orders: clone(orders),
     settlements: [],
     archives: [],
     terminalPayment: clone(terminalPayment),
     terminalAllocations: clone(terminalAllocations),
+    activeTerminalAllocations: clone(activeTerminalAllocations),
     events: [],
     archiveCalls: 0,
     failArchiveAt: null,
@@ -98,6 +105,18 @@ const fixture = ({ orders = baseOrders(), terminalPayment = null, terminalAlloca
         order.shopid === shopId && orderIds.includes(order.id)
       )).sort((left, right) => left.id - right.id));
     },
+    listOrdersForSettlement: async ({ shopId, orderIds }) => {
+      state.events.push(`reconcile-read:${orderIds.join(",")}`);
+      return clone(state.orders.filter((order) => (
+        order.shopid === shopId && orderIds.includes(order.id)
+      )).sort((left, right) => left.id - right.id));
+    },
+    lockActiveTerminalAllocations: async ({ shopId, orderIds }) => {
+      state.events.push(`terminal-lock:${orderIds.join(",")}`);
+      return clone(state.activeTerminalAllocations.filter((row) => (
+        row.shopid === shopId && orderIds.includes(row.order_id)
+      )));
+    },
     listEligibleTableOrders: async ({ shopId, servicePointId, customerId }) => clone(
       (state.events.push(`eligible:${servicePointId == null ? `legacy-${customerId}` : servicePointId}`),
       state.orders.filter((order) => order.shopid === shopId
@@ -112,7 +131,11 @@ const fixture = ({ orders = baseOrders(), terminalPayment = null, terminalAlloca
         && row.idempotency_key === idempotencyKey) || null,
     ),
     insertSettlement: async (data) => {
-      const row = { id: 501 + state.settlements.length, ...clone(data) };
+      const row = {
+        id: 501 + state.settlements.length,
+        created_at: "2026-09-27 10:11:12.123456",
+        ...clone(data),
+      };
       state.settlements.push(row);
       state.events.push(`settlement:${row.id}`);
       return clone(row);
@@ -176,7 +199,11 @@ const fixture = ({ orders = baseOrders(), terminalPayment = null, terminalAlloca
 
   return {
     state,
-    service: buildCashRegisterSettlementService({ settlementStore: store, archiveOrderInTransaction }),
+    service: buildCashRegisterSettlementService({
+      settlementStore: store,
+      archiveOrderInTransaction,
+      reconcileOrderBeforeSettlement: (order) => reconcile(order, state),
+    }),
   };
 };
 
@@ -247,7 +274,8 @@ test("settles every eligible order at a table in one transaction", async () => {
   const f = fixture();
   const result = await f.service.createSettlement(manualInput());
   assert.deepStrictEqual(f.state.events, [
-    "begin", "shop:7", "orders:12,22,31", "eligible:9", "settlement:501",
+    "reconcile-read:12,22,31", "begin", "shop:7", "orders:12,22,31",
+    "terminal-lock:12,22,31", "eligible:9", "settlement:501",
     "archive:12", "archive:22", "archive:31", "commit",
   ]);
   assert.strictEqual(result.id, 501);
@@ -257,6 +285,7 @@ test("settles every eligible order at a table in one transaction", async () => {
   assert.strictEqual(result.discountAmount, 0.02);
   assert.strictEqual(result.totalAmount, 19.98);
   assert.strictEqual(result.idempotentReplay, false);
+  assert.strictEqual(result.createdAt, "2026-09-27 10:11:12.123456");
   assert.deepStrictEqual(result.archivedOrders.map((row) => row.sourceOrderId), [12, 22, 31]);
   assert.strictEqual(result.archivedOrders.reduce((sum, row) => (
     sum + Math.round(row.subtotal * 100)
@@ -316,6 +345,7 @@ test("returns the stored authoritative receipt on an exact idempotent replay", a
   const archiveCalls = f.state.archiveCalls;
   const replay = await f.service.createSettlement(manualInput({ orderIds: [22, 31, 12, 12] }));
   assert.deepStrictEqual(replay, { ...first, idempotentReplay: true });
+  assert.strictEqual(replay.createdAt, "2026-09-27 10:11:12.123456");
   assert.strictEqual(f.state.archiveCalls, archiveCalls);
 });
 
@@ -326,7 +356,7 @@ test("rejects conflicting reuse of an idempotency key", async () => {
     { paymentMethod: "Cheque" },
     { discountType: "percent", discountValue: 0.02 },
     { discountValue: 0.03 },
-    { terminalPaymentId: 42 },
+    { terminalPaymentId: 42, paymentMethod: "Carte bancaire - TPE Stripe" },
   ];
   for (const change of changes) {
     const f = fixture();
@@ -385,6 +415,116 @@ test("accepts a succeeded Terminal payment only for its exact frozen allocations
   assert.deepStrictEqual(result.archivedOrders.map((row) => [row.sourceOrderId, row.subtotal]), [
     [12, 6.66], [31, 6.66],
   ]);
+});
+
+test("requires the canonical Terminal method and reference as one compatible pair", async () => {
+  for (const input of [
+    terminalInput({ paymentMethod: "Carte bancaire" }),
+    terminalInput({ paymentMethod: "Stripe" }),
+    manualInput({ paymentMethod: "Carte bancaire - TPE Stripe" }),
+  ]) {
+    const f = terminalFixture();
+    await expectCode(
+      () => f.service.createSettlement(input),
+      "SETTLEMENT_INVALID_INPUT",
+      400,
+    );
+    assert.strictEqual(f.state.archiveCalls, 0);
+  }
+});
+
+test("locks active Terminal allocations and rejects manual archival without creating a parent", async () => {
+  const f = fixture({
+    activeTerminalAllocations: [{
+      shopid: 7,
+      order_id: 12,
+      terminal_payment_id: 88,
+      status: "processing",
+    }],
+  });
+  await expectCode(
+    () => f.service.createSettlement(manualInput()),
+    "TERMINAL_ORDER_BUSY",
+    409,
+  );
+  assert.strictEqual(f.state.archiveCalls, 0);
+  assert.deepStrictEqual(f.state.settlements, []);
+  assert(f.state.events.includes("terminal-lock:12,22,31"));
+  assert.strictEqual(f.state.events.at(-1), "rollback");
+});
+
+test("reconciles online Stripe orders before opening the archive transaction", async () => {
+  const pendingOrder = {
+    ...baseOrders()[0],
+    payment_status: "requires_payment",
+    payment_provider: "stripe",
+    stripe_payment_intent_id: "pi_31",
+  };
+  const scenarios = [
+    {
+      name: "succeeded",
+      reconcile: async (order, state) => {
+        state.events.push("stripe:succeeded");
+        const persisted = state.orders.find((candidate) => candidate.id === order.id);
+        Object.assign(persisted, { payment_status: "paid", payment: "Stripe" });
+        return clone(persisted);
+      },
+      code: "TABLE_ORDERS_CHANGED",
+    },
+    {
+      name: "failed",
+      reconcile: async (_order, state) => {
+        state.events.push("stripe:failed");
+        throw new DomainError(409, "STRIPE_PAYMENT_NOT_SETTLED", "Stripe ambiguous.");
+      },
+      code: "STRIPE_PAYMENT_NOT_SETTLED",
+    },
+    {
+      name: "unavailable",
+      reconcile: async (_order, state) => {
+        state.events.push("stripe:unavailable");
+        throw new Error("provider unavailable");
+      },
+      error: /provider unavailable/,
+    },
+  ];
+  for (const scenario of scenarios) {
+    const f = fixture({ orders: [pendingOrder], reconcile: scenario.reconcile });
+    const run = () => f.service.createSettlement(manualInput({ orderIds: [31] }));
+    if (scenario.code) await expectCode(run, scenario.code, 409);
+    else await assert.rejects(run, scenario.error);
+    assert.deepStrictEqual(f.state.settlements, [], scenario.name);
+    assert.strictEqual(f.state.archiveCalls, 0, scenario.name);
+    assert(!f.state.events.includes("begin"), scenario.name);
+  }
+});
+
+test("archives after pending Stripe cancellation is persisted and transactionally revalidated", async () => {
+  const pendingOrder = {
+    ...baseOrders()[0],
+    payment_status: "requires_payment",
+    payment_provider: "stripe",
+    stripe_payment_intent_id: "pi_31",
+  };
+  const f = fixture({
+    orders: [pendingOrder],
+    reconcile: async (order, state) => {
+      state.events.push("stripe:canceled");
+      const persisted = state.orders.find((candidate) => candidate.id === order.id);
+      Object.assign(persisted, {
+        payment_status: "paid",
+        payment_provider: null,
+        stripe_payment_intent_id: null,
+        payment: "Paiement au comptoir",
+      });
+      return clone(persisted);
+    },
+  });
+  const result = await f.service.createSettlement(manualInput({ orderIds: [31] }));
+  assert.strictEqual(result.archivedOrders.length, 1);
+  assert(f.state.events.includes("stripe:canceled"));
+  assert(f.state.events.indexOf("stripe:canceled") < f.state.events.indexOf("begin"));
+  assert(f.state.events.indexOf("terminal-lock:31") < f.state.events.indexOf("archive:31"));
 });
 
 test("rejects foreign, incomplete, unsuccessful or amount-mismatched Terminal payments", async () => {
@@ -469,6 +609,7 @@ test("accepts table service points and legacy table identity but rejects non-tab
 test("production store forwards its exact transaction connection and locks completeness before archival", async () => {
   const events = [];
   let eligibleSql = "";
+  let terminalAllocationSql = "";
   const settlementRow = {
     id: 501,
     shopid: 7,
@@ -494,6 +635,11 @@ test("production store forwards its exact transaction connection and locks compl
       if (/FROM shop/.test(sql)) { events.push("shop-lock"); return [[{ id: 7 }]]; }
       if (/idempotency_key = \?/.test(sql)) { events.push("idempotency"); return [[]]; }
       if (/orders\.id IN/.test(sql)) { events.push("submitted-lock"); return [baseOrders().sort((a, b) => a.id - b.id)]; }
+      if (/FROM stripe_terminal_payment_orders AS allocations/.test(sql)) {
+        terminalAllocationSql = sql;
+        events.push("terminal-allocation-lock");
+        return [[]];
+      }
       if (/orders\.status = 3/.test(sql)) {
         assert.match(sql, /FOR UPDATE\s*$/);
         eligibleSql = sql;
@@ -507,7 +653,10 @@ test("production store forwards its exact transaction connection and locks compl
       throw new Error(`Unexpected SQL: ${sql}`);
     },
   };
-  const pool = { getConnection: async () => transactionConnection };
+  const pool = {
+    query: (...args) => transactionConnection.query(...args),
+    getConnection: async () => transactionConnection,
+  };
   const store = buildCashRegisterSettlementModule({ connection: pool });
   const service = buildCashRegisterSettlementService({
     settlementStore: store,
@@ -520,14 +669,98 @@ test("production store forwards its exact transaction connection and locks compl
   });
 
   await service.createSettlement(manualInput());
-  assert(events.indexOf("shop-lock") < events.indexOf("idempotency"));
+  assert(events.indexOf("shop-lock") < events.lastIndexOf("idempotency"));
   assert(events.indexOf("submitted-lock") < events.indexOf("eligible-lock"));
+  assert(events.indexOf("terminal-allocation-lock") < events.indexOf("archive:12"));
   assert(events.indexOf("eligible-lock") < events.indexOf("archive:12"));
+  assert.match(terminalAllocationSql, /payments\.status IN \('creating', 'processing'\)/);
+  assert.match(terminalAllocationSql, /FOR UPDATE\s*$/);
   assert.match(eligibleSql, /payment_status = 'requires_payment'/);
   assert.match(eligibleSql, /payment_status = 'paid'/);
   assert.match(eligibleSql, /stock_reservation_status/);
   assert.match(eligibleSql, /used_payment_method/);
   assert.deepStrictEqual(events.slice(-2), ["commit", "release"]);
+});
+
+test("production receipt read hydrates names, snapshots, statuses, VAT unknowns and timestamp", async () => {
+  const calls = [];
+  const settlement = {
+    id: 501,
+    shopid: 7,
+    table_reference: "Table 9",
+    payment_method: "Espèces",
+    subtotal_before_discount: "10.00",
+    discount_type: "none",
+    discount_value: "0.00",
+    discount_amount: "0.00",
+    total_amount: "10.00",
+    stripe_terminal_payment_id: null,
+    created_at: "2026-09-27 10:11:12.123456",
+  };
+  const connection = {
+    query: async (sql, params) => {
+      calls.push({ sql, params });
+      if (/FROM cash_register_settlements/.test(sql)) return [[settlement]];
+      if (/FROM archives\s/.test(sql)) return [[{
+        id: 801,
+        shopid: 7,
+        cash_register_settlement_id: 501,
+        payment_status: "refunded",
+      }]];
+      if (/FROM archivesdetail\s/.test(sql)) {
+        assert.match(sql, /archivesdetail\.orderid AS orderId/);
+        assert.match(sql, /products\.name AS name/);
+        return [[{
+          id: 901,
+          archiveDetailsId: 901,
+          orderId: 801,
+          name: "Menu midi",
+          vat_rate: null,
+          total_ht: "10.00",
+          total_vat: "0.00",
+          total: "10.00",
+        }]];
+      }
+      if (/FROM archivesdetail_customization_snapshots/.test(sql)) return [[{
+        id: 1002,
+        archivesdetail_id: 901,
+        step_name: "Sauce",
+        step_position: 1,
+        choice_name: "Poivre",
+        choice_position: 2,
+        unit_extra_price: "0.50",
+      }, {
+        id: 1001,
+        archivesdetail_id: 901,
+        step_name: "Cuisson",
+        step_position: 0,
+        choice_name: "Rosé",
+        choice_position: 1,
+        unit_extra_price: "0.00",
+      }]];
+      throw new Error(`Unexpected SQL: ${sql}`);
+    },
+  };
+  const service = buildCashRegisterSettlementService({
+    settlementStore: buildCashRegisterSettlementModule({ connection }),
+    archiveOrderInTransaction: async () => { throw new Error("not used"); },
+  });
+  const result = await service.getSettlement({ shopId: 7, settlementId: 501 });
+  assert.strictEqual(result.createdAt, settlement.created_at);
+  assert.strictEqual(result.archivedOrders[0].paymentStatus, "refunded");
+  assert.strictEqual(result.archivedOrders[0].refundStatus, "succeeded");
+  assert.strictEqual(result.archivedOrders[0].details[0].name, "Menu midi");
+  assert.deepStrictEqual(
+    result.archivedOrders[0].details[0].customizationList.map((row) => row.name),
+    ["Rosé", "Poivre"],
+  );
+  assert.deepStrictEqual(result.vatBreakdown, [{
+    vatRate: "Non renseignee",
+    totalHt: 10,
+    totalVat: 0,
+    totalTtc: 10,
+  }]);
+  assert(calls.every((call) => call.params[0] === 7 || !/cash_register|archives\s/.test(call.sql)));
 });
 
 test("production transaction-bound store exposes the exact acquired connection", async () => {

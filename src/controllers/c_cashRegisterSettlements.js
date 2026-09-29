@@ -33,6 +33,8 @@ const archivedOrderFields = [
   "payment",
   "used_payment_method",
   "status",
+  "paymentStatus",
+  "refundStatus",
   "created",
   "finished",
   "archived_at",
@@ -133,12 +135,14 @@ const getDefaultSettlementService = () => {
       buildCashRegisterSettlementModule,
     } = require("../modules/m_cashRegisterSettlements");
     const { archiveOrderInTransaction } = require("../modules/m_orders");
+    const { buildPendingStripeArchiveSync } = require("./c_orders");
     const {
       buildCashRegisterSettlementService,
     } = require("../services/cashRegisterSettlements");
     defaultSettlementService = buildCashRegisterSettlementService({
       settlementStore: buildCashRegisterSettlementModule(),
       archiveOrderInTransaction,
+      reconcileOrderBeforeSettlement: buildPendingStripeArchiveSync(),
     });
   }
   return defaultSettlementService;

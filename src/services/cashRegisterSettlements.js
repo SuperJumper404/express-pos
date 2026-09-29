@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const DomainError = require("../helpers/domainError");
 const { parseMoney } = require("../helpers/money");
 const { normalizePaymentMethod } = require("../helpers/paymentMethod");
+const { TERMINAL_PAYMENT_METHOD } = require("../helpers/stripeTerminal");
 const {
   isCashRegisterOrderDueAndArchivable,
 } = require("../helpers/cashRegisterPayment");
@@ -31,7 +32,18 @@ const normalizeOrderIds = (value) => {
 const normalizeInput = (input = {}) => {
   if (!isPositiveId(input.shopId)) invalid("shop_id");
   if (input.actorId != null && !isPositiveId(input.actorId)) invalid("actor_id");
-  const paymentMethod = normalizePaymentMethod(input.paymentMethod);
+  if (input.terminalPaymentId != null && !isPositiveId(input.terminalPaymentId)) {
+    invalid("terminal_payment_id");
+  }
+  const terminalPaymentId = input.terminalPaymentId == null
+    ? null : Number(input.terminalPaymentId);
+  const terminalMethodSelected = String(input.paymentMethod || "").trim()
+    === TERMINAL_PAYMENT_METHOD;
+  if (terminalMethodSelected !== (terminalPaymentId != null)) {
+    invalid(terminalMethodSelected ? "terminal_payment_id" : "payment_method");
+  }
+  const paymentMethod = terminalMethodSelected
+    ? TERMINAL_PAYMENT_METHOD : normalizePaymentMethod(input.paymentMethod);
   if (!paymentMethod) invalid("payment_method");
   const discountType = input.discountType == null || input.discountType === ""
     ? "none" : String(input.discountType).trim().toLowerCase();
@@ -42,9 +54,6 @@ const normalizeInput = (input = {}) => {
     || (discountType === "percent" && discountValue > 100)) invalid("discount_value");
   if (typeof input.idempotencyKey !== "string" || !input.idempotencyKey.trim()
     || input.idempotencyKey.trim().length > 191) invalid("idempotency_key");
-  if (input.terminalPaymentId != null && !isPositiveId(input.terminalPaymentId)) {
-    invalid("terminal_payment_id");
-  }
   return {
     shopId: Number(input.shopId),
     actorId: input.actorId == null ? null : Number(input.actorId),
@@ -53,7 +62,7 @@ const normalizeInput = (input = {}) => {
     discountType: discountValue > 0 ? discountType : "none",
     discountValue: discountValue > 0 ? discountValue : 0,
     idempotencyKey: input.idempotencyKey.trim(),
-    terminalPaymentId: input.terminalPaymentId == null ? null : Number(input.terminalPaymentId),
+    terminalPaymentId,
   };
 };
 
@@ -129,6 +138,17 @@ const requestFingerprint = (input) => crypto.createHash("sha256").update(JSON.st
   input.terminalPaymentId,
 ])).digest("hex");
 
+const receiptOrderDto = (order = {}) => {
+  const paymentStatus = order.paymentStatus == null
+    ? order.payment_status : order.paymentStatus;
+  const refundStatus = order.refundStatus == null
+    ? (order.refund_status == null
+      ? (paymentStatus === "refunded" ? "succeeded" : null)
+      : order.refund_status)
+    : order.refundStatus;
+  return { ...order, paymentStatus: paymentStatus || null, refundStatus };
+};
+
 const receiptDto = (receipt, idempotentReplay) => ({
   id: Number(receipt.id),
   tableReference: receipt.tableReference == null
@@ -146,7 +166,8 @@ const receiptDto = (receipt, idempotentReplay) => ({
     ? receipt.stripe_terminal_payment_id : receipt.terminalPaymentId) == null
     ? null : Number(receipt.terminalPaymentId == null
       ? receipt.stripe_terminal_payment_id : receipt.terminalPaymentId),
-  archivedOrders: receipt.archivedOrders || [],
+  createdAt: receipt.createdAt == null ? receipt.created_at : receipt.createdAt,
+  archivedOrders: (receipt.archivedOrders || []).map(receiptOrderDto),
   vatBreakdown: receipt.vatBreakdown || [],
   idempotentReplay,
 });
@@ -154,6 +175,7 @@ const receiptDto = (receipt, idempotentReplay) => ({
 const buildCashRegisterSettlementService = ({
   settlementStore,
   archiveOrderInTransaction,
+  reconcileOrderBeforeSettlement,
 }) => {
   if (!settlementStore || typeof archiveOrderInTransaction !== "function") {
     throw new TypeError("Settlement dependencies are required");
@@ -172,6 +194,38 @@ const buildCashRegisterSettlementService = ({
   const createSettlement = async (rawInput) => {
     const input = normalizeInput(rawInput);
     const fingerprint = requestFingerprint(input);
+
+    const replay = await settlementStore.findByIdempotencyKey({
+      shopId: input.shopId,
+      idempotencyKey: input.idempotencyKey,
+    });
+    if (replay) {
+      const receipt = await settlementStore.getSettlementReceipt({
+        shopId: input.shopId,
+        settlementId: replay.id,
+      });
+      if (!receipt || replay.request_fingerprint !== fingerprint) {
+        fail(409, "SETTLEMENT_IDEMPOTENCY_CONFLICT", "Idempotency key already used.");
+      }
+      return receiptDto(receipt, true);
+    }
+
+    if (input.terminalPaymentId == null && typeof reconcileOrderBeforeSettlement === "function") {
+      const orders = await settlementStore.listOrdersForSettlement({
+        shopId: input.shopId,
+        orderIds: input.orderIds,
+      });
+      if (orders.length === input.orderIds.length) {
+        for (const order of orders) {
+          if (order.payment_status !== "requires_payment") continue;
+          const reconciled = await reconcileOrderBeforeSettlement(order);
+          if (!isCashRegisterOrderDueAndArchivable(reconciled)) {
+            fail(409, "TABLE_ORDERS_CHANGED", "Table orders changed.");
+          }
+        }
+      }
+    }
+
     return settlementStore.withTransaction(async (store) => {
       await store.lockShop({ shopId: input.shopId });
       const existing = await store.findByIdempotencyKey({
@@ -193,6 +247,13 @@ const buildCashRegisterSettlementService = ({
         shopId: input.shopId,
         orderIds: input.orderIds,
       });
+      const activeTerminalAllocations = await store.lockActiveTerminalAllocations({
+        shopId: input.shopId,
+        orderIds: input.orderIds,
+      });
+      if (input.terminalPaymentId == null && activeTerminalAllocations.length) {
+        fail(409, "TERMINAL_ORDER_BUSY", "Table orders have an active Terminal payment.");
+      }
       assertLockedOrders({ ...input, orders });
       const subtotalCents = orders.reduce((sum, order) => {
         const amountCents = toCents(order.subtotal);
