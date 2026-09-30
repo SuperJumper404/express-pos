@@ -69,6 +69,12 @@ const respond = (res, statusCode, message, data) =>
         };
       }
       if (request === "../helpers/env") return { envJWTKEY: "test-key" };
+      if (request === "../modules/m_servicePoints") {
+        return {
+          findServicePoint: async () => null,
+          findKioskByLoginId: async () => null,
+        };
+      }
       if (request === "../helpers/tableAccessToken") return {};
       if (request === "../helpers/tableAccessLoginData") return {};
       if (request === "../helpers/mailer") return {};

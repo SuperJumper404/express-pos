@@ -3,6 +3,8 @@ const {
   createStaffLoginId: createKioskLoginId,
   createStaffPin: createKioskPin,
   hashStaffPin,
+  isValidStaffPin,
+  verifyStaffPin,
 } = require("../helpers/staffCredentials");
 const {
   signServicePointAccessToken,
@@ -71,6 +73,41 @@ const buildServicePointsController = (repository) => {
         kiosksOnly: true,
       });
       return success(res, "Bornes recuperees.", null, points);
+    } catch (error) {
+      return failed(res, "Erreur serveur.", error.message);
+    }
+  },
+
+  verifyKioskPin: async (req, res) => {
+    if (
+      req.sessionSubject !== "service_point"
+      || req.orderSource !== "borne"
+      || !req.servicePointId
+    ) {
+      return custom(res, 403, "Acces refuse.", null, null);
+    }
+
+    const pin = String((req.body && req.body.pin) || "");
+    if (!isValidStaffPin(pin)) {
+      return custom(res, 422, "PIN a 4 chiffres requis.", null, null);
+    }
+
+    try {
+      const point = await getRepository().findServicePoint({
+        servicePointId: req.servicePointId,
+        shopId: req.shopid,
+      });
+      const valid = Boolean(
+        point
+        && point.type === "kiosk"
+        && Number(point.is_active) === 1
+        && point.kiosk_pin_hash
+        && (await verifyStaffPin(pin, point.kiosk_pin_hash))
+      );
+      if (!valid) {
+        return custom(res, 401, "Code incorrect.", null, null);
+      }
+      return success(res, "Code valide.", null, { verified: true });
     } catch (error) {
       return failed(res, "Erreur serveur.", error.message);
     }

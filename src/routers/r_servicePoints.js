@@ -3,6 +3,7 @@ const {
   listPoints,
   listTables,
   listKiosks,
+  verifyKioskPin,
   createTable,
   createKiosk,
   updateTable,
@@ -21,6 +22,7 @@ routers
   .get("/service-points", authentication, listPoints)
   .get("/service-points/tables", authentication, listTables)
   .get("/service-points/kiosks", authentication, authAdmin, listKiosks)
+  .post("/service-points/kiosk/verify-pin", authentication, verifyKioskPin)
   .post("/service-points/tables", authentication, authAdmin, createTable)
   .post("/service-points/kiosks", authentication, authAdmin, createKiosk)
   .patch("/service-points/tables/order", authentication, authAdmin, reorderTables)

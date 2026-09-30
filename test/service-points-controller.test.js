@@ -10,6 +10,11 @@ assert.ok(fs.existsSync(controllerPath), "service points controller must exist")
 
 const { buildServicePointsController } = require(controllerPath);
 const { signServicePointAccessToken } = require("../src/helpers/servicePointAccessToken");
+const { hashStaffPin } = require("../src/helpers/staffCredentials");
+const routerSource = fs.readFileSync(
+  path.join(__dirname, "../src/routers/r_servicePoints.js"),
+  "utf8",
+);
 
 const response = () => ({
   statusCode: null,
@@ -113,6 +118,60 @@ const controller = buildServicePointsController({
   assert.strictEqual(clickAndCollectResponse.statusCode, 200);
   assert.strictEqual(clickAndCollectResponse.payload.data.service_point_id, 2);
   assert.strictEqual(clickAndCollectResponse.payload.data.source, "web");
+
+  points.push({
+    id: 4,
+    shopid: 8,
+    name: "Borne 1",
+    type: "kiosk",
+    is_system: 0,
+    is_active: 1,
+    kiosk_pin_hash: await hashStaffPin("1234"),
+  });
+
+  const validPinResponse = response();
+  await controller.verifyKioskPin(
+    {
+      sessionSubject: "service_point",
+      orderSource: "borne",
+      servicePointId: 4,
+      shopid: 8,
+      body: { pin: "1234" },
+    },
+    validPinResponse,
+  );
+  assert.strictEqual(validPinResponse.statusCode, 200);
+  assert.strictEqual(validPinResponse.payload.data.verified, true);
+
+  const invalidPinResponse = response();
+  await controller.verifyKioskPin(
+    {
+      sessionSubject: "service_point",
+      orderSource: "borne",
+      servicePointId: 4,
+      shopid: 8,
+      body: { pin: "9999" },
+    },
+    invalidPinResponse,
+  );
+  assert.strictEqual(invalidPinResponse.statusCode, 401);
+
+  const staffResponse = response();
+  await controller.verifyKioskPin(
+    {
+      sessionSubject: "staff",
+      servicePointId: null,
+      shopid: 8,
+      body: { pin: "1234" },
+    },
+    staffResponse,
+  );
+  assert.strictEqual(staffResponse.statusCode, 403);
+
+  assert.match(
+    routerSource,
+    /\.post\("\/service-points\/kiosk\/verify-pin", authentication, verifyKioskPin\)/,
+  );
 
   console.log("service points controller tests passed");
 })().catch((error) => {

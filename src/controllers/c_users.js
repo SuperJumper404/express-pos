@@ -443,6 +443,10 @@ module.exports = {
       });
   },
   logout: (req, res) => {
+    if (req.sessionSubject === "service_point") {
+      return success(res, "Déconnexion réussie !", {}, true);
+    }
+
     const id = req.body.id;
     const data = {
       token: null,
