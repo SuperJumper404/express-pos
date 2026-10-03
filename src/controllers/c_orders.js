@@ -5,7 +5,6 @@ const {
   mAddDetailOrder,
   mReduceStock,
   mAddNewStocks,
-  mDeleteOrder,
   mUpdateOrders,
   mOrdersbyUserId,
   mArchiveOrder,
@@ -254,23 +253,54 @@ exports.addOrder = async (req, res) => {
       });
   }
 };
-exports.deleteOrder = (req, res) => {
+const HIDDEN_DELETE_STATUSES = new Set([
+  ORDER_STATUSES.PENDING,
+  ORDER_STATUSES.PREPARING,
+]);
+
+const buildDeleteOrderController = ({
+  findOrderById = mFindOrderById,
+  archiveOrder = mArchiveOrder,
+} = {}) => async (req, res) => {
   const id = req.params.id;
   console.log("DELETE orders", id);
-  mDeleteOrder(id)
-    .then((response) => {
-      console.log("REspons Delete", response);
-      if (response[0].affectedRows > 0 || response[1].affectedRows > 0) {
-        success(res, "Commande supprimée avec succès.", null, response);
-      } else {
-        custom(res, 404, "Commande introuvable.", null, null);
-      }
-    })
-    .catch((error) => {
-      console.log(error);
-      failed(res, "Erreur serveur.", error.message);
+
+  try {
+    const orders = await findOrderById(id, req.shopid);
+    if (!orders.length) {
+      return custom(res, 404, "Commande introuvable.", null, null);
+    }
+
+    if (!HIDDEN_DELETE_STATUSES.has(Number(orders[0].status))) {
+      return custom(
+        res,
+        409,
+        "Seules les commandes non pretes peuvent etre supprimees.",
+        null,
+        { code: "ORDER_DELETE_NOT_ALLOWED" },
+      );
+    }
+
+    const response = await archiveOrder(id, undefined, req.shopid, {
+      hiddenFromHistory: true,
+      hiddenByUserId: req.id,
+      allowedStatuses: Array.from(HIDDEN_DELETE_STATUSES),
     });
+    if (response.affectedRows) {
+      return success(res, "Commande supprimee avec succes.", null, null);
+    }
+
+    return custom(res, 404, "Commande introuvable.", null, null);
+  } catch (error) {
+    console.log(error);
+    if (error instanceof DomainError) {
+      return custom(res, error.status, error.message, null, { code: error.code });
+    }
+    return failed(res, "Erreur serveur.", error.message);
+  }
 };
+exports.buildDeleteOrderController = buildDeleteOrderController;
+exports.deleteOrder = buildDeleteOrderController();
 exports.addDetailOrder = (req, res) => {
   const orderid = req.body.orderid;
   const productid = req.body.productid;

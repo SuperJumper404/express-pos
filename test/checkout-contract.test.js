@@ -2665,11 +2665,36 @@ const runCheckoutApiSurfaceContracts = async () => {
 
   const orderRouterSource = fs.readFileSync(require.resolve("../src/routers/r_orders"), "utf8");
   const orderControllerSource = fs.readFileSync(require.resolve("../src/controllers/c_orders"), "utf8");
+  const orderModuleSource = fs.readFileSync(require.resolve("../src/modules/m_orders"), "utf8");
   const checkoutModuleSource = fs.readFileSync(require.resolve("../src/modules/m_checkout"), "utf8");
   const serverSource = fs.readFileSync(require.resolve("../index"), "utf8");
   assert.match(orderRouterSource, /\.post\("\/orders\/checkout", authentication, orders\.checkout\)/);
   assert.match(orderRouterSource, /legacy/i);
   assert.ok(orderControllerSource.includes("buildCheckoutController"));
+  assert.match(
+    orderModuleSource,
+    /COALESCE\(archives\.hidden_from_history, 0\) = 0/,
+  );
+  assert.match(
+    orderModuleSource,
+    /findArchivedOrderDetailsById:[\s\S]*COALESCE\(archives\.hidden_from_history, 0\) = 0[\s\S]*findArchivedOrderDetailsByToken:/,
+  );
+  assert.match(
+    orderModuleSource,
+    /findArchivedOrderDetailsByToken:[\s\S]*COALESCE\(archives\.hidden_from_history, 0\) = 0[\s\S]*findArchiveSnapshots:/,
+  );
+  assert.match(
+    orderModuleSource,
+    /mDetailArchivedOrder:[\s\S]*COALESCE\(archives\.hidden_from_history, 0\) = 0[\s\S]*mDetailArchivedOrderByToken:/,
+  );
+  assert.match(
+    orderModuleSource,
+    /mDetailArchivedOrderByToken:[\s\S]*COALESCE\(archives\.hidden_from_history, 0\) = 0[\s\S]*mAllArchivedOrdersWithDetails:/,
+  );
+  assert.match(
+    orderModuleSource,
+    /mAllArchivedOrdersWithDetails:[\s\S]*COALESCE\(archives\.hidden_from_history, 0\) = 0/,
+  );
   assert.ok(checkoutModuleSource.includes("client_order_token"));
   assert.ok(checkoutModuleSource.includes("selected_choice_ids"));
   assert.match(
@@ -2710,6 +2735,7 @@ const makeArchiveHarness = ({ failAfterActiveDeletion = false } = {}) => {
     orders: [{
       id: 42,
       shopid: 7,
+      status: 1,
       customerID: 12,
       payment_status: "paid",
       payment_provider: "stripe",
@@ -3049,6 +3075,34 @@ const runArchiveSnapshotContracts = async () => {
     ).toFixed(2)),
     25.2,
   );
+
+  harness = makeArchiveHarness();
+  await harness.orderModule.mArchiveOrder(
+    42,
+    undefined,
+    7,
+    { hiddenFromHistory: true, hiddenByUserId: 99 },
+  );
+  const hiddenArchive = harness.getState().archives[0];
+  assert.strictEqual(hiddenArchive.hidden_from_history, 1);
+  assert.strictEqual(hiddenArchive.hidden_from_history_by_user_id, 99);
+  assert.ok(hiddenArchive.hidden_from_history_at);
+  assert.strictEqual(hiddenArchive.payment_status, "paid");
+
+  harness = makeArchiveHarness();
+  harness.getState().orders[0].status = 3;
+  await assert.rejects(
+    () => harness.orderModule.mArchiveOrder(
+      42,
+      undefined,
+      7,
+      { hiddenFromHistory: true, hiddenByUserId: 99, allowedStatuses: [1, 2] },
+    ),
+    (error) => error.code === "ORDER_DELETE_NOT_ALLOWED" && error.status === 409,
+  );
+  assert.strictEqual(harness.getState().orders.length, 1);
+  assert.strictEqual(harness.getState().archives.length, 0);
+  assert.ok(harness.events.includes("rollback"));
 
   harness = makeArchiveHarness({ failAfterActiveDeletion: true });
   await assert.rejects(

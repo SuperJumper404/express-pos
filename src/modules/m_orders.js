@@ -131,6 +131,7 @@ const archiveSqlRepository = {
      LEFT JOIN archivesdetail ON archives.id = archivesdetail.orderId
      LEFT JOIN products ON archivesdetail.productid = products.id
      WHERE archives.id = ?
+       AND COALESCE(archives.hidden_from_history, 0) = 0
      ORDER BY archives.created DESC`,
     [archiveId],
   ),
@@ -145,7 +146,8 @@ const archiveSqlRepository = {
      FROM archives
      LEFT JOIN archivesdetail ON archives.id = archivesdetail.orderId
      LEFT JOIN products ON archivesdetail.productid = products.id
-     WHERE archives.token = ?`,
+     WHERE archives.token = ?
+       AND COALESCE(archives.hidden_from_history, 0) = 0`,
     [token],
   ),
   findArchiveSnapshots: ({ detailIds, connection }) => (
@@ -228,6 +230,26 @@ const normalizeArchiveDiscount = (discount = {}) => {
     value: value > 0 ? value : 0,
   };
 };
+
+const archiveTimestamp = () => new Date().toISOString().slice(0, 19).replace("T", " ");
+
+const buildHiddenArchiveVisibilityFields = (options = {}) => {
+  if (!options.hiddenFromHistory) return {};
+  return {
+    hidden_from_history: 1,
+    hidden_from_history_at: archiveTimestamp(),
+    hidden_from_history_by_user_id: options.hiddenByUserId || null,
+  };
+};
+
+const buildHiddenArchivePaymentFields = (order = {}) => ({
+  payment: order.payment || "Cash",
+  payment_status: order.payment_status || "unpaid",
+  payment_provider: order.payment_provider || null,
+  stripe_payment_intent_id: order.stripe_payment_intent_id || null,
+  stripe_terminal_payment_id: order.stripe_terminal_payment_id || null,
+  used_payment_method: order.used_payment_method || order.payment || null,
+});
 
 const applyArchiveDiscountToDetails = ({ order, orderDetails, discount }) => {
   const requestedDiscount = normalizeArchiveDiscount(discount);
@@ -377,8 +399,19 @@ const buildOrderArchiveModule = ({
       });
       if (!order) throw new Error("Commande introuvable");
 
+      const hiddenFromHistory = Boolean(discount.hiddenFromHistory);
+      if (hiddenFromHistory && Array.isArray(discount.allowedStatuses)) {
+        const allowedStatuses = new Set(discount.allowedStatuses.map(Number));
+        if (!allowedStatuses.has(Number(order.status))) {
+          throw new DomainError(
+            409,
+            "ORDER_DELETE_NOT_ALLOWED",
+            "Seules les commandes non pretes peuvent etre supprimees.",
+          );
+        }
+      }
       let terminalAllocation;
-      if (order.stripe_terminal_payment_id != null) {
+      if (!hiddenFromHistory && order.stripe_terminal_payment_id != null) {
         buildCashRegisterArchiveFields({ order });
         terminalAllocation = await repository.findTerminalAllocationForArchive({
           shopId: order.shopid, orderId: order.id, paymentId: order.stripe_terminal_payment_id, connection,
@@ -409,14 +442,17 @@ const buildOrderArchiveModule = ({
           discount_type: "amount", discount_value: discountAmount, discount_amount: discountAmount,
         };
       }
-      const archivePaymentFields = buildCashRegisterArchiveFields({
-        order,
-        paymentMethod,
-      });
+      const archivePaymentFields = hiddenFromHistory
+        ? buildHiddenArchivePaymentFields(order)
+        : buildCashRegisterArchiveFields({
+          order,
+          paymentMethod,
+        });
       const archive = {
         ...pickArchiveOrderFields(order),
         ...discountApplication.archiveDiscountFields,
         ...archivePaymentFields,
+        ...buildHiddenArchiveVisibilityFields(discount),
         token: createToken(),
       };
       const archiveResult = await repository.insertArchive({ archive, connection });
@@ -1023,6 +1059,7 @@ module.exports = {
          FROM archives
          LEFT JOIN service_points ON service_points.id = archives.service_point_id
          WHERE archives.shopid = ?
+           AND COALESCE(archives.hidden_from_history, 0) = 0
          ORDER BY archives.archived_at DESC, archives.id DESC`,
         [shopid],
         (err, result) => {
@@ -1038,7 +1075,7 @@ module.exports = {
   mDetailArchivedOrder: (id) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        `SELECT *, archives.id as id FROM archives LEFT JOIN archivesdetail ON archives.id=archivesdetail.orderId LEFT JOIN products ON archivesdetail.productid=products.id WHERE archives.id='${id}' ORDER BY archives.created DESC`,
+        `SELECT *, archives.id as id FROM archives LEFT JOIN archivesdetail ON archives.id=archivesdetail.orderId LEFT JOIN products ON archivesdetail.productid=products.id WHERE archives.id='${id}' AND COALESCE(archives.hidden_from_history, 0) = 0 ORDER BY archives.created DESC`,
         (err, result) => {
           if (!err) {
             //   const customizationPromises = [];
@@ -1118,7 +1155,7 @@ module.exports = {
   mDetailArchivedOrderByToken: (token) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        `SELECT *, archives.id as id FROM archives LEFT JOIN archivesdetail ON archives.id=archivesdetail.orderId LEFT JOIN products ON archivesdetail.productid=products.id WHERE archives.token='${token}'`,
+        `SELECT *, archives.id as id FROM archives LEFT JOIN archivesdetail ON archives.id=archivesdetail.orderId LEFT JOIN products ON archivesdetail.productid=products.id WHERE archives.token='${token}' AND COALESCE(archives.hidden_from_history, 0) = 0`,
         (err, result) => {
           if (!err) {
             console.log("DEtail Order", result);
@@ -1140,6 +1177,7 @@ module.exports = {
       LEFT JOIN service_points ON service_points.id = archives.service_point_id
       WHERE archives.shopid = ? 
         AND DATE(archives.created) BETWEEN ? AND ? 
+        AND COALESCE(archives.hidden_from_history, 0) = 0
       ORDER BY archives.created DESC`;
 
       conn.query(query1, [shopId, from, to], (err, orders) => {
