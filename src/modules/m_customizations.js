@@ -589,6 +589,57 @@ const deleteCustomizationChoice = ({ shopId, choiceId, connection }) => queryRow
   WHERE choice.id = ? AND step.shop_id = ?
 `, [choiceId, shopId]);
 
+const deleteCustomizationChoicePermanentlyInConnection = async ({
+  shopId,
+  choiceId,
+  connection,
+}) => {
+  await getOwnedChoiceRecord({ shopId, choiceId, connection });
+  const imageRows = await queryRows(connection, `
+    SELECT choice.image
+    FROM customization_step_choices choice
+    JOIN customization_steps step ON step.id = choice.step_id
+    WHERE choice.id = ? AND step.shop_id = ? AND choice.image IS NOT NULL
+  `, [choiceId, shopId]);
+
+  await queryRows(connection, `
+    DELETE FROM product_customization_step_choices
+    WHERE step_choice_id = ?
+  `, [choiceId]);
+  const result = await queryRows(connection, `
+    DELETE FROM customization_step_choices
+    WHERE id = ? AND step_id IN (
+      SELECT id FROM customization_steps WHERE shop_id = ?
+    )
+  `, [choiceId, shopId]);
+
+  return {
+    affectedRows: result.affectedRows,
+    images: imageRows.map(({ image }) => image).filter(Boolean),
+  };
+};
+
+const deleteCustomizationChoicePermanently = ({
+  shopId,
+  choiceId,
+  connection,
+}) => {
+  if (connection) {
+    return deleteCustomizationChoicePermanentlyInConnection({
+      shopId,
+      choiceId,
+      connection,
+    });
+  }
+  return withTransaction((transactionConnection) => (
+    deleteCustomizationChoicePermanentlyInConnection({
+      shopId,
+      choiceId,
+      connection: transactionConnection,
+    })
+  ));
+};
+
 const configurationError = (code, message, context = {}) => new DomainError(
   422,
   code,
@@ -849,6 +900,7 @@ module.exports = {
   createCustomizationChoice,
   createCustomizationStep,
   deleteCustomizationChoice,
+  deleteCustomizationChoicePermanently,
   deleteCustomizationStep,
   getCustomizationStep,
   getProductCustomizationState,

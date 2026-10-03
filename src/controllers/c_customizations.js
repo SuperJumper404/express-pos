@@ -261,10 +261,25 @@ const buildCustomizationController = ({
     }
   };
 
+  const deleteCustomizationChoicePermanently = async (req, res) => {
+    try {
+      const result = await catalog.deleteCustomizationChoicePermanently({
+        shopId: req.shopid,
+        choiceId: req.params.id,
+      });
+      if (!result || result.affectedRows === 0) throw missingError("choice", req.params.id);
+      (result.images || []).forEach(removeImageBestEffort);
+      return custom(res, 200, "Choix de personnalisation supprimé.", null, null);
+    } catch (error) {
+      return sendError(res, error);
+    }
+  };
+
   return {
     createCustomizationChoice,
     createCustomizationStep,
     deleteCustomizationChoice,
+    deleteCustomizationChoicePermanently,
     deleteCustomizationStep,
     detailCustomizationStep,
     listCustomizationSteps,
