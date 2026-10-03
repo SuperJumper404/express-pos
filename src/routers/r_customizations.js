@@ -3,6 +3,7 @@ const {
   createCustomizationChoice,
   createCustomizationStep,
   deleteCustomizationChoice,
+  deleteCustomizationChoicePermanently,
   deleteCustomizationStep,
   detailCustomizationStep,
   listCustomizationSteps,
@@ -33,6 +34,12 @@ routers
     authAdmin,
     uploadChoiceImage,
     updateCustomizationChoice,
+  )
+  .delete(
+    "/customization-choices/:id/permanent",
+    authentication,
+    authAdmin,
+    deleteCustomizationChoicePermanently,
   )
   .delete("/customization-choices/:id", authentication, authAdmin, deleteCustomizationChoice);
 
