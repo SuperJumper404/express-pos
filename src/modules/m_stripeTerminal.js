@@ -18,6 +18,7 @@ const requireShopId = (shopId) => {
 };
 
 const first = (rows) => rows[0] || null;
+const activePaymentStatus = (payment) => ["creating", "processing"].includes(payment.status);
 
 const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
   if (!connection || typeof connection.query !== "function") {
@@ -276,6 +277,26 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
     return result;
   };
 
+  const createKioskPaymentSession = async ({ shopId, readerId, servicePointId, idempotencyKey,
+    connectedAccountId, amountCents, applicationFeeAmount, currency = "eur" }) => {
+    requireShopId(shopId);
+    const result = await query(
+      `INSERT INTO stripe_terminal_payments
+         (shopid, terminal_reader_id, cashier_user_id, idempotency_key, stripe_connected_account_id,
+          amount_cents, application_fee_amount, currency, status)
+       SELECT r.shopid, r.id, 0, ?, ?, ?, ?, ?, 'creating'
+       FROM stripe_terminal_readers r
+       JOIN service_points sp ON sp.id = r.assigned_service_point_id
+         AND sp.shopid = r.shopid
+       WHERE r.shopid = ? AND r.id = ? AND r.assigned_service_point_id = ?
+         AND r.is_active = 1 AND sp.is_active = 1 AND sp.type = 'kiosk'`,
+      [idempotencyKey, connectedAccountId, amountCents, applicationFeeAmount,
+        currency, shopId, readerId, servicePointId],
+    );
+    if (result.affectedRows !== 1) throw new Error("Invalid Terminal reader assignment");
+    return result;
+  };
+
   const findPaymentSession = async ({ shopId, paymentId, forUpdate = false }) => {
     requireShopId(shopId);
     return first(await query(
@@ -301,6 +322,32 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
       `SELECT p.* FROM stripe_terminal_payments p
        WHERE p.shopid = ? AND p.idempotency_key = ? LIMIT 1`,
       [shopId, idempotencyKey],
+    ));
+  };
+
+  const findKioskTerminalOrder = async ({ shopId, orderId }) => {
+    requireShopId(shopId);
+    return first(await query(
+      `SELECT id, shopid, ordernumber, subtotal, service_point_id,
+              payment, payment_status, payment_provider, status,
+              stripe_terminal_payment_id
+       FROM orders
+       WHERE shopid = ? AND id = ? LIMIT 1`,
+      [shopId, orderId],
+    ));
+  };
+
+  const findActiveKioskPaymentForOrder = async ({ shopId, orderId, servicePointId }) => {
+    requireShopId(shopId);
+    return first(await query(
+      `SELECT p.* FROM stripe_terminal_payments p
+       JOIN stripe_terminal_payment_orders a ON a.terminal_payment_id = p.id
+         AND a.shopid = p.shopid
+       JOIN orders o ON o.id = a.order_id AND o.shopid = a.shopid
+       WHERE p.shopid = ? AND a.order_id = ? AND o.service_point_id = ?
+         AND p.status IN ('creating', 'processing', 'succeeded')
+       LIMIT 1`,
+      [shopId, orderId, servicePointId],
     ));
   };
 
@@ -476,6 +523,87 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
     return { finalized: true };
   };
 
+  const finalizeKioskPaymentSucceeded = async ({ shopId, paymentId,
+    stripePaymentIntentId, stripeChargeId = null, timestamp }) => {
+    requireShopId(shopId);
+    const { payment, orders: lockedOrders, allocations } = await lockPaymentSession({ shopId, paymentId });
+    if (!payment) throw new Error("Terminal payment not found");
+    if (!stripePaymentIntentId || payment.stripe_payment_intent_id !== stripePaymentIntentId) {
+      throw new Error("Terminal payment cannot be finalized");
+    }
+    if (payment.status === "succeeded") return { finalized: false };
+    const count = allocations.length;
+    if (!count) throw new Error("Terminal payment has no allocations");
+    if (lockedOrders.length !== count || lockedOrders.some((order) => (
+      Number(order.shopid) !== Number(shopId)
+      || order.payment_status !== "requires_payment"
+      || order.payment_provider !== "stripe_terminal"
+      || order.stripe_terminal_payment_id != null
+    ))) throw new Error("Terminal order finalization incomplete");
+    const orders = await query(
+      `UPDATE orders o
+       JOIN stripe_terminal_payment_orders a ON a.order_id = o.id
+         AND a.shopid = o.shopid
+       SET o.status = 3,
+           o.payment_status = 'paid',
+           o.payment_provider = 'stripe_terminal',
+           o.payment = 'Carte bancaire - TPE Stripe',
+           o.stripe_terminal_payment_id = ?,
+           o.finished = ?
+       WHERE o.shopid = ? AND a.shopid = ? AND a.terminal_payment_id = ?
+         AND o.payment_status = 'requires_payment'
+         AND o.payment_provider = 'stripe_terminal'
+         AND o.stripe_terminal_payment_id IS NULL`,
+      [paymentId, timestamp, shopId, shopId, paymentId],
+    );
+    if (orders.affectedRows !== count) throw new Error("Terminal order finalization incomplete");
+    const result = await query(
+      `UPDATE stripe_terminal_payments
+       SET status = 'succeeded', stripe_charge_id = ?
+       WHERE stripe_terminal_payments.shopid = ? AND id = ?
+         AND stripe_payment_intent_id = ? AND status <> 'succeeded'`,
+      [stripeChargeId, shopId, paymentId, stripePaymentIntentId],
+    );
+    if (result.affectedRows !== 1) throw new Error("Terminal payment finalization incomplete");
+    return { finalized: true };
+  };
+
+  const markKioskPaymentCounterFallback = async ({ shopId, paymentId, status, payment = "Paiement au comptoir" }) => {
+    requireShopId(shopId);
+    if (!["failed", "canceled"].includes(status)) throw new Error("Invalid Terminal fallback status");
+    const { payment: terminalPayment, orders: lockedOrders, allocations } = await lockPaymentSession({ shopId, paymentId });
+    if (!terminalPayment) throw new Error("Terminal payment not found");
+    const count = allocations.length;
+    if (!count || lockedOrders.length !== count || lockedOrders.some((order) => (
+      Number(order.shopid) !== Number(shopId)
+      || (order.payment_provider !== "stripe_terminal" && order.payment_provider != null)
+      || order.payment_status === "paid"
+    ))) throw new Error("Terminal order fallback incomplete");
+    const orders = await query(
+      `UPDATE orders o
+       JOIN stripe_terminal_payment_orders a ON a.order_id = o.id
+         AND a.shopid = o.shopid
+       SET o.status = 3,
+           o.payment_status = 'unpaid',
+           o.payment_provider = NULL,
+           o.payment = ?,
+           o.stripe_terminal_payment_id = NULL
+       WHERE o.shopid = ? AND a.shopid = ? AND a.terminal_payment_id = ?
+         AND o.payment_status <> 'paid'`,
+      [payment, shopId, shopId, paymentId],
+    );
+    if (orders.affectedRows !== count) throw new Error("Terminal order fallback incomplete");
+    const result = await query(
+      `UPDATE stripe_terminal_payments
+       SET status = ?
+       WHERE stripe_terminal_payments.shopid = ? AND id = ?
+         AND status IN ('creating', 'processing')`,
+      [status, shopId, paymentId],
+    );
+    if (result.affectedRows !== 1 && activePaymentStatus(terminalPayment)) throw new Error("Terminal fallback payment update incomplete");
+    return { fallback: true };
+  };
+
   const lockOrderRefund = async (scope) => {
     const { payment, orders } = await lockPaymentSession(scope);
     const order = orders.find((candidate) => Number(candidate.id) === Number(scope.orderId));
@@ -552,10 +680,13 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
     findLocation, createLocation, updateLocation,
     listReaders, findReader, findAssignedReader, findAssignedReaderByServicePoint,
     createReader, updateReader,
-    findActivePaymentForReader, createPaymentSession, findPaymentSession,
+    findActivePaymentForReader, createPaymentSession, createKioskPaymentSession,
+    findPaymentSession,
     findPaymentByIntent, findPaymentByIdempotencyKey, updatePaymentSession,
     createAllocations, listPaymentAllocations, findOrderAllocation,
+    findKioskTerminalOrder, findActiveKioskPaymentForOrder,
     lockReaderAndOrders, lockPaymentSession, finalizePaymentSucceeded,
+    finalizeKioskPaymentSucceeded, markKioskPaymentCounterFallback,
     reserveOrderRefund, recordOrderRefund,
   };
 };
