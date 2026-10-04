@@ -6,6 +6,10 @@ const migrationPath = path.join(
   __dirname,
   "../db/migrations/20260812100000_service_points_foundation.sql",
 );
+const kioskPrinterMigrationPath = path.join(
+  __dirname,
+  "../db/migrations/20261004120000_add_kiosk_printer_settings.sql",
+);
 
 assert.ok(
   fs.existsSync(migrationPath),
@@ -26,6 +30,25 @@ for (const pattern of [
   /UPDATE `archives`[\s\S]*`service_point_id`/,
 ]) {
   assert.match(migration, pattern);
+}
+
+assert.ok(
+  fs.existsSync(kioskPrinterMigrationPath),
+  "kiosk printer settings migration must exist",
+);
+
+const kioskPrinterMigration = fs
+  .readFileSync(kioskPrinterMigrationPath, "utf8")
+  .replace(/\s+/g, " ");
+
+for (const pattern of [
+  /ALTER TABLE `service_points`/,
+  /ADD COLUMN `printer_ip` varchar\(255\) NOT NULL DEFAULT ''/,
+  /ADD COLUMN `smart_print_app` tinyint\(1\) NOT NULL DEFAULT '0'/,
+  /DROP COLUMN `smart_print_app`/,
+  /DROP COLUMN `printer_ip`/,
+]) {
+  assert.match(kioskPrinterMigration, pattern);
 }
 
 console.log("service points migration contract passed");

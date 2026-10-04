@@ -61,6 +61,14 @@ const controller = buildServicePointsController({
   findSystemPoint: async ({ systemKey }) =>
     systemKey === "click_collect" ? points[1] : null,
   updateTablePoint: async () => ({ affectedRows: 1 }),
+  createKioskPoint: async (input) => {
+    calls.push(input);
+    return { insertId: 5 };
+  },
+  updateKioskPoint: async (input) => {
+    calls.push(input);
+    return { affectedRows: 1 };
+  },
   deleteTablePoint: async () => ({ affectedRows: 1 }),
 });
 
@@ -167,6 +175,41 @@ const controller = buildServicePointsController({
     staffResponse,
   );
   assert.strictEqual(staffResponse.statusCode, 403);
+
+  const createKioskResponse = response();
+  await controller.createKiosk(
+    {
+      shopid: 8,
+      body: {
+        name: "  Borne Terrasse  ",
+        printer_ip: "192.168.1.45",
+        smart_print_app: true,
+      },
+    },
+    createKioskResponse,
+  );
+  assert.strictEqual(createKioskResponse.statusCode, 201);
+  assert.strictEqual(calls[1].shopId, 8);
+  assert.strictEqual(calls[1].name, "Borne Terrasse");
+  assert.strictEqual(calls[1].printerIp, "192.168.1.45");
+  assert.strictEqual(calls[1].smartPrintApp, 1);
+
+  const updateKioskResponse = response();
+  await controller.updateKiosk(
+    {
+      shopid: 8,
+      params: { id: "4" },
+      body: {
+        printer_ip: "",
+        smart_print_app: false,
+      },
+    },
+    updateKioskResponse,
+  );
+  assert.strictEqual(updateKioskResponse.statusCode, 200);
+  assert.strictEqual(calls[2].servicePointId, 4);
+  assert.strictEqual(calls[2].printerIp, "");
+  assert.strictEqual(calls[2].smartPrintApp, 0);
 
   assert.match(
     routerSource,

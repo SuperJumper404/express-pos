@@ -46,7 +46,7 @@ const listServicePoints = async ({
   if (kiosksOnly) clauses.push("`type` = 'kiosk'");
 
   return query(
-    `SELECT \`id\`, \`shopid\`, \`name\`, \`type\`, \`system_key\`, \`is_system\`, \`is_active\`, \`sort_order\`, \`public_access_version\`, \`kiosk_login_id\`, \`kiosk_pin\`, \`created\`, \`updated\`
+    `SELECT \`id\`, \`shopid\`, \`name\`, \`type\`, \`system_key\`, \`is_system\`, \`is_active\`, \`sort_order\`, \`public_access_version\`, \`kiosk_login_id\`, \`kiosk_pin\`, \`printer_ip\`, \`smart_print_app\`, \`created\`, \`updated\`
      FROM \`service_points\`
      WHERE ${clauses.join(" AND ")}
      ORDER BY \`sort_order\` ASC, \`name\` ASC`,
@@ -56,13 +56,13 @@ const listServicePoints = async ({
 
 const findServicePoint = ({ servicePointId, shopId }) =>
   query(
-    "SELECT `id`, `shopid`, `name`, `type`, `system_key`, `is_system`, `is_active`, `sort_order`, `public_access_version`, `kiosk_login_id`, `kiosk_pin_hash` FROM `service_points` WHERE `id` = ? AND `shopid` = ? LIMIT 1",
+    "SELECT `id`, `shopid`, `name`, `type`, `system_key`, `is_system`, `is_active`, `sort_order`, `public_access_version`, `kiosk_login_id`, `kiosk_pin_hash`, `printer_ip`, `smart_print_app` FROM `service_points` WHERE `id` = ? AND `shopid` = ? LIMIT 1",
     [servicePointId, shopId],
   ).then((rows) => rows[0] || null);
 
 const findSystemPoint = ({ shopId, systemKey }) =>
   query(
-    "SELECT `id`, `shopid`, `name`, `type`, `system_key`, `is_system`, `is_active`, `sort_order`, `public_access_version`, `kiosk_login_id`, `kiosk_pin_hash` FROM `service_points` WHERE `shopid` = ? AND `system_key` = ? LIMIT 1",
+    "SELECT `id`, `shopid`, `name`, `type`, `system_key`, `is_system`, `is_active`, `sort_order`, `public_access_version`, `kiosk_login_id`, `kiosk_pin_hash`, `printer_ip`, `smart_print_app` FROM `service_points` WHERE `shopid` = ? AND `system_key` = ? LIMIT 1",
     [shopId, systemKey],
   ).then((rows) => rows[0] || null);
 
@@ -83,11 +83,19 @@ const createTablePoint = ({ shopId, name }) =>
 
 const findKioskByLoginId = ({ kioskLoginId }) =>
   query(
-    "SELECT `id`, `shopid`, `name`, `type`, `is_active`, `kiosk_login_id`, `kiosk_pin_hash`, `public_access_version` FROM `service_points` WHERE `kiosk_login_id` = ? AND `type` = 'kiosk' LIMIT 1",
+    "SELECT `id`, `shopid`, `name`, `type`, `is_active`, `kiosk_login_id`, `kiosk_pin_hash`, `public_access_version`, `printer_ip`, `smart_print_app` FROM `service_points` WHERE `kiosk_login_id` = ? AND `type` = 'kiosk' LIMIT 1",
     [kioskLoginId],
   ).then((rows) => rows[0] || null);
 
-const createKioskPoint = ({ shopId, name, kioskLoginId, kioskPin, kioskPinHash }) =>
+const createKioskPoint = ({
+  shopId,
+  name,
+  kioskLoginId,
+  kioskPin,
+  kioskPinHash,
+  printerIp,
+  smartPrintApp,
+}) =>
   query(
     "INSERT INTO `service_points` SET ?",
     [{
@@ -101,6 +109,8 @@ const createKioskPoint = ({ shopId, name, kioskLoginId, kioskPin, kioskPinHash }
       kiosk_login_id: kioskLoginId,
       kiosk_pin: kioskPin,
       kiosk_pin_hash: kioskPinHash,
+      printer_ip: printerIp || "",
+      smart_print_app: smartPrintApp === undefined ? 0 : smartPrintApp,
       created: new Date(),
     }],
   );
@@ -122,10 +132,19 @@ const deleteTablePoint = ({ servicePointId, shopId }) =>
     [servicePointId, shopId],
   );
 
-const updateKioskPoint = ({ servicePointId, shopId, name, isActive }) => {
+const updateKioskPoint = ({
+  servicePointId,
+  shopId,
+  name,
+  isActive,
+  printerIp,
+  smartPrintApp,
+}) => {
   const updates = { updated: new Date() };
   if (name !== undefined) updates.name = name;
   if (isActive !== undefined) updates.is_active = isActive;
+  if (printerIp !== undefined) updates.printer_ip = printerIp;
+  if (smartPrintApp !== undefined) updates.smart_print_app = smartPrintApp;
 
   return query(
     "UPDATE `service_points` SET ? WHERE `id` = ? AND `shopid` = ? AND `type` = 'kiosk' AND `is_system` = 0",

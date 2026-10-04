@@ -18,6 +18,9 @@ const parseServicePointId = (value) => {
 };
 
 const normalizeName = (value) => String(value || "").trim();
+const normalizePrinterIp = (value) => String(value || "").trim();
+const normalizeBooleanFlag = (value) =>
+  [true, 1, "1", "true", "on"].includes(value) ? 1 : 0;
 const isEditableTable = (point) =>
   point && point.type === "table" && Number(point.is_system) !== 1;
 const isEditableKiosk = (point) =>
@@ -139,6 +142,8 @@ const buildServicePointsController = (repository) => {
     }
 
     try {
+      const printerIp = normalizePrinterIp(req.body && req.body.printer_ip);
+      const smartPrintApp = normalizeBooleanFlag(req.body && req.body.smart_print_app);
       for (let attempt = 0; attempt < 5; attempt += 1) {
         const kioskLoginId = createKioskLoginId();
         const kioskPin = createKioskPin();
@@ -149,6 +154,8 @@ const buildServicePointsController = (repository) => {
             kioskLoginId,
             kioskPin,
             kioskPinHash: await hashStaffPin(kioskPin),
+            printerIp,
+            smartPrintApp,
           });
           return custom(res, 201, "Borne creee avec succes.", null, {
             id: created.insertId,
@@ -233,8 +240,13 @@ const buildServicePointsController = (repository) => {
       const body = req.body || {};
       const hasName = Object.prototype.hasOwnProperty.call(body, "name");
       const hasActive = Object.prototype.hasOwnProperty.call(body, "is_active");
+      const hasPrinterIp = Object.prototype.hasOwnProperty.call(body, "printer_ip");
+      const hasSmartPrintApp = Object.prototype.hasOwnProperty.call(body, "smart_print_app");
       const name = hasName ? normalizeName(body.name) : undefined;
-      if ((hasName && !name) || (!hasName && !hasActive)) {
+      if (
+        (hasName && !name)
+        || (!hasName && !hasActive && !hasPrinterIp && !hasSmartPrintApp)
+      ) {
         return custom(res, 422, "Modification de borne invalide.", null, null);
       }
 
@@ -243,6 +255,10 @@ const buildServicePointsController = (repository) => {
         shopId: req.shopid,
         name,
         isActive: hasActive ? (Number(body.is_active) ? 1 : 0) : undefined,
+        printerIp: hasPrinterIp ? normalizePrinterIp(body.printer_ip) : undefined,
+        smartPrintApp: hasSmartPrintApp
+          ? normalizeBooleanFlag(body.smart_print_app)
+          : undefined,
       });
       if (!result.affectedRows) {
         return custom(res, 404, "Borne introuvable.", null, null);
