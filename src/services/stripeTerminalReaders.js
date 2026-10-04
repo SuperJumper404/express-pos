@@ -3,7 +3,7 @@ const { isStaffAccess } = require("../helpers/staffAccess");
 const ERRORS = {
   TERMINAL_INVALID_INPUT: [422, "Parametres du terminal invalides."],
   TERMINAL_FORBIDDEN: [403, "Acces au terminal refuse."],
-  TERMINAL_INVALID_ASSIGNEE: [422, "Le compte assigne doit etre un employe actif du restaurant."],
+  TERMINAL_INVALID_ASSIGNEE: [422, "L'affectation doit cibler un employe actif ou une borne active du restaurant."],
   TERMINAL_ASSIGNMENT_CONFLICT: [409, "Cette affectation de terminal est deja utilisee."],
   TERMINAL_READER_NOT_FOUND: [404, "Terminal introuvable."],
   TERMINAL_READER_INACTIVE: [409, "Ce terminal est desactive."],
@@ -65,6 +65,18 @@ const readerDto = (reader) => ({
 const activeStaff = (user, shopId, userId) => user
   && Number(user.shopid) === shopId && Number(user.id) === userId
   && user.access != null && isStaffAccess(user.access) && Number(user.status) === 1;
+const activeKiosk = (point, shopId, servicePointId) => point
+  && Number(point.shopid) === shopId && Number(point.id) === servicePointId
+  && point.type === "kiosk" && Number(point.is_active) === 1;
+
+const assignmentTarget = (input = {}) => {
+  const hasUser = input.assignedUserId != null;
+  const hasServicePoint = input.assignedServicePointId != null;
+  if (hasUser === hasServicePoint) fail("TERMINAL_INVALID_INPUT");
+  return hasUser
+    ? { assignedUserId: positiveId(input.assignedUserId), assignedServicePointId: null }
+    : { assignedUserId: null, assignedServicePointId: positiveId(input.assignedServicePointId) };
+};
 
 const buildStripeTerminalReaderService = ({ stripe, terminalStore, staffStore }) => {
   // Only application-owned errors leave this boundary; never retain a raw error as cause.
@@ -121,6 +133,20 @@ const buildStripeTerminalReaderService = ({ stripe, terminalStore, staffStore })
     const assigned = await store.findAssignedReader({ shopId, userId });
     if (assigned && Number(assigned.id) !== readerId) fail("TERMINAL_ASSIGNMENT_CONFLICT");
   };
+  const requireKioskAssignee = async (shopId, servicePointId, readerId = null, store = terminalStore, users = staffStore) => {
+    if (typeof users.findServicePointByIdAndShop !== "function"
+      || typeof store.findAssignedReaderByServicePoint !== "function") {
+      fail("TERMINAL_INTERNAL_ERROR");
+    }
+    const servicePoint = await users.findServicePointByIdAndShop({ id: servicePointId, shopId });
+    if (!activeKiosk(servicePoint, shopId, servicePointId)) fail("TERMINAL_INVALID_ASSIGNEE");
+    const assigned = await store.findAssignedReaderByServicePoint({ shopId, servicePointId });
+    if (assigned && Number(assigned.id) !== readerId) fail("TERMINAL_ASSIGNMENT_CONFLICT");
+  };
+  const requireAssignment = (shopId, assignment, readerId = null, store = terminalStore, users = staffStore) =>
+    assignment.assignedUserId == null
+      ? requireKioskAssignee(shopId, assignment.assignedServicePointId, readerId, store, users)
+      : requireAssignee(shopId, assignment.assignedUserId, readerId, store, users);
   const requireReader = async (shopId, readerId, store = terminalStore) => {
     const reader = await store.findReader({ shopId, readerId });
     if (!reader || Number(reader.shopid) !== shopId) fail("TERMINAL_READER_NOT_FOUND");
@@ -137,14 +163,13 @@ const buildStripeTerminalReaderService = ({ stripe, terminalStore, staffStore })
     const shopId = await requireAdmin(input);
     const registrationCode = requiredText(input.registrationCode, 500);
     const label = requiredText(input.label, 255);
-    const assignedUserId = positiveId(input.assignedUserId);
-    if (input.assignedServicePointId != null) fail("TERMINAL_INVALID_INPUT");
+    const assignment = assignmentTarget(input);
     const suppliedAddress = input.address === undefined ? null : normalizeAddress(input.address);
     return terminalStore.withRegistrationLock({ shopId }, async ({ terminalStore: store, staffStore: users }) => {
       await requireAdmin(input, users);
       let location = await store.findLocation({ shopId });
       const address = suppliedAddress || (location ? null : normalizeAddress(input.address));
-      await requireAssignee(shopId, assignedUserId, null, store, users);
+      await requireAssignment(shopId, assignment, null, store, users);
 
       if (!location) {
         const displayName = `Restaurant ${shopId}`;
@@ -187,7 +212,7 @@ const buildStripeTerminalReaderService = ({ stripe, terminalStore, staffStore })
         saved = requireInsert(await store.createReader({
           shopId, locationId: location.id, stripeReaderId: registered.id,
           serialNumber: registered.serial_number, deviceType: registered.device_type,
-          label, status: readerStatus(registered.status), assignedUserId, assignedServicePointId: null,
+          label, status: readerStatus(registered.status), ...assignment,
         }));
       } catch (error) {
         await deleteCreated(() => stripe.terminal.readers.del(registered.id), registered.id);
@@ -200,13 +225,11 @@ const buildStripeTerminalReaderService = ({ stripe, terminalStore, staffStore })
   const assignReader = safe(async (input) => {
     const shopId = await requireAdmin(input);
     const readerId = positiveId(input.readerId);
-    const assignedUserId = positiveId(input.assignedUserId);
-    if (input.assignedServicePointId != null) fail("TERMINAL_INVALID_INPUT");
+    const assignment = assignmentTarget(input);
     const reader = await requireReader(shopId, readerId);
     if (Number(reader.is_active) !== 1) fail("TERMINAL_READER_INACTIVE");
-    if (reader.assigned_service_point_id != null) fail("TERMINAL_ASSIGNMENT_CONFLICT");
-    await requireAssignee(shopId, assignedUserId, readerId);
-    await terminalStore.updateReader({ shopId, readerId, assignedUserId });
+    await requireAssignment(shopId, assignment, readerId);
+    await terminalStore.updateReader({ shopId, readerId, ...assignment });
     return readDto(shopId, readerId);
   });
 
@@ -217,6 +240,9 @@ const buildStripeTerminalReaderService = ({ stripe, terminalStore, staffStore })
     const reader = await requireReader(shopId, readerId);
     if (input.isActive && reader.assigned_user_id != null) {
       await requireAssignee(shopId, positiveId(reader.assigned_user_id), readerId);
+    }
+    if (input.isActive && reader.assigned_service_point_id != null) {
+      await requireKioskAssignee(shopId, positiveId(reader.assigned_service_point_id), readerId);
     }
     await terminalStore.updateReader({ shopId, readerId, isActive: input.isActive ? 1 : 0 });
     return readDto(shopId, readerId);

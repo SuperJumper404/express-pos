@@ -194,6 +194,19 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
     ));
   };
 
+  const findAssignedReaderByServicePoint = async ({ shopId, servicePointId, forUpdate = false }) => {
+    requireShopId(shopId);
+    return first(await query(
+      `SELECT r.* FROM stripe_terminal_readers r
+       JOIN service_points sp ON sp.id = r.assigned_service_point_id
+         AND sp.shopid = r.shopid
+       WHERE r.shopid = ? AND r.assigned_service_point_id = ?
+         AND r.is_active = 1 AND sp.is_active = 1 AND sp.type = 'kiosk'
+       LIMIT 1${forUpdate ? " FOR UPDATE" : ""}`,
+      [shopId, servicePointId],
+    ));
+  };
+
   const createReader = ({ shopId, locationId, stripeReaderId, serialNumber,
     deviceType, label, status, assignedUserId = null, assignedServicePointId = null }) => {
     requireShopId(shopId);
@@ -537,7 +550,8 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
   return {
     withRegistrationLock, withPaymentCreationLock, withReaderActionLock, withOrderRefundLock,
     findLocation, createLocation, updateLocation,
-    listReaders, findReader, findAssignedReader, createReader, updateReader,
+    listReaders, findReader, findAssignedReader, findAssignedReaderByServicePoint,
+    createReader, updateReader,
     findActivePaymentForReader, createPaymentSession, findPaymentSession,
     findPaymentByIntent, findPaymentByIdempotencyKey, updatePaymentSession,
     createAllocations, listPaymentAllocations, findOrderAllocation,

@@ -199,7 +199,7 @@ test("assignment changes the cashier and preserves the nullable service-point fi
   const result = await f.service.assignReader({ ...context, readerId: "21", assignedUserId: "12" });
   assert.strictEqual(result.assignedUserId, 12);
   assert.strictEqual(result.assignedServicePointId, null);
-  assert.strictEqual(f.state.writes[0].assignedServicePointId, undefined);
+  assert.strictEqual(f.state.writes[0].assignedServicePointId, null);
   assert.deepStrictEqual(f.state.stripeCalls, []);
 });
 
@@ -218,10 +218,13 @@ test("assignment rejects inactive readers", async () => {
   await rejectsWithoutStripe(f, () => f.service.assignReader({ ...context, readerId: 21, assignedUserId: 12 }), "TERMINAL_READER_INACTIVE");
 });
 
-test("assignment never overwrites a future service-point assignment", async () => {
+test("assignment can move a service-point reader back to a cashier", async () => {
   const f = fixture({ readers: [readerRow({ assigned_user_id: null, assigned_service_point_id: 44 })] });
-  await rejectsWithoutStripe(f, () => f.service.assignReader({ ...context, readerId: 21, assignedUserId: 12 }), "TERMINAL_ASSIGNMENT_CONFLICT");
-  assert.strictEqual(f.state.readers[0].assigned_service_point_id, 44);
+  const result = await f.service.assignReader({ ...context, readerId: 21, assignedUserId: 12 });
+  assert.strictEqual(result.assignedUserId, 12);
+  assert.strictEqual(result.assignedServicePointId, null);
+  assert.strictEqual(f.state.readers[0].assigned_user_id, 12);
+  assert.strictEqual(f.state.readers[0].assigned_service_point_id, null);
 });
 
 for (const method of ["assignReader", "setReaderActive"]) {

@@ -51,6 +51,13 @@ const getDefaultReaderService = () => {
           );
           return rows[0] || null;
         },
+        findServicePointByIdAndShop: async ({ id, shopId }) => {
+          const [rows] = await connection.query(
+            "SELECT id, shopid, type, is_active FROM service_points WHERE id = ? AND shopid = ? LIMIT 1",
+            [id, shopId],
+          );
+          return rows[0] || null;
+        },
       },
     });
   }
