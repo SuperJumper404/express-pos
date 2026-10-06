@@ -3091,18 +3091,16 @@ const runArchiveSnapshotContracts = async () => {
 
   harness = makeArchiveHarness();
   harness.getState().orders[0].status = 3;
-  await assert.rejects(
-    () => harness.orderModule.mArchiveOrder(
-      42,
-      undefined,
-      7,
-      { hiddenFromHistory: true, hiddenByUserId: 99, allowedStatuses: [1, 2] },
-    ),
-    (error) => error.code === "ORDER_DELETE_NOT_ALLOWED" && error.status === 409,
+  await harness.orderModule.mArchiveOrder(
+    42,
+    undefined,
+    7,
+    { hiddenFromHistory: true, hiddenByUserId: 99 },
   );
-  assert.strictEqual(harness.getState().orders.length, 1);
-  assert.strictEqual(harness.getState().archives.length, 0);
-  assert.ok(harness.events.includes("rollback"));
+  assert.strictEqual(harness.getState().orders.length, 0);
+  assert.strictEqual(harness.getState().archives.length, 1);
+  assert.strictEqual(harness.getState().archives[0].hidden_from_history, 1);
+  assert.ok(harness.events.includes("commit"));
 
   harness = makeArchiveHarness({ failAfterActiveDeletion: true });
   await assert.rejects(

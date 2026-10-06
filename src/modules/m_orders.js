@@ -1055,9 +1055,19 @@ module.exports = {
   mAllArchivedOrders: (shopid) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        `SELECT archives.*, service_points.name AS service_point_name
+        `SELECT archives.*,
+                service_points.name AS service_point_name,
+                CASE WHEN archives.payment_provider = 'stripe_terminal'
+                  AND terminal_payment.status = 'succeeded'
+                THEN ROUND(archives.subtotal * 100) ELSE NULL END AS stripe_terminal_amount_cents,
+                CASE WHEN archives.payment_provider = 'stripe_terminal'
+                  AND terminal_payment.status = 'succeeded'
+                THEN terminal_payment.stripe_charge_id ELSE NULL END AS stripe_terminal_charge_id
          FROM archives
          LEFT JOIN service_points ON service_points.id = archives.service_point_id
+         LEFT JOIN stripe_terminal_payments terminal_payment
+           ON terminal_payment.id = archives.stripe_terminal_payment_id
+           AND terminal_payment.shopid = archives.shopid
          WHERE archives.shopid = ?
            AND COALESCE(archives.hidden_from_history, 0) = 0
          ORDER BY archives.archived_at DESC, archives.id DESC`,

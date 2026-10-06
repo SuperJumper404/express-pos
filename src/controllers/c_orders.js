@@ -253,11 +253,6 @@ exports.addOrder = async (req, res) => {
       });
   }
 };
-const HIDDEN_DELETE_STATUSES = new Set([
-  ORDER_STATUSES.PENDING,
-  ORDER_STATUSES.PREPARING,
-]);
-
 const buildDeleteOrderController = ({
   findOrderById = mFindOrderById,
   archiveOrder = mArchiveOrder,
@@ -271,20 +266,9 @@ const buildDeleteOrderController = ({
       return custom(res, 404, "Commande introuvable.", null, null);
     }
 
-    if (!HIDDEN_DELETE_STATUSES.has(Number(orders[0].status))) {
-      return custom(
-        res,
-        409,
-        "Seules les commandes non pretes peuvent etre supprimees.",
-        null,
-        { code: "ORDER_DELETE_NOT_ALLOWED" },
-      );
-    }
-
     const response = await archiveOrder(id, undefined, req.shopid, {
       hiddenFromHistory: true,
       hiddenByUserId: req.id,
-      allowedStatuses: Array.from(HIDDEN_DELETE_STATUSES),
     });
     if (response.affectedRows) {
       return success(res, "Commande supprimee avec succes.", null, null);

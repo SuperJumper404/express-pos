@@ -40,24 +40,31 @@ const run = async () => {
     "42",
     undefined,
     7,
-    { hiddenFromHistory: true, hiddenByUserId: 99, allowedStatuses: [1, 2] },
+    { hiddenFromHistory: true, hiddenByUserId: 99 },
   ]);
 
   let archivedReadyOrder = false;
+  let archivedReadyArgs;
   const readyController = buildDeleteOrderController({
     findOrderById: async () => [{ id: 43, shopid: 7, status: 3 }],
-    archiveOrder: async () => {
+    archiveOrder: async (...args) => {
       archivedReadyOrder = true;
+      archivedReadyArgs = args;
       return { affectedRows: 1 };
     },
   });
   const readyResponse = makeResponse();
   await readyController({ params: { id: "43" }, shopid: 7, id: 99 }, readyResponse);
 
-  assert.strictEqual(readyResponse.statusCode, 409);
-  assert.strictEqual(readyResponse.body.success, false);
-  assert.strictEqual(readyResponse.body.data.code, "ORDER_DELETE_NOT_ALLOWED");
-  assert.strictEqual(archivedReadyOrder, false);
+  assert.strictEqual(readyResponse.statusCode, 200);
+  assert.strictEqual(readyResponse.body.success, true);
+  assert.strictEqual(archivedReadyOrder, true);
+  assert.deepStrictEqual(archivedReadyArgs, [
+    "43",
+    undefined,
+    7,
+    { hiddenFromHistory: true, hiddenByUserId: 99 },
+  ]);
 };
 
 run()

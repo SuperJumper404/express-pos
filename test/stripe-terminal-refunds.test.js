@@ -40,6 +40,24 @@ test("shop order listing exposes only paid successful linked allocations without
   } finally { delete connection.query; }
 });
 
+test("archive listing exposes safe Terminal card ticket fields for history receipts", async () => {
+  const connection = require("../src/config/db");
+  let query;
+  connection.query = (sql, params, done) => { query = { sql, params }; done(null, []); };
+  try {
+    await require("../src/modules/m_orders").mAllArchivedOrders(7);
+    assert.match(query.sql, /CASE WHEN archives\.payment_provider = 'stripe_terminal'/);
+    assert.match(query.sql, /terminal_payment\.status = 'succeeded'/);
+    assert.match(query.sql, /THEN ROUND\(archives\.subtotal \* 100\) ELSE NULL END AS stripe_terminal_amount_cents/);
+    assert.match(query.sql, /THEN terminal_payment\.stripe_charge_id ELSE NULL END AS stripe_terminal_charge_id/);
+    assert.doesNotMatch(query.sql, /terminal_allocation/);
+    assert.match(query.sql, /terminal_payment\.id = archives\.stripe_terminal_payment_id/);
+    assert.match(query.sql, /terminal_payment\.shopid = archives\.shopid/);
+    assert.deepStrictEqual(query.params, [7]);
+    assert.doesNotMatch(query.sql, /stripe_payment_intent_id|cashier_user_id/);
+  } finally { delete connection.query; }
+});
+
 test("archive fields preserve Terminal identity and never recollect or change its method", () => {
   const result = buildCashRegisterArchiveFields({ order: paidOrder(), paymentMethod: "Especes" });
   assert.strictEqual(result.stripe_terminal_payment_id, 41);
