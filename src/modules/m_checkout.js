@@ -93,6 +93,14 @@ const resolveCheckoutPaymentState = (paymentMode) => {
     };
   }
 
+  if (comparablePaymentMode === "stripe_terminal_kiosk") {
+    return {
+      payment: "Carte bancaire - TPE Stripe",
+      payment_status: "requires_payment",
+      payment_provider: "stripe_terminal",
+    };
+  }
+
   if (comparablePaymentMode.startsWith(COUNTER_PAY_BEFORE_PREFIX)) {
     const method = normalizedPaymentMode.slice(COUNTER_PAY_BEFORE_PREFIX.length).trim();
     return {
@@ -341,6 +349,10 @@ const sqlRepository = {
        AND reservations.expires_at <= ?
        AND NOT (
          COALESCE(orders.payment_provider, '') = 'stripe'
+         AND COALESCE(orders.payment_status, '') = 'requires_payment'
+       )
+       AND NOT (
+         COALESCE(orders.payment_provider, '') = 'stripe_terminal'
          AND COALESCE(orders.payment_status, '') = 'requires_payment'
        )
      ORDER BY reservations.product_id, reservations.id
@@ -834,7 +846,7 @@ const buildCheckoutModule = ({
       const timestampDate = now();
       const timestamp = formatDate(timestampDate);
       const paymentState = resolveCheckoutPaymentState(checkout.paymentMode);
-      const stripe = paymentState.payment_provider === "stripe";
+      const pendingExternalPayment = ["stripe", "stripe_terminal"].includes(paymentState.payment_provider);
       const actor = checkout.actorId && typeof repository.findUserById === "function"
         ? await repository.findUserById({
           userId: checkout.actorId,
@@ -989,7 +1001,7 @@ const buildCheckoutModule = ({
         }
       }
 
-      const expiresAt = stripe
+      const expiresAt = pendingExternalPayment
         ? formatDate(new Date(timestampDate.valueOf() + reservationTtlMs))
         : null;
       for (const productId of stockProductIds) {
@@ -1007,7 +1019,7 @@ const buildCheckoutModule = ({
         });
       }
 
-      if (!stripe && stockProductIds.length) {
+      if (!pendingExternalPayment && stockProductIds.length) {
         await finalizeReservations({
           orderId,
           status: "commit",

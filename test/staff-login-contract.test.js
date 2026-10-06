@@ -17,6 +17,11 @@ const router = fs.readFileSync(
 )
 
 assert.match(controller, /verifyStaffPin/)
+assert.match(
+  controller,
+  /logout:[\s\S]*req\.sessionSubject === "service_point"[\s\S]*Déconnexion réussie/,
+  "service-point sessions must be able to log out without a user id",
+)
 assert.match(controller, /createStaffPin/)
 assert.match(controller, /module_permissions/)
 assert.match(controller, /staff_pin:\s*staffPin/)

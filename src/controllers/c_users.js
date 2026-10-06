@@ -118,6 +118,8 @@ const createKioskSession = (point) => {
     service_point_id: point.id,
     service_point_name: point.name,
     service_point_type: point.type,
+    service_point_printer_ip: point.printer_ip || "",
+    service_point_smart_print_app: Number(point.smart_print_app) ? 1 : 0,
     shopid: point.shopid,
     username: point.name,
     access: 2,
@@ -443,6 +445,10 @@ module.exports = {
       });
   },
   logout: (req, res) => {
+    if (req.sessionSubject === "service_point") {
+      return success(res, "Déconnexion réussie !", {}, true);
+    }
+
     const id = req.body.id;
     const data = {
       token: null,

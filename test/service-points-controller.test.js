@@ -10,6 +10,11 @@ assert.ok(fs.existsSync(controllerPath), "service points controller must exist")
 
 const { buildServicePointsController } = require(controllerPath);
 const { signServicePointAccessToken } = require("../src/helpers/servicePointAccessToken");
+const { hashStaffPin } = require("../src/helpers/staffCredentials");
+const routerSource = fs.readFileSync(
+  path.join(__dirname, "../src/routers/r_servicePoints.js"),
+  "utf8",
+);
 
 const response = () => ({
   statusCode: null,
@@ -56,6 +61,14 @@ const controller = buildServicePointsController({
   findSystemPoint: async ({ systemKey }) =>
     systemKey === "click_collect" ? points[1] : null,
   updateTablePoint: async () => ({ affectedRows: 1 }),
+  createKioskPoint: async (input) => {
+    calls.push(input);
+    return { insertId: 5 };
+  },
+  updateKioskPoint: async (input) => {
+    calls.push(input);
+    return { affectedRows: 1 };
+  },
   deleteTablePoint: async () => ({ affectedRows: 1 }),
 });
 
@@ -113,6 +126,95 @@ const controller = buildServicePointsController({
   assert.strictEqual(clickAndCollectResponse.statusCode, 200);
   assert.strictEqual(clickAndCollectResponse.payload.data.service_point_id, 2);
   assert.strictEqual(clickAndCollectResponse.payload.data.source, "web");
+
+  points.push({
+    id: 4,
+    shopid: 8,
+    name: "Borne 1",
+    type: "kiosk",
+    is_system: 0,
+    is_active: 1,
+    kiosk_pin_hash: await hashStaffPin("1234"),
+  });
+
+  const validPinResponse = response();
+  await controller.verifyKioskPin(
+    {
+      sessionSubject: "service_point",
+      orderSource: "borne",
+      servicePointId: 4,
+      shopid: 8,
+      body: { pin: "1234" },
+    },
+    validPinResponse,
+  );
+  assert.strictEqual(validPinResponse.statusCode, 200);
+  assert.strictEqual(validPinResponse.payload.data.verified, true);
+
+  const invalidPinResponse = response();
+  await controller.verifyKioskPin(
+    {
+      sessionSubject: "service_point",
+      orderSource: "borne",
+      servicePointId: 4,
+      shopid: 8,
+      body: { pin: "9999" },
+    },
+    invalidPinResponse,
+  );
+  assert.strictEqual(invalidPinResponse.statusCode, 401);
+
+  const staffResponse = response();
+  await controller.verifyKioskPin(
+    {
+      sessionSubject: "staff",
+      servicePointId: null,
+      shopid: 8,
+      body: { pin: "1234" },
+    },
+    staffResponse,
+  );
+  assert.strictEqual(staffResponse.statusCode, 403);
+
+  const createKioskResponse = response();
+  await controller.createKiosk(
+    {
+      shopid: 8,
+      body: {
+        name: "  Borne Terrasse  ",
+        printer_ip: "192.168.1.45",
+        smart_print_app: true,
+      },
+    },
+    createKioskResponse,
+  );
+  assert.strictEqual(createKioskResponse.statusCode, 201);
+  assert.strictEqual(calls[1].shopId, 8);
+  assert.strictEqual(calls[1].name, "Borne Terrasse");
+  assert.strictEqual(calls[1].printerIp, "192.168.1.45");
+  assert.strictEqual(calls[1].smartPrintApp, 1);
+
+  const updateKioskResponse = response();
+  await controller.updateKiosk(
+    {
+      shopid: 8,
+      params: { id: "4" },
+      body: {
+        printer_ip: "",
+        smart_print_app: false,
+      },
+    },
+    updateKioskResponse,
+  );
+  assert.strictEqual(updateKioskResponse.statusCode, 200);
+  assert.strictEqual(calls[2].servicePointId, 4);
+  assert.strictEqual(calls[2].printerIp, "");
+  assert.strictEqual(calls[2].smartPrintApp, 0);
+
+  assert.match(
+    routerSource,
+    /\.post\("\/service-points\/kiosk\/verify-pin", authentication, verifyKioskPin\)/,
+  );
 
   console.log("service points controller tests passed");
 })().catch((error) => {

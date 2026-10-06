@@ -20,7 +20,11 @@ routers
   .get("/stripe/terminal/current-reader", authentication, authorizeCashRegister, stripeTerminal.getCurrentReader)
   .post("/stripe/terminal/payments", authentication, authorizeCashRegister, stripeTerminal.startPayment)
   .get("/stripe/terminal/payments/:id", authentication, authorizeCashRegister, stripeTerminal.getPaymentStatus)
-  .post("/stripe/terminal/payments/:id/cancel", authentication, authorizeCashRegister, stripeTerminal.cancelPayment);
+  .post("/stripe/terminal/payments/:id/cancel", authentication, authorizeCashRegister, stripeTerminal.cancelPayment)
+  .get("/stripe/terminal/kiosk/current-reader", authentication, stripeTerminal.getKioskCurrentReader)
+  .post("/stripe/terminal/kiosk/payments", authentication, stripeTerminal.startKioskPayment)
+  .get("/stripe/terminal/kiosk/payments/:id", authentication, stripeTerminal.getKioskPaymentStatus)
+  .post("/stripe/terminal/kiosk/payments/:id/cancel", authentication, stripeTerminal.cancelKioskPayment);
 
 routers
   .get("/stripe/connect/status", authentication, authAdmin, stripe.getConnectStatus)
