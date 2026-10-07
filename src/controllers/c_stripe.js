@@ -232,9 +232,29 @@ const buildQrTablePaymentIntentController = ({
       paymentMethodConfigurationId,
     });
 
-    paymentIntent = await getStripeClient().paymentIntents.create(stripeParams, {
-      idempotencyKey: `qr-${req.shopid}-${body.client_order_token}`,
-    });
+    const stripe = getStripeClient();
+    const idempotencyKey = `qr-${req.shopid}-${body.client_order_token}`;
+    const paymentConfigurationError = (error) => {
+      const text = `${error && error.param ? error.param : ""} ${error && error.message ? error.message : ""}`
+        .toLowerCase();
+      return text.includes("payment_method_configuration")
+        || text.includes("payment method configuration");
+    };
+    try {
+      paymentIntent = await stripe.paymentIntents.create(stripeParams, {
+        idempotencyKey,
+      });
+    } catch (error) {
+      if (!stripeParams.payment_method_configuration || !paymentConfigurationError(error)) {
+        throw error;
+      }
+      logger.error("Stripe payment method configuration failed; retrying with defaults", error);
+      const fallbackStripeParams = { ...stripeParams };
+      delete fallbackStripeParams.payment_method_configuration;
+      paymentIntent = await stripe.paymentIntents.create(fallbackStripeParams, {
+        idempotencyKey: `${idempotencyKey}:default-payment-methods`,
+      });
+    }
     const persistence = await persistPaymentIntent({
       orderId: provisionalOrderId,
       shopId: req.shopid,

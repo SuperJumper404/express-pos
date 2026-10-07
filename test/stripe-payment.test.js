@@ -383,6 +383,8 @@ const makeStripeLifecycleHarness = ({
       }
       order.payment_status = "canceled";
       order.status = ORDER_STATUSES.CANCELED;
+      order.client_order_token = null;
+      order.client_order_payload_hash = null;
       return { affectedRows: 1 };
     },
     cancelOrphanedProvisionalOrder: async ({ orderId, shopId }) => {
@@ -398,6 +400,8 @@ const makeStripeLifecycleHarness = ({
       }
       order.payment_status = "canceled";
       order.status = ORDER_STATUSES.CANCELED;
+      order.client_order_token = null;
+      order.client_order_payload_hash = null;
       return { affectedRows: 1 };
     },
   };
@@ -1815,6 +1819,18 @@ const runStripeReservationContracts = async () => {
   assert.strictEqual(harness.getState().orders[0].stripe_payment_intent_id, "pi_42");
   assert.strictEqual(harness.getState().payments[0].status, "requires_payment_method");
 
+  harness = makeStripeLifecycleHarness({ paymentAttached: false });
+  const provisionalCancellation =
+    await harness.payments.cancelProvisionalStripeOrder(42, 7, null);
+  assert.deepStrictEqual(provisionalCancellation, { canceled: true });
+  assert.strictEqual(harness.getState().orders[0].payment_status, "canceled");
+  assert.strictEqual(
+    harness.getState().orders[0].client_order_token,
+    null,
+    "canceling a provisional Stripe checkout before PaymentIntent creation must release its client token for retry"
+  );
+  assert.strictEqual(harness.getState().reservations[0].status, "released");
+
   harness = makeStripeLifecycleHarness();
   harness.events.length = 0;
   persistence = await harness.payments.persistPaymentIntentForOrder({
@@ -2296,6 +2312,72 @@ const runStripeCheckoutControllerContracts = async () => {
     assert.strictEqual(preconditionStripeCalls, 0, scenario.name);
     assert.strictEqual(preconditionCleanupCalls, 0, scenario.name);
   }
+
+  const fallbackStripeCreateCalls = [];
+  const fallbackPersisted = [];
+  const fallbackController = buildQrTablePaymentIntentController({
+    getShopInfo: async () => [{
+      id: 7,
+      qr_payment_mode: "stripe_before_order",
+      stripe_account_id: "acct_7",
+      stripe_charges_enabled: 1,
+      stripe_commission_percent: 5,
+      kitchen_closed: 0,
+    }],
+    createCheckout: async () => ({
+      orderId: 42,
+      total: 23,
+      payment_status: "requires_payment",
+    }),
+    getStripe: () => ({
+      paymentIntents: {
+        create: async (...args) => {
+          fallbackStripeCreateCalls.push(args);
+          if (fallbackStripeCreateCalls.length === 1) {
+            throw Object.assign(
+              new Error("No such payment_method_configuration: pmc_bad"),
+              { param: "payment_method_configuration" },
+            );
+          }
+          return {
+            id: "pi_42_fallback",
+            client_secret: "secret_42_fallback",
+            status: "requires_payment_method",
+          };
+        },
+      },
+    }),
+    persistPaymentIntentForOrder: async (data) => {
+      fallbackPersisted.push(data);
+      return { attached: true };
+    },
+    paymentMethodConfigurationId: "pmc_bad",
+    cancelProvisionalStripeOrder: async () => {
+      throw new Error("fallback success must not cancel the provisional order");
+    },
+    logger: { error: () => {} },
+  });
+  response = makeResponse();
+  await fallbackController(request, response);
+  assert.strictEqual(response.statusCode, 200);
+  assert.strictEqual(fallbackStripeCreateCalls.length, 2);
+  assert.strictEqual(
+    fallbackStripeCreateCalls[0][0].payment_method_configuration,
+    "pmc_bad",
+  );
+  assert.strictEqual(
+    Object.prototype.hasOwnProperty.call(
+      fallbackStripeCreateCalls[1][0],
+      "payment_method_configuration",
+    ),
+    false,
+  );
+  assert.strictEqual(
+    fallbackStripeCreateCalls[1][1].idempotencyKey,
+    "qr-7-stripe-token-1:default-payment-methods",
+  );
+  assert.strictEqual(fallbackPersisted[0].stripe_payment_intent_id, "pi_42_fallback");
+  assert.strictEqual(response.payload.data.clientSecret, "secret_42_fallback");
 
   const logs = [];
   cleaned = [];
