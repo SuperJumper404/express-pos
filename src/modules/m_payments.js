@@ -357,7 +357,11 @@ const sqlRepository = {
   }) => queryResult(
     connection,
     `UPDATE orders
-     SET payment_status = 'canceled', status = ?, finished = ?
+     SET payment_status = 'canceled',
+         status = ?,
+         finished = ?,
+         client_order_token = NULL,
+         client_order_payload_hash = NULL
      WHERE id = ?
        AND shopid = ?
        AND payment_status = 'requires_payment'
@@ -371,7 +375,11 @@ const sqlRepository = {
   }) => queryResult(
     connection,
     `UPDATE orders
-     SET payment_status = 'canceled', status = ?, finished = ?
+     SET payment_status = 'canceled',
+         status = ?,
+         finished = ?,
+         client_order_token = NULL,
+         client_order_payload_hash = NULL
      WHERE id = ?
        AND shopid = ?
        AND status = ?
