@@ -50,6 +50,7 @@ test("archive listing exposes safe Terminal card ticket fields for history recei
     assert.match(query.sql, /terminal_payment\.status = 'succeeded'/);
     assert.match(query.sql, /THEN ROUND\(archives\.subtotal \* 100\) ELSE NULL END AS stripe_terminal_amount_cents/);
     assert.match(query.sql, /THEN terminal_payment\.stripe_charge_id ELSE NULL END AS stripe_terminal_charge_id/);
+    assert.match(query.sql, /THEN terminal_payment\.card_receipt_details ELSE NULL END AS stripe_terminal_card_receipt_details/);
     assert.doesNotMatch(query.sql, /terminal_allocation/);
     assert.match(query.sql, /terminal_payment\.id = archives\.stripe_terminal_payment_id/);
     assert.match(query.sql, /terminal_payment\.shopid = archives\.shopid/);

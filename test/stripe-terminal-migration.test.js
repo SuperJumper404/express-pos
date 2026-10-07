@@ -7,6 +7,11 @@ const migration = fs.readFileSync(
   "utf8",
 );
 const [up, down] = migration.split("-- migrate:down");
+const cardReceiptMigration = fs.readFileSync(
+  path.join(__dirname, "..", "db", "migrations", "20261007110000_terminal_card_receipt_details.sql"),
+  "utf8",
+);
+const [cardReceiptUp, cardReceiptDown] = cardReceiptMigration.split("-- migrate:down");
 
 assert.match(up, /-- migrate:up/);
 assert.ok(down, "migration must be reversible");
@@ -38,5 +43,7 @@ for (const table of ["orders", "archives"]) {
   assert.match(up, new RegExp("ALTER TABLE `" + table + "`[\\s\\S]*?ADD COLUMN `stripe_terminal_payment_id`"));
   assert.match(down, new RegExp("ALTER TABLE `" + table + "`[\\s\\S]*?DROP COLUMN `stripe_terminal_payment_id`"));
 }
+assert.match(cardReceiptUp, /ALTER TABLE `stripe_terminal_payments`[\s\S]*ADD COLUMN `card_receipt_details`/);
+assert.match(cardReceiptDown, /ALTER TABLE `stripe_terminal_payments`[\s\S]*DROP COLUMN `card_receipt_details`/);
 
 console.log("stripe terminal migration tests passed");

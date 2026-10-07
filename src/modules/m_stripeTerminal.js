@@ -352,7 +352,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
   };
 
   const updatePaymentSession = ({ shopId, paymentId, stripePaymentIntentId,
-    stripeChargeId, status, failureCode, failureMessage }) => {
+    stripeChargeId, cardReceiptDetails, status, failureCode, failureMessage }) => {
     requireShopId(shopId);
     if (status === "succeeded") {
       throw new Error("Use finalizePaymentSucceeded for successful payments");
@@ -361,7 +361,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
     const params = [];
     for (const [value, column] of [
       [stripePaymentIntentId, "stripe_payment_intent_id"],
-      [stripeChargeId, "stripe_charge_id"], [status, "status"],
+      [stripeChargeId, "stripe_charge_id"], [cardReceiptDetails, "card_receipt_details"], [status, "status"],
       [failureCode, "failure_code"], [failureMessage, "failure_message"],
     ]) {
       if (value !== undefined) {
@@ -484,7 +484,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
 
   // The caller rolls back its transaction if any allocation or order update fails.
   const finalizePaymentSucceeded = async ({ shopId, paymentId,
-    stripePaymentIntentId, stripeChargeId = null, timestamp }) => {
+    stripePaymentIntentId, stripeChargeId = null, cardReceiptDetails = null, timestamp }) => {
     requireShopId(shopId);
     const { payment, orders: lockedOrders, allocations } = await lockPaymentSession({ shopId, paymentId });
     if (!payment) throw new Error("Terminal payment not found");
@@ -514,17 +514,17 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
     if (orders.affectedRows !== count) throw new Error("Terminal order finalization incomplete");
     const result = await query(
       `UPDATE stripe_terminal_payments
-       SET status = 'succeeded', stripe_charge_id = ?
+       SET status = 'succeeded', stripe_charge_id = ?, card_receipt_details = ?
        WHERE stripe_terminal_payments.shopid = ? AND id = ?
          AND stripe_payment_intent_id = ? AND status <> 'succeeded'`,
-      [stripeChargeId, shopId, paymentId, stripePaymentIntentId],
+      [stripeChargeId, cardReceiptDetails, shopId, paymentId, stripePaymentIntentId],
     );
     if (result.affectedRows !== 1) throw new Error("Terminal payment finalization incomplete");
     return { finalized: true };
   };
 
   const finalizeKioskPaymentSucceeded = async ({ shopId, paymentId,
-    stripePaymentIntentId, stripeChargeId = null, timestamp }) => {
+    stripePaymentIntentId, stripeChargeId = null, cardReceiptDetails = null, timestamp }) => {
     requireShopId(shopId);
     const { payment, orders: lockedOrders, allocations } = await lockPaymentSession({ shopId, paymentId });
     if (!payment) throw new Error("Terminal payment not found");
@@ -559,10 +559,10 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
     if (orders.affectedRows !== count) throw new Error("Terminal order finalization incomplete");
     const result = await query(
       `UPDATE stripe_terminal_payments
-       SET status = 'succeeded', stripe_charge_id = ?
+       SET status = 'succeeded', stripe_charge_id = ?, card_receipt_details = ?
        WHERE stripe_terminal_payments.shopid = ? AND id = ?
          AND stripe_payment_intent_id = ? AND status <> 'succeeded'`,
-      [stripeChargeId, shopId, paymentId, stripePaymentIntentId],
+      [stripeChargeId, cardReceiptDetails, shopId, paymentId, stripePaymentIntentId],
     );
     if (result.affectedRows !== 1) throw new Error("Terminal payment finalization incomplete");
     return { finalized: true };

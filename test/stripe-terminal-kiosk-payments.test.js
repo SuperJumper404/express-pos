@@ -105,16 +105,18 @@ const fixture = () => {
       if (!session) return { affectedRows: 0 };
       if (data.stripePaymentIntentId !== undefined) session.stripe_payment_intent_id = data.stripePaymentIntentId;
       if (data.stripeChargeId !== undefined) session.stripe_charge_id = data.stripeChargeId;
+      if (data.cardReceiptDetails !== undefined) session.card_receipt_details = data.cardReceiptDetails;
       if (data.status !== undefined) session.status = data.status;
       if (data.failureCode !== undefined) session.failure_code = data.failureCode;
       if (data.failureMessage !== undefined) session.failure_message = data.failureMessage;
       return { affectedRows: 1 };
     },
-    finalizeKioskPaymentSucceeded: async ({ shopId, paymentId, stripePaymentIntentId, stripeChargeId }) => {
+    finalizeKioskPaymentSucceeded: async ({ shopId, paymentId, stripePaymentIntentId, stripeChargeId, cardReceiptDetails }) => {
       const session = state.sessions.find((row) => row.shopid === shopId && row.id === paymentId);
       assert.strictEqual(session.stripe_payment_intent_id, stripePaymentIntentId);
       session.status = "succeeded";
       session.stripe_charge_id = stripeChargeId;
+      session.card_receipt_details = cardReceiptDetails;
       for (const allocation of state.allocations.filter((row) => row.terminal_payment_id === paymentId)) {
         const order = state.orders.find((row) => row.id === allocation.order_id);
         order.status = 3;
@@ -123,7 +125,7 @@ const fixture = () => {
         order.payment_provider = "stripe_terminal";
         order.stripe_terminal_payment_id = paymentId;
       }
-      state.calls.push({ name: "finalize-success", args: [{ shopId, paymentId, stripePaymentIntentId, stripeChargeId }] });
+      state.calls.push({ name: "finalize-success", args: [{ shopId, paymentId, stripePaymentIntentId, stripeChargeId, cardReceiptDetails }] });
       return { finalized: true };
     },
     markKioskPaymentCounterFallback: async ({ shopId, paymentId, status }) => {
@@ -305,7 +307,22 @@ test("success reconciliation marks the kiosk order paid and exposes only safe ca
       card_present: {
         brand: "visa",
         last4: "4242",
+        network: "cartes_bancaires",
+        network_transaction_id: "net_123",
+        read_method: "contactless_emv",
         generated_card: "raw-secret",
+        fingerprint: "raw-fingerprint",
+        receipt: {
+          authorization_code: "123456",
+          authorization_response_code: "00",
+          application_preferred_name: "CB",
+          dedicated_file_name: "A0000000421010",
+          application_cryptogram: "9F2608ABCDEF12345678",
+          terminal_verification_results: "8000008000",
+          transaction_status_information: "E800",
+          cardholder_verification_method: "online_pin",
+          account_type: "credit",
+        },
       },
     },
   };
@@ -314,14 +331,43 @@ test("success reconciliation marks the kiosk order paid and exposes only safe ca
   assert.deepStrictEqual(paid.cardTicket, {
     brand: "visa",
     last4: "4242",
+    network: "cartes_bancaires",
+    networkTransactionId: "net_123",
+    readMethod: "contactless_emv",
+    authorizationCode: "123456",
+    authorizationResponseCode: "00",
+    applicationPreferredName: "CB",
+    dedicatedFileName: "A0000000421010",
+    applicationCryptogram: "9F2608ABCDEF12345678",
+    terminalVerificationResults: "8000008000",
+    transactionStatusInformation: "E800",
+    cardholderVerificationMethod: "online_pin",
+    accountType: "credit",
     chargeId: "ch_terminal",
     terminalPaymentId: 41,
     amountCents: 2000,
+  });
+  assert.deepStrictEqual(JSON.parse(f.state.sessions[0].card_receipt_details), {
+    brand: "visa",
+    last4: "4242",
+    network: "cartes_bancaires",
+    networkTransactionId: "net_123",
+    readMethod: "contactless_emv",
+    authorizationCode: "123456",
+    authorizationResponseCode: "00",
+    applicationPreferredName: "CB",
+    dedicatedFileName: "A0000000421010",
+    applicationCryptogram: "9F2608ABCDEF12345678",
+    terminalVerificationResults: "8000008000",
+    transactionStatusInformation: "E800",
+    cardholderVerificationMethod: "online_pin",
+    accountType: "credit",
   });
   assert.strictEqual(f.state.orders[0].payment_status, "paid");
   assert.strictEqual(f.state.orders[0].payment_provider, "stripe_terminal");
   assert.strictEqual(f.state.orders[0].stripe_terminal_payment_id, 41);
   assert(!JSON.stringify(paid).includes("raw-secret"));
+  assert(!JSON.stringify(paid).includes("raw-fingerprint"));
 });
 
 for (const [name, action] of [
