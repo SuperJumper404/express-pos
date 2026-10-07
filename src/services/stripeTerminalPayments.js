@@ -3,6 +3,11 @@ const { toStripeAmount } = require("../helpers/stripePayment");
 const {
   allocateTerminalOrderAmounts, calculateTerminalApplicationFee, buildTerminalPaymentIntentParams,
 } = require("../helpers/stripeTerminal");
+const {
+  buildTerminalCardTicket,
+  terminalCardReceiptDetails,
+  serializeTerminalCardReceiptDetails,
+} = require("../helpers/stripeTerminalCardTicket");
 
 const ERRORS = {
   TERMINAL_INVALID_INPUT: [422, "Parametres du paiement invalides."],
@@ -64,7 +69,7 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
     try { return await operation(); }
     catch (error) { fail("TERMINAL_STRIPE_ERROR"); }
   };
-  const dto = async (session, store = terminalStore) => {
+  const dto = async (session, store = terminalStore, intent = null) => {
     const allocations = (await store.listPaymentAllocations({ shopId: session.shopid, paymentId: session.id }))
       .map((a) => ({ orderId: a.order_id, amountCents: a.amount_cents }))
       .sort((a, b) => a.orderId - b.orderId);
@@ -83,6 +88,7 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
       currency: session.currency,
       orderIds: allocations.map((a) => a.orderId),
       ...(session.status === "succeeded" && { allocations }),
+      ...(session.status === "succeeded" && { cardTicket: buildTerminalCardTicket(session, intent) }),
       failureCode: ERRORS[session.failure_code] ? session.failure_code : null,
       failureMessage: ERRORS[session.failure_code] ? ERRORS[session.failure_code][1] : null,
     };
@@ -114,6 +120,9 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
       await store.finalizePaymentSucceeded({
         shopId: session.shopid, paymentId: session.id, stripePaymentIntentId: intent.id,
         stripeChargeId: typeof intent.latest_charge === "string" ? intent.latest_charge : (intent.latest_charge || {}).id || null,
+        cardReceiptDetails: serializeTerminalCardReceiptDetails(
+          terminalCardReceiptDetails(typeof intent.latest_charge === "object" ? intent.latest_charge : null),
+        ),
         timestamp: new Date(),
       });
     } else if (intent.status === "canceled") {
@@ -208,7 +217,7 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
       catch (cleanupError) { fail("TERMINAL_CLEANUP_FAILED"); }
       if (remoteIntent.status === "canceled") await markFailed(session, "TERMINAL_STRIPE_ERROR", store);
       else if (remoteIntent.status === "succeeded") {
-        return databaseTransaction(async (transactionStore) => dto(await reconcile(session, remoteIntent, transactionStore), transactionStore), store.withTransaction);
+        return databaseTransaction(async (transactionStore) => dto(await reconcile(session, remoteIntent, transactionStore), transactionStore, remoteIntent), store.withTransaction);
       }
       throw error;
     }
@@ -300,7 +309,7 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
         await markFailed(current, "TERMINAL_PAYMENT_FAILED", store);
         return dto(await payment(input, store), store);
       }
-      return dto(await reconcile(current, intent, store), store);
+      return dto(await reconcile(current, intent, store), store, intent);
     });
   });
 
@@ -313,7 +322,7 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
     const intent = await cancelRemote(session, reader);
     return databaseTransaction(async (store) => {
       const current = await payment(input, store, true);
-      return dto(active(current) ? await reconcile(current, intent, store) : current, store);
+      return dto(active(current) ? await reconcile(current, intent, store) : current, store, intent);
     });
   });
 

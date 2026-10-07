@@ -5,6 +5,11 @@ const {
   buildTerminalPaymentIntentParams,
 } = require("../helpers/stripeTerminal");
 const { TerminalPaymentError } = require("./stripeTerminalPayments");
+const {
+  buildTerminalCardTicket,
+  terminalCardReceiptDetails,
+  serializeTerminalCardReceiptDetails,
+} = require("../helpers/stripeTerminalCardTicket");
 
 const COUNTER_PAYMENT_METHOD = "Paiement au comptoir";
 
@@ -39,19 +44,7 @@ const pickCheckoutPayload = (body = {}) => {
 
 const safeCardTicket = (session, intent) => {
   if (session.status !== "succeeded" && (!intent || intent.status !== "succeeded")) return null;
-  const charge = intent && typeof intent.latest_charge === "object" && intent.latest_charge
-    ? intent.latest_charge
-    : { id: intent && typeof intent.latest_charge === "string" ? intent.latest_charge : session.stripe_charge_id };
-  const card = charge.payment_method_details && charge.payment_method_details.card_present
-    ? charge.payment_method_details.card_present
-    : {};
-  return {
-    brand: typeof card.brand === "string" ? card.brand : null,
-    last4: typeof card.last4 === "string" ? card.last4 : null,
-    chargeId: typeof charge.id === "string" ? charge.id : null,
-    terminalPaymentId: session.id,
-    amountCents: session.amount_cents,
-  };
+  return buildTerminalCardTicket(session, intent);
 };
 
 const buildStripeTerminalKioskPaymentService = ({
@@ -182,6 +175,9 @@ const buildStripeTerminalKioskPaymentService = ({
         stripeChargeId: typeof intent.latest_charge === "string"
           ? intent.latest_charge
           : (intent.latest_charge || {}).id || null,
+        cardReceiptDetails: serializeTerminalCardReceiptDetails(
+          terminalCardReceiptDetails(typeof intent.latest_charge === "object" ? intent.latest_charge : null),
+        ),
         timestamp: new Date(),
         payment: TERMINAL_PAYMENT_METHOD,
       });

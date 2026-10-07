@@ -87,19 +87,20 @@ const fixture = () => {
       const session = state.sessions.find((s) => s.shopid === data.shopId && s.id === data.paymentId);
       assert.notStrictEqual(data.status, "succeeded");
       if (!session || session.status === "succeeded") return { affectedRows: 0 };
-      for (const [key, column] of Object.entries({ stripePaymentIntentId: "stripe_payment_intent_id", stripeChargeId: "stripe_charge_id", status: "status", failureCode: "failure_code", failureMessage: "failure_message" })) {
+      for (const [key, column] of Object.entries({ stripePaymentIntentId: "stripe_payment_intent_id", stripeChargeId: "stripe_charge_id", cardReceiptDetails: "card_receipt_details", status: "status", failureCode: "failure_code", failureMessage: "failure_message" })) {
         if (data[key] !== undefined) session[column] = data[key];
       }
       state.events.push(data.stripePaymentIntentId ? "intent-saved" : `status:${data.status}`);
       return { affectedRows: 1 };
     },
-    finalizePaymentSucceeded: async ({ shopId, paymentId, stripePaymentIntentId, stripeChargeId }) => {
+    finalizePaymentSucceeded: async ({ shopId, paymentId, stripePaymentIntentId, stripeChargeId, cardReceiptDetails }) => {
       assert(state.locked);
       const session = state.sessions.find((s) => s.shopid === shopId && s.id === paymentId);
       assert.strictEqual(session.stripe_payment_intent_id, stripePaymentIntentId);
       if (session.status === "succeeded") return { finalized: false };
       session.status = "succeeded";
       session.stripe_charge_id = stripeChargeId;
+      session.card_receipt_details = cardReceiptDetails;
       const orderIds = state.allocations.filter((a) => a.terminal_payment_id === paymentId).map((a) => a.order_id);
       state.orders.filter((o) => orderIds.includes(o.id)).forEach((o) => { o.payment_status = "paid"; o.payment_provider = "stripe_terminal"; o.stripe_terminal_payment_id = paymentId; });
       return { finalized: true };
@@ -538,9 +539,67 @@ test("allocation failure rolls back before Stripe", async () => {
 
 test("polling success finalizes paid orders atomically without archiving them", async () => {
   const f = fixture(); await f.service.startPayment(input);
-  f.state.intent.status = "succeeded"; f.state.intent.latest_charge = { id: "ch_terminal", raw: "raw-secret" };
-  assert.strictEqual((await f.service.getPaymentStatus(scope)).status, "succeeded");
+  f.state.intent.status = "succeeded"; f.state.intent.latest_charge = {
+    id: "ch_terminal",
+    raw: "raw-secret",
+    payment_method_details: {
+      card_present: {
+        brand: "visa",
+        last4: "4242",
+        network: "cartes_bancaires",
+        network_transaction_id: "net_123",
+        read_method: "contact_emv",
+        generated_card: "raw-secret",
+        receipt: {
+          authorization_code: "123456",
+          application_preferred_name: "CB",
+          dedicated_file_name: "A0000000421010",
+          terminal_verification_results: "8000008000",
+          transaction_status_information: "E800",
+          cardholder_verification_method: "online_pin",
+        },
+      },
+    },
+  };
+  const paid = await f.service.getPaymentStatus(scope);
+  assert.strictEqual(paid.status, "succeeded");
+  assert.deepStrictEqual(paid.cardTicket, {
+    brand: "visa",
+    last4: "4242",
+    network: "cartes_bancaires",
+    networkTransactionId: "net_123",
+    readMethod: "contact_emv",
+    authorizationCode: "123456",
+    authorizationResponseCode: null,
+    applicationPreferredName: "CB",
+    dedicatedFileName: "A0000000421010",
+    applicationCryptogram: null,
+    terminalVerificationResults: "8000008000",
+    transactionStatusInformation: "E800",
+    cardholderVerificationMethod: "online_pin",
+    accountType: null,
+    chargeId: "ch_terminal",
+    terminalPaymentId: 41,
+    amountCents: 1750,
+  });
   assert.strictEqual(f.state.sessions[0].stripe_charge_id, "ch_terminal");
+  assert.deepStrictEqual(JSON.parse(f.state.sessions[0].card_receipt_details), {
+    brand: "visa",
+    last4: "4242",
+    network: "cartes_bancaires",
+    networkTransactionId: "net_123",
+    readMethod: "contact_emv",
+    authorizationCode: "123456",
+    authorizationResponseCode: null,
+    applicationPreferredName: "CB",
+    dedicatedFileName: "A0000000421010",
+    applicationCryptogram: null,
+    terminalVerificationResults: "8000008000",
+    transactionStatusInformation: "E800",
+    cardholderVerificationMethod: "online_pin",
+    accountType: null,
+  });
+  assert(!JSON.stringify(paid).includes("raw-secret"));
   assert(f.state.orders.every((o) => o.payment_status === "paid" && o.status === 3 && o.stripe_terminal_payment_id === 41));
   const count = f.state.calls.length;
   assert.strictEqual((await f.service.getPaymentStatus(scope)).status, "succeeded");

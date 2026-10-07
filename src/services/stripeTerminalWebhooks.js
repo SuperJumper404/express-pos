@@ -1,3 +1,8 @@
+const {
+  terminalCardReceiptDetails,
+  serializeTerminalCardReceiptDetails,
+} = require("../helpers/stripeTerminalCardTicket");
+
 const retryTerminalTransaction = async (run, work) => {
   for (let attempt = 1; ; attempt += 1) {
     try { return await run(work); }
@@ -36,6 +41,9 @@ const buildStripeTerminalWebhookHandler = ({ terminalStore }) => async (event) =
       const result = await store.finalizePaymentSucceeded({
         shopId, paymentId, stripePaymentIntentId: intent.id,
         stripeChargeId: typeof intent.latest_charge === "string" ? intent.latest_charge : (intent.latest_charge || {}).id || null,
+        cardReceiptDetails: serializeTerminalCardReceiptDetails(
+          terminalCardReceiptDetails(typeof intent.latest_charge === "object" ? intent.latest_charge : null),
+        ),
         timestamp: new Date(event.created * 1000),
       });
       return { handled: true, ...result };

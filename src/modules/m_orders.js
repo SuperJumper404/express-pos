@@ -1063,6 +1063,9 @@ module.exports = {
                 CASE WHEN archives.payment_provider = 'stripe_terminal'
                   AND terminal_payment.status = 'succeeded'
                 THEN terminal_payment.stripe_charge_id ELSE NULL END AS stripe_terminal_charge_id
+                ,CASE WHEN archives.payment_provider = 'stripe_terminal'
+                  AND terminal_payment.status = 'succeeded'
+                THEN terminal_payment.card_receipt_details ELSE NULL END AS stripe_terminal_card_receipt_details
          FROM archives
          LEFT JOIN service_points ON service_points.id = archives.service_point_id
          LEFT JOIN stripe_terminal_payments terminal_payment
