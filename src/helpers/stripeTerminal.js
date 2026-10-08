@@ -8,6 +8,7 @@ const TERMINAL_PAYMENT_STATUSES = Object.freeze({
   FAILED: "failed",
   CANCELED: "canceled",
 });
+const MIN_TERMINAL_APPLICATION_FEE_CENTS = 15;
 
 const isPositiveCents = (value) => Number.isSafeInteger(value) && value > 0;
 const isPositiveId = (value) => Number.isSafeInteger(value) && value > 0;
@@ -84,7 +85,12 @@ const calculateTerminalApplicationFee = (totalCents, commissionPercent) => {
   if (!isPositiveCents(totalCents)) {
     throw new Error("Invalid Terminal total");
   }
-  return roundPercentOfCents(totalCents, normalizeCommissionPercent(commissionPercent));
+  const percent = normalizeCommissionPercent(commissionPercent);
+  const percentFee = roundPercentOfCents(totalCents, percent);
+  if (percent <= 0 || percentFee <= 0) {
+    return 0;
+  }
+  return Math.min(totalCents, Math.max(percentFee, MIN_TERMINAL_APPLICATION_FEE_CENTS));
 };
 
 const buildTerminalPaymentIntentParams = ({ totalCents, connectedAccountId,
@@ -121,6 +127,7 @@ const buildTerminalPaymentIntentParams = ({ totalCents, connectedAccountId,
 module.exports = {
   TERMINAL_PAYMENT_METHOD,
   TERMINAL_PAYMENT_STATUSES,
+  MIN_TERMINAL_APPLICATION_FEE_CENTS,
   allocateTerminalOrderAmounts,
   calculateTerminalApplicationFee,
   buildTerminalPaymentIntentParams,
