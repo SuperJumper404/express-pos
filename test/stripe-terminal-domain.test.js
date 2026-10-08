@@ -103,6 +103,8 @@ for (const input of [
 }
 
 assert.strictEqual(calculateTerminalApplicationFee(2000), 100);
+assert.strictEqual(calculateTerminalApplicationFee(200, 5), 15);
+assert.strictEqual(calculateTerminalApplicationFee(10, 5), 10);
 assert.strictEqual(calculateTerminalApplicationFee(999, "7.5"), 75);
 assert.strictEqual(calculateTerminalApplicationFee(1500, 8.7), 131);
 assert.strictEqual(calculateTerminalApplicationFee(2000, "invalid"), 100);

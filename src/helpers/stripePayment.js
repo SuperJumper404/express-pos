@@ -1,4 +1,5 @@
 const DEFAULT_COMMISSION_PERCENT = 5;
+const MIN_WEB_APPLICATION_FEE_CENTS = 35;
 
 const normalizeCommissionPercent = (commissionPercent) => {
   if (
@@ -44,7 +45,12 @@ const calculateApplicationFee = (
     throw new Error("Commission invalide");
   }
 
-  return Math.round((parsedAmount * parsedPercent) / 100);
+  const percentFee = Math.round((parsedAmount * parsedPercent) / 100);
+  if (parsedPercent <= 0 || percentFee <= 0) {
+    return 0;
+  }
+
+  return Math.min(parsedAmount, Math.max(percentFee, MIN_WEB_APPLICATION_FEE_CENTS));
 };
 
 const buildDestinationPaymentIntentParams = ({
@@ -87,6 +93,7 @@ const buildDestinationPaymentIntentParams = ({
 
 module.exports = {
   DEFAULT_COMMISSION_PERCENT,
+  MIN_WEB_APPLICATION_FEE_CENTS,
   calculateApplicationFee,
   normalizeCommissionPercent,
   toStripeAmount,
