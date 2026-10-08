@@ -41,6 +41,9 @@ const {
 const {
   transitionOrderStatus,
 } = require("../modules/m_orderTransitions");
+const {
+  buildRevenueByDayAndPayment,
+} = require("../helpers/orderMetrics");
 
 const jwt = require("jsonwebtoken");
 const response = require("../helpers/response");
@@ -560,6 +563,11 @@ exports.metrics = async (req, res) => {
     getAverageOrderPreparationTime(allOrders);
 
   metrics.paymentsSummary = getPaymentsSummary(allOrders);
+  metrics.revenueByDayAndPayment = buildRevenueByDayAndPayment(
+    allOrders,
+    from,
+    to,
+  );
   metrics.topProducts = getTopProducts(allOrders);
   // TODO: ta logique de récupération des métriques ici
   console.log("All Orderss", JSON.stringify(allOrders, null, 2));

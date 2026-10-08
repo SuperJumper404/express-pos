@@ -11,6 +11,7 @@ assert.strictEqual(normalizePaymentMethod("especes"), "Espèces");
 assert.strictEqual(normalizePaymentMethod("Tickets Restaurants"), "Ticket restaurant");
 assert.strictEqual(normalizePaymentMethod("cheques"), "Chèque");
 assert.strictEqual(normalizePaymentMethod("stripe", "stripe"), "Stripe");
+assert.strictEqual(normalizePaymentMethod("stripe_terminal", "stripe_terminal"), "TPE Stripe");
 assert.strictEqual(normalizePaymentMethod("carte bancaire", "stripe"), "Stripe");
 assert.strictEqual(normalizePaymentMethod("Paiement inhabituel"), "Carte bancaire");
 assert.deepStrictEqual(normalizePaymentMethods(["CB", "carte bancaire", "Especes"]), [
@@ -20,6 +21,7 @@ assert.deepStrictEqual(normalizePaymentMethods(["CB", "carte bancaire", "Especes
 assert.deepStrictEqual(CANONICAL_PAYMENT_METHODS, [
   "Carte bancaire",
   "Stripe",
+  "TPE Stripe",
   "Espèces",
   "Chèque",
   "Ticket restaurant",

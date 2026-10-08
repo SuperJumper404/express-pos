@@ -1,6 +1,7 @@
 const CANONICAL_PAYMENT_METHODS = Object.freeze([
   "Carte bancaire",
   "Stripe",
+  "TPE Stripe",
   "Espèces",
   "Chèque",
   "Ticket restaurant",
@@ -17,6 +18,15 @@ const normalizePaymentMethod = (payment, provider) => {
   const paymentKey = foldPaymentText(payment);
   const providerKey = foldPaymentText(provider);
 
+  if (
+    providerKey.includes("stripe terminal")
+    || providerKey.includes("stripe_terminal")
+    || paymentKey.includes("stripe terminal")
+    || paymentKey.includes("stripe_terminal")
+    || paymentKey.includes("tpe stripe")
+  ) {
+    return "TPE Stripe";
+  }
   if (providerKey.includes("stripe") || paymentKey.includes("stripe")) {
     return "Stripe";
   }
