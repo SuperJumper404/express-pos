@@ -61,6 +61,13 @@ const fixture = () => {
         ))
       )) || null,
     ),
+    findActivePaymentForReader: async ({ shopId, readerId }) => clone(
+      state.sessions.find((session) => (
+        session.shopid === shopId
+        && session.terminal_reader_id === readerId
+        && ["creating", "processing"].includes(session.status)
+      )) || null,
+    ),
     createKioskPaymentSession: async (data) => {
       const id = 41 + state.sessions.length;
       state.sessions.push({
@@ -227,6 +234,10 @@ const fixture = () => {
 
   return {
     state,
+    terminalStore,
+    stripe,
+    checkout,
+    shopStore,
     service: buildStripeTerminalKioskPaymentService({
       stripe,
       terminalStore,
@@ -245,6 +256,10 @@ const checkoutPayload = {
   readerId: 999,
   amountCents: 1,
 };
+const rejects = (run, code) => assert.rejects(run, (error) => {
+  assert.strictEqual(error.code, code);
+  return true;
+});
 
 test("gets the active reader assigned to this kiosk service point", async () => {
   const f = fixture();
@@ -295,6 +310,42 @@ test("replays the same client order token without creating a second PaymentInten
   assert.strictEqual(f.state.orders.length, 1);
   assert.strictEqual(f.state.sessions.length, 1);
   assert.strictEqual(f.state.calls.filter((call) => call.name === "create-intent").length, 1);
+});
+
+test("rejects a kiosk start when the assigned reader has another active payment", async () => {
+  const f = fixture();
+  f.state.sessions.push({
+    id: 99,
+    shopid: 7,
+    terminal_reader_id: 21,
+    cashier_user_id: 0,
+    idempotency_key: "terminal-kiosk:7:4:other",
+    stripe_connected_account_id: "acct_shop",
+    amount_cents: 2000,
+    application_fee_amount: 100,
+    currency: "eur",
+    status: "processing",
+    stripe_payment_intent_id: "pi_other",
+    stripe_charge_id: null,
+  });
+  await rejects(
+    () => f.service.startPayment({ shopId: 7, servicePointId: 4, checkoutPayload }),
+    "TERMINAL_READER_BUSY",
+  );
+  assert.strictEqual(f.state.calls.filter((call) => call.name === "create-intent").length, 0);
+  assert.strictEqual(f.state.sessions.length, 1);
+});
+
+test("reader lock timeout cancels the kiosk intent and falls back to counter payment", async () => {
+  const f = fixture();
+  f.terminalStore.withReaderActionLock = async () => null;
+  const result = await f.service.startPayment({ shopId: 7, servicePointId: 4, checkoutPayload });
+  assert.strictEqual(result.outcome, "failed");
+  assert.strictEqual(result.status, "failed");
+  assert.strictEqual(f.state.calls.filter((call) => call.name === "process").length, 0);
+  assert.strictEqual(f.state.calls.filter((call) => call.name === "cancel-intent").length, 1);
+  assert.strictEqual(f.state.orders[0].payment, "Paiement au comptoir");
+  assert.strictEqual(f.state.orders[0].payment_status, "unpaid");
 });
 
 test("success reconciliation marks the kiosk order paid and exposes only safe card-ticket fields", async () => {

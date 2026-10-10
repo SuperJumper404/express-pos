@@ -223,7 +223,7 @@ const buildStripeTerminalKioskPaymentService = ({
       await databaseTransaction((transactionStore) => update(session, {
         stripePaymentIntentId: intent.id,
       }, transactionStore), store.withTransaction);
-      await store.withReaderActionLock({ shopId: session.shopid, readerId: reader.id }, async () => {
+      const handedOff = await store.withReaderActionLock({ shopId: session.shopid, readerId: reader.id }, async () => {
         await stripeCall(() => stripe.terminal.readers.processPaymentIntent(reader.stripe_reader_id, {
           payment_intent: intent.id,
         }, { idempotencyKey: `${session.idempotency_key}:process` }));
@@ -231,6 +231,7 @@ const buildStripeTerminalKioskPaymentService = ({
           status: "processing",
         }, transactionStore), store.withTransaction);
       });
+      if (handedOff === null) fail("TERMINAL_READER_BUSY");
     } catch (error) {
       if (session.stripe_payment_intent_id) {
         const remoteIntent = await cancelRemote(session, reader, store);
@@ -296,16 +297,29 @@ const buildStripeTerminalKioskPaymentService = ({
         servicePointId,
       });
       if (activePayment) return { existing: await dto(activePayment, store) };
-      const saved = await store.createKioskPaymentSession({
+      const activeReaderPayment = await store.findActivePaymentForReader({
         shopId,
         readerId: reader.id,
-        servicePointId,
-        idempotencyKey: `terminal-kiosk:${shopId}:${servicePointId}:${idempotencyToken}`,
-        connectedAccountId: shop.stripe_account_id,
-        amountCents,
-        applicationFeeAmount,
-        currency: "eur",
       });
+      if (activeReaderPayment) fail("TERMINAL_READER_BUSY");
+      let saved;
+      try {
+        saved = await store.createKioskPaymentSession({
+          shopId,
+          readerId: reader.id,
+          servicePointId,
+          idempotencyKey: `terminal-kiosk:${shopId}:${servicePointId}:${idempotencyToken}`,
+          connectedAccountId: shop.stripe_account_id,
+          amountCents,
+          applicationFeeAmount,
+          currency: "eur",
+        });
+      } catch (error) {
+        if (error && (error.code === "ER_DUP_ENTRY" || error.errno === 1062)) {
+          fail("TERMINAL_READER_BUSY");
+        }
+        throw error;
+      }
       if (!saved || saved.affectedRows !== 1 || !Number.isSafeInteger(saved.insertId)) {
         fail("TERMINAL_INTERNAL_ERROR");
       }

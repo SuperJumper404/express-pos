@@ -19,6 +19,7 @@ const requireShopId = (shopId) => {
 
 const first = (rows) => rows[0] || null;
 const activePaymentStatus = (payment) => ["creating", "processing"].includes(payment.status);
+const staleCreatingPaymentSeconds = 120;
 
 const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
   if (!connection || typeof connection.query !== "function") {
@@ -247,6 +248,20 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
 
   const findActivePaymentForReader = async ({ shopId, readerId, forUpdate = false }) => {
     requireShopId(shopId);
+    await query(
+      `UPDATE stripe_terminal_payments
+       SET status = 'failed', failure_code = ?, failure_message = ?
+       WHERE shopid = ? AND terminal_reader_id = ?
+         AND status = 'creating' AND stripe_payment_intent_id IS NULL
+         AND created_at < DATE_SUB(NOW(), INTERVAL ? SECOND)`,
+      [
+        "TERMINAL_PAYMENT_FAILED",
+        "La preparation du paiement terminal a expire.",
+        shopId,
+        readerId,
+        staleCreatingPaymentSeconds,
+      ],
+    );
     return first(await query(
       `SELECT p.* FROM stripe_terminal_payments p
        WHERE p.shopid = ? AND p.terminal_reader_id = ?
