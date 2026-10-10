@@ -524,15 +524,17 @@ test("polling expires a kiosk terminal payment after thirty seconds", async () =
   const result = await f.service.getPaymentStatus({ shopId: 7, servicePointId: 4, paymentId: 41 });
   assert.strictEqual(result.outcome, "canceled");
   assert.strictEqual(f.state.sessions[0].status, "canceled");
-  assert.deepStrictEqual(f.state.orders, []);
-  assert.deepStrictEqual(f.state.archivedOrders.map((order) => order.id), [100]);
+  assert.strictEqual(f.state.orders[0].payment, "Paiement au comptoir");
+  assert.strictEqual(f.state.orders[0].payment_status, "unpaid");
+  assert.strictEqual(f.state.orders[0].payment_provider, null);
+  assert.deepStrictEqual(f.state.archivedOrders, []);
   assert.deepStrictEqual(
     f.state.calls.filter((call) => call.name === "reservations").map((call) => call.args[0]),
-    [{ orderId: 100, status: "release", operator: 0 }],
+    [{ orderId: 100, status: "commit", operator: 0 }],
   );
   assert(f.state.calls.some((call) => call.name === "cancel-action"));
   assert(f.state.calls.some((call) => call.name === "cancel-intent" && call.args[0] === "pi_kiosk"));
-  assert.strictEqual(f.state.calls.some((call) => call.name === "counter-fallback"), false);
+  assert(f.state.calls.some((call) => call.name === "counter-fallback"));
 });
 
 test("reader lock timeout cancels the kiosk intent and falls back to counter payment", async () => {

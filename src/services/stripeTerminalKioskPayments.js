@@ -471,21 +471,13 @@ const buildStripeTerminalKioskPaymentService = ({
       failedAction = matchingAction(remote, intent.id) && remote.action.status === "failed";
       if (failedAction) intent = await cancelRemote(session, reader);
     }
-    let expiredSession = null;
-    const result = await databaseTransaction(async (store) => {
+    return databaseTransaction(async (store) => {
       const current = await payment({ shopId, servicePointId, paymentId }, store, true);
       if (!active(current)) return dto(current, store, intent);
-      if (expiredCancel) {
-        expiredSession = await markExplicitCancel(current, store);
-        return dto(expiredSession, store, intent);
-      }
+      if (expiredCancel) return dto(await reconcile(current, intent, store), store, intent);
       if (failedAction) return dto(await markCounterFallback(current, "failed", store), store, intent);
       return dto(await reconcile(current, intent, store), store, intent);
     });
-    if (expiredSession) {
-      await removePreparedKioskOrders(expiredSession);
-    }
-    return result;
   });
 
   const cancelPayment = safe(async (input) => {
