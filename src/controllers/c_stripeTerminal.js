@@ -72,6 +72,7 @@ const getDefaultKioskPaymentService = () => {
     const { withTransaction } = require("../helpers/withTransaction");
     const { getStripe } = require("../config/stripe");
     const checkout = require("../modules/m_checkout");
+    const { mArchiveOrder } = require("../modules/m_orders");
     defaultKioskPaymentService = buildStripeTerminalKioskPaymentService({
       stripe: {
         get terminal() { return getStripe().terminal; },
@@ -84,6 +85,13 @@ const getDefaultKioskPaymentService = () => {
         )),
       },
       checkout,
+      orderArchive: {
+        hideOrder: ({ shopId, orderId }) => mArchiveOrder(orderId, undefined, shopId, {
+          hiddenFromHistory: true,
+          hiddenByUserId: 0,
+          allowedStatuses: [1],
+        }),
+      },
       shopStore: {
         findShop: async ({ shopId }) => {
           const [rows] = await connection.query(

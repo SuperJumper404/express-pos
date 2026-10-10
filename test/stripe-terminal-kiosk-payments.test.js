@@ -25,6 +25,7 @@ const fixture = () => {
     orders: [],
     sessions: [],
     allocations: [],
+    archivedOrders: [],
     calls: [],
     remote: { id: "tmr_kiosk", status: "online", action: null },
     intent: null,
@@ -186,6 +187,21 @@ const fixture = () => {
       });
       return { orderId: id, total: 20, payment_status: "requires_payment", idempotent_replay: false };
     },
+    finalizeReservations: async ({ orderId, status, operator }) => {
+      state.calls.push({ name: "reservations", args: [{ orderId, status, operator }] });
+      return { orderId, status };
+    },
+  };
+
+  const orderArchive = {
+    hideOrder: async ({ shopId, orderId }) => {
+      const index = state.orders.findIndex((order) => order.shopid === shopId && order.id === orderId);
+      if (index < 0) throw new Error("Commande introuvable");
+      state.archivedOrders.push(state.orders[index]);
+      state.orders.splice(index, 1);
+      state.calls.push({ name: "archive-order", args: [{ shopId, orderId }] });
+      return { affectedRows: 1 };
+    },
   };
 
   const call = (name, run) => async (...args) => {
@@ -243,6 +259,7 @@ const fixture = () => {
       terminalStore,
       checkout,
       shopStore,
+      orderArchive,
     }),
   };
 };
@@ -471,20 +488,32 @@ test("success reconciliation marks the kiosk order paid and exposes only safe ca
   assert(!JSON.stringify(paid).includes("raw-fingerprint"));
 });
 
-for (const [name, action] of [
-  ["failed reader action", (f) => { f.state.remote.action.status = "failed"; }],
-  ["cancel", async (f) => { await f.service.cancelPayment({ shopId: 7, servicePointId: 4, paymentId: 41 }); }],
-]) test(`${name} leaves the kiosk order payable at the counter`, async () => {
+test("failed reader action leaves the kiosk order payable at the counter", async () => {
   const f = fixture();
   await f.service.startPayment({ shopId: 7, servicePointId: 4, checkoutPayload });
-  if (typeof action === "function") await action(f);
-  const result = name === "cancel"
-    ? await f.service.getPaymentStatus({ shopId: 7, servicePointId: 4, paymentId: 41 })
-    : await f.service.getPaymentStatus({ shopId: 7, servicePointId: 4, paymentId: 41 });
+  f.state.remote.action.status = "failed";
+  const result = await f.service.getPaymentStatus({ shopId: 7, servicePointId: 4, paymentId: 41 });
   assert(["failed", "canceled"].includes(result.outcome));
   assert.strictEqual(f.state.orders[0].payment, "Paiement au comptoir");
   assert.strictEqual(f.state.orders[0].payment_status, "unpaid");
   assert.strictEqual(f.state.orders[0].payment_provider, null);
+});
+
+test("explicit kiosk cancel cancels the Terminal payment and removes the prepared order", async () => {
+  const f = fixture();
+  await f.service.startPayment({ shopId: 7, servicePointId: 4, checkoutPayload });
+  const result = await f.service.cancelPayment({ shopId: 7, servicePointId: 4, paymentId: 41 });
+  assert.strictEqual(result.outcome, "canceled");
+  assert.strictEqual(result.orderId, 100);
+  assert.deepStrictEqual(f.state.orders, []);
+  assert.deepStrictEqual(f.state.archivedOrders.map((order) => order.id), [100]);
+  assert(f.state.calls.some((call) => call.name === "cancel-intent"));
+  assert(f.state.calls.some((call) => call.name === "archive-order"));
+  assert.deepStrictEqual(
+    f.state.calls.filter((call) => call.name === "reservations").map((call) => call.args[0]),
+    [{ orderId: 100, status: "release", operator: 0 }],
+  );
+  assert.strictEqual(f.state.calls.some((call) => call.name === "counter-fallback"), false);
 });
 
 (async () => {

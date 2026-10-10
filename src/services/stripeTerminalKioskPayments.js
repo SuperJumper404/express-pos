@@ -58,6 +58,7 @@ const buildStripeTerminalKioskPaymentService = ({
   terminalStore,
   checkout,
   shopStore,
+  orderArchive = null,
 }) => {
   const databaseTransaction = async (work, run = terminalStore.withTransaction) => {
     for (let attempt = 1; ; attempt += 1) {
@@ -132,7 +133,11 @@ const buildStripeTerminalKioskPaymentService = ({
       : await store.findPaymentSession({ shopId, paymentId });
     if (!session || Number(session.shopid) !== shopId) fail("TERMINAL_PAYMENT_NOT_FOUND");
     const { order } = await orderForSession(session, store);
-    if (!order || Number(order.shopid) !== shopId
+    if (!order) {
+      if (!active(session)) return session;
+      fail("TERMINAL_PAYMENT_NOT_FOUND");
+    }
+    if (Number(order.shopid) !== shopId
       || (order.service_point_id != null && Number(order.service_point_id) !== servicePointId)) {
       fail("TERMINAL_PAYMENT_NOT_FOUND");
     }
@@ -152,6 +157,13 @@ const buildStripeTerminalKioskPaymentService = ({
     }
   };
 
+  const releaseReservations = async (orderIds) => {
+    if (!checkout.finalizeReservations) return;
+    for (const orderId of orderIds) {
+      await checkout.finalizeReservations({ orderId, status: "release", operator: 0 });
+    }
+  };
+
   const markCounterFallback = async (session, status, store = terminalStore) => {
     await store.markKioskPaymentCounterFallback({
       shopId: session.shopid,
@@ -162,6 +174,25 @@ const buildStripeTerminalKioskPaymentService = ({
     const allocations = await store.listPaymentAllocations({ shopId: session.shopid, paymentId: session.id });
     await commitReservations(allocations.map((allocation) => allocation.order_id));
     return store.findPaymentSession({ shopId: session.shopid, paymentId: session.id });
+  };
+
+  const markExplicitCancel = async (session, store = terminalStore) => {
+    await update(session, { status: "canceled" }, store);
+    return store.findPaymentSession({ shopId: session.shopid, paymentId: session.id });
+  };
+
+  const removePreparedKioskOrders = async (session, store = terminalStore) => {
+    const allocations = await store.listPaymentAllocations({
+      shopId: session.shopid,
+      paymentId: session.id,
+    });
+    const orderIds = [...new Set(allocations.map((allocation) => allocation.order_id))];
+    if (!orderIds.length) return;
+    await releaseReservations(orderIds);
+    if (!orderArchive || typeof orderArchive.hideOrder !== "function") return;
+    for (const orderId of orderIds) {
+      await orderArchive.hideOrder({ shopId: session.shopid, orderId });
+    }
   };
 
   const reconcile = async (session, intent, store) => {
@@ -405,12 +436,17 @@ const buildStripeTerminalKioskPaymentService = ({
     const reader = await terminalStore.findReader({ shopId, readerId: session.terminal_reader_id });
     if (!reader) fail("TERMINAL_NO_READER");
     const intent = await cancelRemote(session, reader);
-    return databaseTransaction(async (store) => {
+    const canceled = await databaseTransaction(async (store) => {
       const current = await payment({ shopId, servicePointId, paymentId }, store, true);
-      return dto(active(current)
-        ? await reconcile(current, intent, store)
-        : current, store, intent);
+      if (!active(current)) return current;
+      return intent.status === "canceled"
+        ? markExplicitCancel(current, store)
+        : reconcile(current, intent, store);
     });
+    if (active(session) && canceled.status === "canceled") {
+      await removePreparedKioskOrders(canceled);
+    }
+    return dto(canceled, terminalStore, intent);
   });
 
   return {
