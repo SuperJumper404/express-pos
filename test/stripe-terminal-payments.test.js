@@ -115,7 +115,7 @@ const fixture = () => {
   const stripe = {
     paymentIntents: {
       create: call("create", (params, options) => {
-        assert(state.events.indexOf("commit") > state.events.indexOf("session"), "commit creating session before Stripe");
+        assert(state.events.lastIndexOf("commit") > state.events.lastIndexOf("session"), "commit creating session before Stripe");
         assert.strictEqual(state.sessions.at(-1).status, "creating");
         assert.strictEqual(state.allocations.filter((a) => a.terminal_payment_id === state.sessions.at(-1).id).length, state.expectedAllocationCount || 2);
         assert.strictEqual(options.idempotencyKey, state.sessions.at(-1).idempotency_key);
@@ -198,6 +198,39 @@ test("idempotent retry returns the active session without additional Stripe call
   const calls = f.state.calls.length;
   assert.deepStrictEqual(await f.service.startPayment(input), first);
   assert.strictEqual(f.state.calls.length, calls);
+});
+
+test("start reconciles a canceled active reader payment before reserving a new cash-register payment", async () => {
+  const f = fixture();
+  f.state.sessions.push({
+    id: 40,
+    shopid: 7,
+    terminal_reader_id: 21,
+    cashier_user_id: 99,
+    idempotency_key: "terminal:7:old",
+    stripe_connected_account_id: "acct_shop",
+    amount_cents: 2000,
+    application_fee_amount: 100,
+    currency: "eur",
+    discount_type: "none",
+    discount_value: 0,
+    status: "processing",
+    stripe_payment_intent_id: "pi_canceled",
+    created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+  });
+  f.state.intentsById.set("pi_canceled", {
+    id: "pi_canceled",
+    amount: 2000,
+    currency: "eur",
+    status: "canceled",
+    metadata: { terminal_payment_id: "40", shop_id: "7" },
+    latest_charge: null,
+  });
+  const result = await f.service.startPayment(input);
+  assert.strictEqual(f.state.sessions[0].status, "canceled");
+  assert.strictEqual(result.id, 42);
+  assert.strictEqual(result.status, "processing");
+  assert(f.state.calls.some((call) => call.name === "retrieve-intent" && call.args[0] === "pi_canceled"));
 });
 
 for (const enabled of [1, 0]) test(`round2 ambiguous creation replays byte-equivalent params after the shop account changes (enabled=${enabled})`, async () => {

@@ -201,7 +201,7 @@ const fixture = () => {
           status: "requires_payment_method",
           latest_charge: null,
         };
-        assert.strictEqual(options.idempotencyKey, state.sessions[0].idempotency_key);
+        assert.strictEqual(options.idempotencyKey, state.sessions.at(-1).idempotency_key);
         return clone(state.intent);
       }),
       retrieve: call("retrieve-intent", () => clone(state.intent)),
@@ -334,6 +334,56 @@ test("rejects a kiosk start when the assigned reader has another active payment"
   );
   assert.strictEqual(f.state.calls.filter((call) => call.name === "create-intent").length, 0);
   assert.strictEqual(f.state.sessions.length, 1);
+});
+
+test("reconciles a canceled active reader payment before starting a kiosk payment", async () => {
+  const f = fixture();
+  f.state.orders.push({
+    id: 99,
+    shopid: 7,
+    ordernumber: "B99",
+    subtotal: "20.00",
+    payment: "Carte bancaire - TPE Stripe",
+    payment_status: "requires_payment",
+    payment_provider: "stripe_terminal",
+    stripe_terminal_payment_id: null,
+    status: 1,
+    client_order_token: "old-token",
+  });
+  f.state.sessions.push({
+    id: 40,
+    shopid: 7,
+    terminal_reader_id: 21,
+    cashier_user_id: 0,
+    idempotency_key: "terminal-kiosk:7:4:old",
+    stripe_connected_account_id: "acct_shop",
+    amount_cents: 2000,
+    application_fee_amount: 100,
+    currency: "eur",
+    status: "processing",
+    stripe_payment_intent_id: "pi_old",
+    stripe_charge_id: null,
+    created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+  });
+  f.state.allocations.push({
+    shopid: 7,
+    terminal_payment_id: 40,
+    order_id: 99,
+    amount_cents: 2000,
+  });
+  f.state.intent = {
+    id: "pi_old",
+    amount: 2000,
+    currency: "eur",
+    status: "canceled",
+    metadata: { terminal_payment_id: "40", shop_id: "7" },
+    latest_charge: null,
+  };
+  const result = await f.service.startPayment({ shopId: 7, servicePointId: 4, checkoutPayload });
+  assert.strictEqual(f.state.sessions[0].status, "canceled");
+  assert.strictEqual(result.id, 42);
+  assert.strictEqual(result.status, "processing");
+  assert(f.state.calls.some((call) => call.name === "retrieve-intent" && call.args[0] === "pi_old"));
 });
 
 test("reader lock timeout cancels the kiosk intent and falls back to counter payment", async () => {
