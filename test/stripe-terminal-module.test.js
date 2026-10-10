@@ -177,6 +177,31 @@ const hasShopFilter = (call, alias, shopId) => {
     shopId, userId, orderIds: [21],
   })).activePayment.id, 42);
 
+  const staleCreating = makeStore((sql) => {
+    if (/FROM stripe_terminal_readers r/.test(sql)) return [reader];
+    if (/FROM orders o/.test(sql)) return [{ id: 21, shopid: shopId,
+      status: 3, payment_status: "unpaid" }];
+    if (/UPDATE stripe_terminal_payments/.test(sql)) return { affectedRows: 1 };
+    if (/FROM stripe_terminal_payments p/.test(sql)) return [];
+    if (/FROM stripe_terminal_payment_orders a/.test(sql)) return [];
+    return [];
+  });
+  assert.strictEqual((await staleCreating.store.lockReaderAndOrders({
+    shopId, userId, orderIds: [21],
+  })).activePayment, null);
+  const staleUpdate = staleCreating.calls.find((call) => /UPDATE stripe_terminal_payments/.test(call.sql));
+  assert.ok(staleUpdate);
+  assert.match(staleUpdate.sql, /status = 'creating'/);
+  assert.match(staleUpdate.sql, /stripe_payment_intent_id IS NULL/);
+  assert.match(staleUpdate.sql, /created_at < DATE_SUB\(NOW\(\), INTERVAL \? SECOND\)/);
+  assert.deepStrictEqual(staleUpdate.params, [
+    "TERMINAL_PAYMENT_FAILED",
+    "La preparation du paiement terminal a expire.",
+    shopId,
+    reader.id,
+    120,
+  ]);
+
   const competing = makeStore((sql) => {
     if (/FROM stripe_terminal_readers r/.test(sql)) return [reader];
     if (/FROM orders o/.test(sql)) return [{ id: 21, shopid: shopId,
