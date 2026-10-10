@@ -41,6 +41,12 @@ const positiveId = (value) => {
 };
 const active = (session) => ["creating", "processing"].includes(session.status);
 const cancelable = (intent) => ["requires_payment_method", "requires_confirmation", "requires_action", "requires_capture"].includes(intent.status);
+const recoverableActivePaymentAgeMs = 120 * 1000;
+const recoverableIntentStatus = (intent) => ["succeeded", "canceled"].includes(intent.status);
+const oldEnoughForRecovery = (session) => {
+  const createdAt = new Date(session.created_at).getTime();
+  return Number.isFinite(createdAt) && Date.now() - createdAt >= recoverableActivePaymentAgeMs;
+};
 const matchingAction = (reader, intentId) => reader.action
   && reader.action.type === "process_payment_intent"
   && reader.action.process_payment_intent
@@ -129,6 +135,16 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
       await update(session, { status: "canceled" }, store);
     }
     return store.findPaymentSession({ shopId: session.shopid, paymentId: session.id });
+  };
+  const recoverActivePayment = async (session) => {
+    if (!session.stripe_payment_intent_id || !oldEnoughForRecovery(session)) return false;
+    const intent = await stripeCall(() => stripe.paymentIntents.retrieve(session.stripe_payment_intent_id));
+    if (!recoverableIntentStatus(intent)) return false;
+    await databaseTransaction(
+      async (transactionStore) => reconcile(session, intent, transactionStore),
+      terminalStore.withTransaction,
+    );
+    return true;
   };
   const readerAction = async (session, work, store = terminalStore) => {
     const result = await store.withReaderActionLock({ shopId: session.shopid, readerId: session.terminal_reader_id }, work);
@@ -224,7 +240,7 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
     return dto(await store.findPaymentSession({ shopId: session.shopid, paymentId: session.id }), store);
   };
 
-  const startPayment = safe(async (input) => {
+  const startPaymentAttempt = async (input, recovered = false) => {
     const shopId = positiveId(input.shopId);
     const cashierUserId = positiveId(input.cashierUserId);
     if (!Array.isArray(input.orderIds) || !input.orderIds.length
@@ -246,6 +262,7 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
       }
       const { reader, orders, activePayment } = locked;
       if (activePayment) {
+        if (activePayment.stripe_payment_intent_id) return { activePayment };
         if (Number(activePayment.cashier_user_id) !== cashierUserId) fail("TERMINAL_READER_BUSY");
         if (activePayment.status === "creating" && !activePayment.stripe_payment_intent_id) {
           const allocations = await store.listPaymentAllocations({ shopId, paymentId: activePayment.id });
@@ -278,6 +295,14 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
       await store.createAllocations({ shopId, paymentId: saved.insertId, allocations: amounts.allocations });
       return { reader, session: await store.findPaymentSession({ shopId, paymentId: saved.insertId }) };
     });
+    if (reserved.activePayment) {
+      if (await recoverActivePayment(reserved.activePayment)) {
+        if (recovered) fail("TERMINAL_RECOVERY_REQUIRED");
+        return startPaymentAttempt(input, true);
+      }
+      if (Number(reserved.activePayment.cashier_user_id) !== cashierUserId) fail("TERMINAL_READER_BUSY");
+      return dto(reserved.activePayment);
+    }
     if (reserved.existing) return reserved.existing;
     const paymentId = reserved.session.id;
     const result = await terminalStore.withPaymentCreationLock({ shopId, paymentId }, async (store) => {
@@ -286,7 +311,8 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
       return createPayment({ ...reserved, session: current }, store);
     });
     return result || dto(await payment({ shopId, cashierUserId, paymentId }));
-  });
+  };
+  const startPayment = safe((input) => startPaymentAttempt(input));
 
   const getPaymentStatus = safe(async (input) => {
     const session = await payment(input);
