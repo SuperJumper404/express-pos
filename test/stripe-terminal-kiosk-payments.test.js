@@ -511,6 +511,30 @@ test("cleans a stale kiosk preparation without a Stripe intent before starting a
   assert.strictEqual(result.status, "processing");
 });
 
+test("polling expires a kiosk terminal payment after thirty seconds", async () => {
+  const f = fixture();
+  await f.service.startPayment({ shopId: 7, servicePointId: 4, checkoutPayload });
+  f.state.sessions[0].created_at = new Date(Date.now() - 31 * 1000).toISOString();
+  f.state.intent.status = "requires_payment_method";
+  f.state.remote.action = {
+    type: "process_payment_intent",
+    status: "in_progress",
+    process_payment_intent: { payment_intent: "pi_kiosk" },
+  };
+  const result = await f.service.getPaymentStatus({ shopId: 7, servicePointId: 4, paymentId: 41 });
+  assert.strictEqual(result.outcome, "canceled");
+  assert.strictEqual(f.state.sessions[0].status, "canceled");
+  assert.deepStrictEqual(f.state.orders, []);
+  assert.deepStrictEqual(f.state.archivedOrders.map((order) => order.id), [100]);
+  assert.deepStrictEqual(
+    f.state.calls.filter((call) => call.name === "reservations").map((call) => call.args[0]),
+    [{ orderId: 100, status: "release", operator: 0 }],
+  );
+  assert(f.state.calls.some((call) => call.name === "cancel-action"));
+  assert(f.state.calls.some((call) => call.name === "cancel-intent" && call.args[0] === "pi_kiosk"));
+  assert.strictEqual(f.state.calls.some((call) => call.name === "counter-fallback"), false);
+});
+
 test("reader lock timeout cancels the kiosk intent and falls back to counter payment", async () => {
   const f = fixture();
   f.terminalStore.withReaderActionLock = async () => null;

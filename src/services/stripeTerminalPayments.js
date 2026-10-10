@@ -41,7 +41,7 @@ const positiveId = (value) => {
 };
 const active = (session) => ["creating", "processing"].includes(session.status);
 const cancelable = (intent) => ["requires_payment_method", "requires_confirmation", "requires_action", "requires_capture"].includes(intent.status);
-const recoverableActivePaymentAgeMs = 120 * 1000;
+const recoverableActivePaymentAgeMs = 30 * 1000;
 const oldEnoughForRecovery = (session) => {
   const createdAt = new Date(session.created_at).getTime();
   return Number.isFinite(createdAt) && Date.now() - createdAt >= recoverableActivePaymentAgeMs;
@@ -342,8 +342,15 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
     const session = await payment(input);
     if (!active(session) || !session.stripe_payment_intent_id) return dto(session);
     let intent = await stripeCall(() => stripe.paymentIntents.retrieve(session.stripe_payment_intent_id));
+    let expiredCancel = false;
+    if (oldEnoughForRecovery(session) && cancelable(intent)) {
+      const reader = await terminalStore.findReader({ shopId: session.shopid, readerId: session.terminal_reader_id });
+      if (!reader) fail("TERMINAL_NO_READER");
+      intent = await cancelRemote(session, reader);
+      expiredCancel = intent.status === "canceled";
+    }
     let failedAction = false;
-    if (session.status === "processing" && intent.status === "requires_payment_method") {
+    if (!expiredCancel && session.status === "processing" && intent.status === "requires_payment_method") {
       const reader = await terminalStore.findReader({ shopId: session.shopid, readerId: session.terminal_reader_id });
       if (!reader) fail("TERMINAL_NO_READER");
       const remote = await stripeCall(() => stripe.terminal.readers.retrieve(reader.stripe_reader_id));
@@ -355,6 +362,7 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
     return databaseTransaction(async (store) => {
       const current = await payment(input, store, true);
       if (!active(current)) return dto(current, store);
+      if (expiredCancel) return dto(await reconcile(current, intent, store), store, intent);
       if (failedAction) {
         await markFailed(current, "TERMINAL_PAYMENT_FAILED", store);
         return dto(await payment(input, store), store);

@@ -276,6 +276,24 @@ test("start cancels a stale cancelable active reader payment before reserving a 
   assert.strictEqual(result.status, "processing");
 });
 
+test("polling expires a cash-register terminal payment after thirty seconds", async () => {
+  const f = fixture();
+  await f.service.startPayment(input);
+  f.state.sessions[0].created_at = new Date(Date.now() - 31 * 1000).toISOString();
+  f.state.intent.status = "requires_payment_method";
+  f.state.remote.action = {
+    type: "process_payment_intent",
+    status: "in_progress",
+    process_payment_intent: { payment_intent: "pi_terminal" },
+  };
+  const result = await f.service.getPaymentStatus(scope);
+  assert.strictEqual(result.status, "canceled");
+  assert.strictEqual(f.state.sessions[0].status, "canceled");
+  assert(f.state.calls.some((call) => call.name === "cancel-action"));
+  assert(f.state.calls.some((call) => call.name === "cancel-intent" && call.args[0] === "pi_terminal"));
+  assert.strictEqual(f.state.orders.some((order) => order.payment_status === "paid"), false);
+});
+
 for (const enabled of [1, 0]) test(`round2 ambiguous creation replays byte-equivalent params after the shop account changes (enabled=${enabled})`, async () => {
   const f = fixture();
   const create = f.stripe.paymentIntents.create;
