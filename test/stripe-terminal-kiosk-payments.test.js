@@ -403,6 +403,114 @@ test("reconciles a canceled active reader payment before starting a kiosk paymen
   assert(f.state.calls.some((call) => call.name === "retrieve-intent" && call.args[0] === "pi_old"));
 });
 
+test("cleans a stale cancelable kiosk reader payment before starting a new one", async () => {
+  const f = fixture();
+  f.state.orders.push({
+    id: 99,
+    shopid: 7,
+    ordernumber: "B99",
+    subtotal: "20.00",
+    payment: "Carte bancaire - TPE Stripe",
+    payment_status: "requires_payment",
+    payment_provider: "stripe_terminal",
+    stripe_terminal_payment_id: null,
+    status: 1,
+    client_order_token: "old-token",
+  });
+  f.state.sessions.push({
+    id: 40,
+    shopid: 7,
+    terminal_reader_id: 21,
+    cashier_user_id: 0,
+    idempotency_key: "terminal-kiosk:7:4:old",
+    stripe_connected_account_id: "acct_shop",
+    amount_cents: 2000,
+    application_fee_amount: 100,
+    currency: "eur",
+    status: "processing",
+    stripe_payment_intent_id: "pi_old",
+    stripe_charge_id: null,
+    created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+  });
+  f.state.allocations.push({
+    shopid: 7,
+    terminal_payment_id: 40,
+    order_id: 99,
+    amount_cents: 2000,
+  });
+  f.state.intent = {
+    id: "pi_old",
+    amount: 2000,
+    currency: "eur",
+    status: "requires_payment_method",
+    metadata: { terminal_payment_id: "40", shop_id: "7" },
+    latest_charge: null,
+  };
+  f.state.remote.action = {
+    type: "process_payment_intent",
+    status: "in_progress",
+    process_payment_intent: { payment_intent: "pi_old" },
+  };
+  const result = await f.service.startPayment({ shopId: 7, servicePointId: 4, checkoutPayload });
+  assert.strictEqual(f.state.sessions[0].status, "canceled");
+  assert.deepStrictEqual(f.state.archivedOrders.map((order) => order.id), [99]);
+  assert.deepStrictEqual(
+    f.state.calls.filter((call) => call.name === "reservations").map((call) => call.args[0]),
+    [{ orderId: 99, status: "release", operator: 0 }],
+  );
+  assert(f.state.calls.some((call) => call.name === "cancel-action"));
+  assert(f.state.calls.some((call) => call.name === "cancel-intent" && call.args[0] === "pi_old"));
+  assert.strictEqual(result.id, 42);
+  assert.strictEqual(result.status, "processing");
+});
+
+test("cleans a stale kiosk preparation without a Stripe intent before starting a new one", async () => {
+  const f = fixture();
+  f.state.orders.push({
+    id: 99,
+    shopid: 7,
+    ordernumber: "B99",
+    subtotal: "20.00",
+    payment: "Carte bancaire - TPE Stripe",
+    payment_status: "requires_payment",
+    payment_provider: "stripe_terminal",
+    stripe_terminal_payment_id: null,
+    status: 1,
+    client_order_token: "old-token",
+  });
+  f.state.sessions.push({
+    id: 40,
+    shopid: 7,
+    terminal_reader_id: 21,
+    cashier_user_id: 0,
+    idempotency_key: "terminal-kiosk:7:4:old",
+    stripe_connected_account_id: "acct_shop",
+    amount_cents: 2000,
+    application_fee_amount: 100,
+    currency: "eur",
+    status: "creating",
+    stripe_payment_intent_id: null,
+    stripe_charge_id: null,
+    created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+  });
+  f.state.allocations.push({
+    shopid: 7,
+    terminal_payment_id: 40,
+    order_id: 99,
+    amount_cents: 2000,
+  });
+  const result = await f.service.startPayment({ shopId: 7, servicePointId: 4, checkoutPayload });
+  assert.strictEqual(f.state.sessions[0].status, "canceled");
+  assert.deepStrictEqual(f.state.archivedOrders.map((order) => order.id), [99]);
+  assert.deepStrictEqual(
+    f.state.calls.filter((call) => call.name === "reservations").map((call) => call.args[0]),
+    [{ orderId: 99, status: "release", operator: 0 }],
+  );
+  assert.strictEqual(f.state.calls.some((call) => call.name === "cancel-intent"), false);
+  assert.strictEqual(result.id, 42);
+  assert.strictEqual(result.status, "processing");
+});
+
 test("reader lock timeout cancels the kiosk intent and falls back to counter payment", async () => {
   const f = fixture();
   f.terminalStore.withReaderActionLock = async () => null;

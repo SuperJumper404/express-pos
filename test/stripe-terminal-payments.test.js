@@ -233,6 +233,49 @@ test("start reconciles a canceled active reader payment before reserving a new c
   assert(f.state.calls.some((call) => call.name === "retrieve-intent" && call.args[0] === "pi_canceled"));
 });
 
+test("start cancels a stale cancelable active reader payment before reserving a new cash-register payment", async () => {
+  const f = fixture();
+  f.state.sessions.push({
+    id: 40,
+    shopid: 7,
+    terminal_reader_id: 21,
+    cashier_user_id: 99,
+    idempotency_key: "terminal:7:old",
+    stripe_connected_account_id: "acct_shop",
+    amount_cents: 2000,
+    application_fee_amount: 100,
+    currency: "eur",
+    discount_type: "none",
+    discount_value: 0,
+    status: "processing",
+    stripe_payment_intent_id: "pi_stale",
+    created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+  });
+  f.state.allocations.push(
+    { shopid: 7, terminal_payment_id: 40, order_id: 12, amount_cents: 800 },
+    { shopid: 7, terminal_payment_id: 40, order_id: 31, amount_cents: 1200 },
+  );
+  f.state.intentsById.set("pi_stale", {
+    id: "pi_stale",
+    amount: 2000,
+    currency: "eur",
+    status: "requires_payment_method",
+    metadata: { terminal_payment_id: "40", shop_id: "7" },
+    latest_charge: null,
+  });
+  f.state.remote.action = {
+    type: "process_payment_intent",
+    status: "in_progress",
+    process_payment_intent: { payment_intent: "pi_stale" },
+  };
+  const result = await f.service.startPayment(input);
+  assert.strictEqual(f.state.sessions[0].status, "canceled");
+  assert(f.state.calls.some((call) => call.name === "cancel-action"));
+  assert(f.state.calls.some((call) => call.name === "cancel-intent" && call.args[0] === "pi_stale"));
+  assert.strictEqual(result.id, 42);
+  assert.strictEqual(result.status, "processing");
+});
+
 for (const enabled of [1, 0]) test(`round2 ambiguous creation replays byte-equivalent params after the shop account changes (enabled=${enabled})`, async () => {
   const f = fixture();
   const create = f.stripe.paymentIntents.create;

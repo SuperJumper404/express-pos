@@ -42,7 +42,6 @@ const positiveId = (value) => {
 const active = (session) => ["creating", "processing"].includes(session.status);
 const cancelable = (intent) => ["requires_payment_method", "requires_confirmation", "requires_action", "requires_capture"].includes(intent.status);
 const recoverableActivePaymentAgeMs = 120 * 1000;
-const recoverableIntentStatus = (intent) => ["succeeded", "canceled"].includes(intent.status);
 const oldEnoughForRecovery = (session) => {
   const createdAt = new Date(session.created_at).getTime();
   return Number.isFinite(createdAt) && Date.now() - createdAt >= recoverableActivePaymentAgeMs;
@@ -136,16 +135,6 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
     }
     return store.findPaymentSession({ shopId: session.shopid, paymentId: session.id });
   };
-  const recoverActivePayment = async (session) => {
-    if (!session.stripe_payment_intent_id || !oldEnoughForRecovery(session)) return false;
-    const intent = await stripeCall(() => stripe.paymentIntents.retrieve(session.stripe_payment_intent_id));
-    if (!recoverableIntentStatus(intent)) return false;
-    await databaseTransaction(
-      async (transactionStore) => reconcile(session, intent, transactionStore),
-      terminalStore.withTransaction,
-    );
-    return true;
-  };
   const readerAction = async (session, work, store = terminalStore) => {
     const result = await store.withReaderActionLock({ shopId: session.shopid, readerId: session.terminal_reader_id }, work);
     if (result === null) fail("TERMINAL_READER_BUSY");
@@ -183,6 +172,41 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
     }
     return intent;
   }, store);
+
+  const markCanceled = async (session) => {
+    await databaseTransaction(async (transactionStore) => {
+      const current = await payment(sessionScope(session), transactionStore, true);
+      if (active(current)) await update(current, { status: "canceled" }, transactionStore);
+    }, terminalStore.withTransaction);
+  };
+
+  const recoverActivePayment = async (session) => {
+    if (!session.stripe_payment_intent_id || !oldEnoughForRecovery(session)) return false;
+    let intent = await stripeCall(() => stripe.paymentIntents.retrieve(session.stripe_payment_intent_id));
+    if (["succeeded", "canceled"].includes(intent.status)) {
+      await databaseTransaction(
+        async (transactionStore) => reconcile(session, intent, transactionStore),
+        terminalStore.withTransaction,
+      );
+      return true;
+    }
+    if (!cancelable(intent)) return false;
+    const reader = await terminalStore.findReader({ shopId: session.shopid, readerId: session.terminal_reader_id });
+    if (!reader) return false;
+    intent = await cancelRemote(session, reader);
+    if (intent.status === "succeeded") {
+      await databaseTransaction(
+        async (transactionStore) => reconcile(session, intent, transactionStore),
+        terminalStore.withTransaction,
+      );
+      return true;
+    }
+    if (intent.status === "canceled") {
+      await markCanceled(session);
+      return true;
+    }
+    return false;
+  };
 
   const createPayment = async ({ session, reader }, store) => {
     // Stripe can prune a key after 24 hours. Never risk replay beyond that window.
