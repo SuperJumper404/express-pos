@@ -46,7 +46,7 @@ const safeCardTicket = (session, intent) => {
   if (session.status !== "succeeded" && (!intent || intent.status !== "succeeded")) return null;
   return buildTerminalCardTicket(session, intent);
 };
-const recoverableActivePaymentAgeMs = 120 * 1000;
+const recoverableActivePaymentAgeMs = 30 * 1000;
 const oldEnoughForRecovery = (session) => {
   const createdAt = new Date(session.created_at).getTime();
   return Number.isFinite(createdAt) && Date.now() - createdAt >= recoverableActivePaymentAgeMs;
@@ -456,20 +456,36 @@ const buildStripeTerminalKioskPaymentService = ({
     const session = await payment({ shopId, servicePointId, paymentId });
     if (!active(session) || !session.stripe_payment_intent_id) return dto(session);
     let intent = await stripeCall(() => stripe.paymentIntents.retrieve(session.stripe_payment_intent_id));
+    let expiredCancel = false;
+    if (oldEnoughForRecovery(session) && cancelable(intent)) {
+      const reader = await terminalStore.findReader({ shopId, readerId: session.terminal_reader_id });
+      if (!reader) fail("TERMINAL_NO_READER");
+      intent = await cancelRemote(session, reader);
+      expiredCancel = intent.status === "canceled";
+    }
     let failedAction = false;
-    if (session.status === "processing" && intent.status === "requires_payment_method") {
+    if (!expiredCancel && session.status === "processing" && intent.status === "requires_payment_method") {
       const reader = await terminalStore.findReader({ shopId, readerId: session.terminal_reader_id });
       if (!reader) fail("TERMINAL_NO_READER");
       const remote = await stripeCall(() => stripe.terminal.readers.retrieve(reader.stripe_reader_id));
       failedAction = matchingAction(remote, intent.id) && remote.action.status === "failed";
       if (failedAction) intent = await cancelRemote(session, reader);
     }
-    return databaseTransaction(async (store) => {
+    let expiredSession = null;
+    const result = await databaseTransaction(async (store) => {
       const current = await payment({ shopId, servicePointId, paymentId }, store, true);
       if (!active(current)) return dto(current, store, intent);
+      if (expiredCancel) {
+        expiredSession = await markExplicitCancel(current, store);
+        return dto(expiredSession, store, intent);
+      }
       if (failedAction) return dto(await markCounterFallback(current, "failed", store), store, intent);
       return dto(await reconcile(current, intent, store), store, intent);
     });
+    if (expiredSession) {
+      await removePreparedKioskOrders(expiredSession);
+    }
+    return result;
   });
 
   const cancelPayment = safe(async (input) => {
