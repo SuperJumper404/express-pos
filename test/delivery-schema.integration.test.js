@@ -1,8 +1,17 @@
 const assert = require("assert/strict");
 const { withDeliveryDatabase } = require("./helpers/deliveryDatabase");
 
+async function paymentStateHasSingleAuthority(readRows) {
+  const columns = await readRows(`SELECT TABLE_NAME AS table_name FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE() AND COLUMN_NAME = 'payment_status'
+      AND TABLE_NAME IN ('deliveries', 'orders', 'archives') ORDER BY TABLE_NAME`);
+  assert.deepEqual(columns.map((column) => column.table_name), ["archives", "orders"],
+    "Payment status belongs only to authoritative orders and archives");
+}
+
 async function legacyRowsStayLegacyAndLinksSurviveArchive() {
   await withDeliveryDatabase(async ({ pool, readRows, migrateDelivery }) => {
+    await paymentStateHasSingleAuthority(readRows);
     const [legacyOrder] = await readRows("SELECT * FROM orders WHERE id = 31");
     const [legacyArchive] = await readRows("SELECT * FROM archives WHERE id = 32");
     const [settingsForShop7] = await readRows("SELECT * FROM shop_delivery_settings WHERE shopid = 7");
@@ -60,6 +69,7 @@ async function legacyRowsStayLegacyAndLinksSurviveArchive() {
     assert.equal((await readRows("SELECT subtotal, is_takeaway FROM archives WHERE id = 32"))[0].subtotal, "12.50");
     assert.equal((await readRows("SHOW COLUMNS FROM orders LIKE 'delivery_id'")).length, 0);
     await migrateDelivery("up");
+    await paymentStateHasSingleAuthority(readRows);
     assert.equal((await readRows("SELECT fulfillment_type FROM archives WHERE id = 32"))[0].fulfillment_type, "takeaway");
     assert.equal((await readRows("SELECT enabled FROM shop_delivery_settings WHERE shopid = 7"))[0].enabled, 0);
   }, { beforeDeliveryMigrations: (db) => db.seedScenario({ legacy: true }) });
