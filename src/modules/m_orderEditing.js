@@ -4,7 +4,10 @@ const DomainError = require("../helpers/domainError");
 const { parseMoney } = require("../helpers/money");
 const { withTransaction } = require("../helpers/withTransaction");
 const { envSTRIPESTOCKRESERVATIONMINUTES } = require("../helpers/env");
-const { quoteOrderItems } = require("./m_orderQuote");
+const { quoteOrderItems, quoteDeliveryOrder } = require("./m_orderQuote");
+const { buildDeliveryQuotes } = require("./m_deliveryQuotes");
+const { buildDeliveryOrders } = require("./m_deliveryOrders");
+const { isOrderTakerAccess } = require("../helpers/staffAccess");
 const { adjustProductStock } = require("../helpers/productStockMutation");
 
 const EDITABLE_PAYMENT_STATUSES = new Set(["unpaid", "requires_payment"]);
@@ -20,7 +23,7 @@ const queryResult = async (connection, sql, params = []) => {
 const sqlRepository = {
   findOrder: ({ orderId, shopId, connection }) => queryResult(
     connection,
-    "SELECT * FROM orders WHERE id = ? AND shopid = ? LIMIT 1",
+    "SELECT orders.*, CAST(delivery_id AS CHAR) AS delivery_id, CAST(customer_account_id AS CHAR) AS customer_account_id FROM orders WHERE id = ? AND shopid = ? LIMIT 1",
     [orderId, shopId],
   ).then((rows) => rows[0] || null),
 
@@ -69,11 +72,14 @@ const sqlRepository = {
 
   lockOrder: ({ orderId, shopId, connection }) => queryResult(
     connection,
-    `SELECT * FROM orders
+    `SELECT orders.*, CAST(delivery_id AS CHAR) AS delivery_id, CAST(customer_account_id AS CHAR) AS customer_account_id FROM orders
      WHERE id = ? AND shopid = ?
      LIMIT 1 FOR UPDATE`,
     [orderId, shopId],
   ).then((rows) => rows[0] || null),
+
+  findDeliveryEditor: ({ userId, shopId, connection }) => queryResult(connection,
+    "SELECT id, access FROM users WHERE id = ? AND shopid = ?", [userId, shopId]).then(rows => rows[0] || null),
 
   lockDetails: ({ orderId, shopId, connection }) => queryResult(
     connection,
@@ -231,6 +237,7 @@ const sortedChoiceIds = (item) => (item.selections || [])
 const buildContentRevision = (order = {}, items = []) => {
   const canonicalContent = {
     order_id: valueForRevision(order.id),
+    ...(order.delivery_id && { delivery_id: String(order.delivery_id), delivery_version: order.delivery_version }),
     is_takeaway: [true, 1, "1"].includes(order.is_takeaway),
     items: [...items]
       .sort((left, right) => Number(left.orderdetail_id || left.id)
@@ -330,6 +337,12 @@ const validateAmendInput = (input = {}) => {
     expectedTotal,
     isTakeaway: normalizeOptionalBoolean(input.isTakeaway, "is_takeaway"),
     items: normalizeEditItems(input.items),
+    deliveryQuoteToken: input.deliveryQuoteToken,
+    addressResolutionToken: input.addressResolutionToken,
+    deliveryExpectedVersion: input.deliveryExpectedVersion,
+    deliveryIdempotencyKey: input.deliveryIdempotencyKey,
+    discountType: input.discountType,
+    discountValue: input.discountValue,
   };
 };
 
@@ -413,11 +426,17 @@ const buildOrderEditingModule = ({
   quoteOrderItems: quoteItems = quoteOrderItems,
   now = () => new Date(),
   reservationTtlMinutes = envSTRIPESTOCKRESERVATIONMINUTES,
+  deliveryQuotes = buildDeliveryQuotes(),
+  deliveryOrders = buildDeliveryOrders({ clock: now }),
 } = {}) => {
   const getEditableOrder = async ({ orderId, shopId, connection }) => {
     const order = await repository.findOrder({ orderId, shopId, connection });
     if (!order) return null;
-    if (!isOrderEditable(order)) {
+    if (order.delivery_id) {
+      const resolved = await deliveryOrders.resolveDeliveryOrder({ shopId, deliveryId: order.delivery_id, connection });
+      deliveryOrders.assertEditable(resolved);
+      order.delivery_version = resolved.delivery.version;
+    } else if (!isOrderEditable(order)) {
       throw new DomainError(
         422,
         "ORDER_NOT_EDITABLE",
@@ -478,7 +497,37 @@ const buildOrderEditingModule = ({
       if (!order) {
         throw new DomainError(404, "ORDER_NOT_FOUND", "Commande introuvable.");
       }
-      if (!isOrderEditable(order)) {
+      let deliveryContext;
+      let deliveryCheckout;
+      if (order.delivery_id) {
+        deliveryContext = await deliveryOrders.resolveDeliveryOrder({ shopId: amendment.shopId, deliveryId: order.delivery_id, connection, forUpdate: true });
+        order.delivery_version = deliveryContext.delivery.version;
+        const requestHash = crypto.createHash("sha256").update(JSON.stringify(amendment)).digest("hex");
+        if (typeof amendment.deliveryIdempotencyKey === "string") {
+          const replay = await deliveryOrders.findEditReplay({ shopId: amendment.shopId, idempotencyKey: amendment.deliveryIdempotencyKey, requestHash, connection });
+          if (replay) return replay;
+        }
+        deliveryOrders.assertEditable(deliveryContext);
+        if ((order.payment_provider === "stripe" && typeof input.prepareStripeReplacement !== "function")
+          || (order.payment_status === "requires_payment" && order.payment_provider !== "stripe")) {
+          throw new DomainError(409, "DELIVERY_EDIT_NOT_ALLOWED", "Engaged payment must be settled before delivery repricing");
+        }
+        if (!amendment.items.length) throw new DomainError(409, "DELIVERY_EDIT_NOT_ALLOWED", "Delivery cancellation requires its explicit workflow");
+        if (typeof amendment.deliveryQuoteToken !== "string" || typeof amendment.addressResolutionToken !== "string"
+          || !Number.isInteger(amendment.deliveryExpectedVersion) || amendment.deliveryExpectedVersion < 1
+          || typeof amendment.deliveryIdempotencyKey !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(amendment.deliveryIdempotencyKey)) {
+          throw new DomainError(409, "DELIVERY_QUOTE_CHANGED", "An explicit quote and revision must be confirmed");
+        }
+        if (deliveryContext.delivery.version !== amendment.deliveryExpectedVersion) throw new DomainError(409, "DELIVERY_VERSION_CONFLICT", "Delivery changed");
+        const actor = await repository.findDeliveryEditor({ userId: amendment.operatorId, shopId: amendment.shopId, connection });
+        if (!actor || !isOrderTakerAccess(actor.access)) throw new DomainError(403, "DELIVERY_FORBIDDEN", "Delivery edit is not authorized");
+        deliveryCheckout = {
+          ...amendment, actorId: amendment.operatorId, sessionSubject: "staff", requestHash,
+          actor: { subject: "staff", shopId: amendment.shopId, id: actor.id, access: actor.access },
+          discountType: amendment.discountType === undefined ? order.discount_type || "none" : amendment.discountType,
+          discountValue: amendment.discountValue === undefined ? Number(order.discount_value || 0) : amendment.discountValue,
+        };
+      } else if (!isOrderEditable(order)) {
         throw new DomainError(
           422,
           "ORDER_NOT_EDITABLE",
@@ -531,12 +580,12 @@ const buildOrderEditingModule = ({
         serverQuote: { total: 0, items: [] },
         requirements: new Map(),
       };
-      const nextIsTakeaway = amendment.isTakeaway === undefined
+      const nextIsTakeaway = deliveryContext ? true : amendment.isTakeaway === undefined
         ? [true, 1, "1"].includes(order.is_takeaway)
         : amendment.isTakeaway;
       if (amendment.items.length) {
         try {
-          quote = await quoteItems({
+          quote = deliveryContext ? await quoteDeliveryOrder({ checkout: deliveryCheckout, connection, deliveryQuotes, quoteItems }) : await quoteItems({
             shopId: amendment.shopId,
             items: amendment.items,
             isTakeaway: nextIsTakeaway,
@@ -678,10 +727,10 @@ const buildOrderEditingModule = ({
 
       const orderChanges = {
         subtotal: quote.total,
-        subtotal_before_discount: quote.total,
-        discount_type: "none",
-        discount_value: 0,
-        discount_amount: 0,
+        subtotal_before_discount: deliveryContext ? quote.deliveryQuote.itemsTotalCents / 100 : quote.total,
+        discount_type: deliveryContext ? quote.discount.type : "none",
+        discount_value: deliveryContext ? quote.discount.value : 0,
+        discount_amount: deliveryContext ? quote.discount.amount : 0,
         finished: timestamp,
         is_takeaway: nextIsTakeaway ? 1 : 0,
         ...(canceled && { status: 4 }),
@@ -732,15 +781,19 @@ const buildOrderEditingModule = ({
         }
       }
 
-      return {
+      const result = {
         order_id: Number(order.id),
         total: quote.total,
         canceled,
         content_revision: buildContentRevision(
-          { ...order, ...orderChanges },
+          { ...order, ...orderChanges, ...(deliveryContext && { delivery_version: order.delivery_version + 1 }) },
           revisionItems(insertedDetails, insertedSnapshots),
         ),
       };
+      if (deliveryContext) return deliveryOrders.reviseDeliveryForOrder({
+        checkout: deliveryCheckout, previous: deliveryContext, quote: quote.deliveryQuote, result, connection,
+      });
+      return result;
     });
   };
 

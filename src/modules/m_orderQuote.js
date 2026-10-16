@@ -4,6 +4,7 @@ const { parseMoney } = require("../helpers/money");
 const { buildVatSnapshot, resolveProductVatRate } = require("../helpers/vat");
 const { validateConfiguredItem } = require("../helpers/customizationRules");
 const { buildStockRequirements } = require("../helpers/stockRequirements");
+const { toCents, fromCents, calculateDeliveryDiscount } = require("../helpers/deliveryMoney");
 const {
   getResolvedProductConfigurations,
 } = require("./m_customizations");
@@ -131,7 +132,76 @@ const buildOrderQuoteModule = ({
 
 const orderQuoteModule = buildOrderQuoteModule();
 
+const stable = value => {
+  if (Array.isArray(value)) return value.map(stable);
+  if (!value || typeof value !== "object") return value;
+  return Object.keys(value).sort().reduce((result, key) => {
+    result[key] = stable(value[key]);
+    return result;
+  }, {});
+};
+const quoteIntent = quote => stable({
+  settingsRevision: quote.settingsRevision, addressSnapshot: quote.addressSnapshot,
+  distanceMeters: quote.distanceMeters, itemsTotalCents: quote.itemsTotalCents,
+  itemsDiscountCents: quote.itemsDiscountCents, itemsNetCents: quote.itemsNetCents,
+  deliveryFeeCents: quote.deliveryFeeCents, grandTotalCents: quote.grandTotalCents,
+  chargeSnapshot: quote.chargeSnapshot,
+});
+const canonicalItems = items => items.map(item => ({
+  productId: Number(item.productId), quantity: Number(item.quantity),
+  selectedChoiceIds: [...item.selectedChoiceIds].map(Number).sort((a, b) => a - b),
+})).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+
+const applyDeliveryDiscountToItems = (items, discountCents) => {
+  const gross = items.reduce((sum, item) => sum + BigInt(toCents(item.lineTotal)), 0n);
+  let cumulative = 0n;
+  let allocated = 0n;
+  return items.map(item => {
+    const line = BigInt(toCents(item.lineTotal));
+    cumulative += line;
+    const target = gross === 0n ? 0n : (BigInt(discountCents) * cumulative + gross / 2n) / gross;
+    const discount = target - allocated;
+    allocated = target;
+    const net = Number(line - discount);
+    const divisor = BigInt(10000 + Math.round(item.vatRate * 100));
+    const ht = Number((BigInt(net) * 10000n + divisor / 2n) / divisor);
+    return {
+      ...item, lineTotal: fromCents(net), discountedTotal: fromCents(net),
+      discountAmount: fromCents(Number(discount)), totalHt: fromCents(ht), totalVat: fromCents(net - ht),
+      unitPriceHt: Number((ht / 100 / item.quantity).toFixed(2)),
+      unitVat: Number(((net - ht) / 100 / item.quantity).toFixed(2)),
+    };
+  });
+};
+
+// Both checkout and explicit amendments compare signed intent with current server pricing.
+const quoteDeliveryOrder = async ({ checkout, connection, deliveryQuotes, quoteItems = orderQuoteModule.quoteOrderItems }) => {
+  const signed = deliveryQuotes.validateQuoteToken(checkout.deliveryQuoteToken, { shopId: checkout.shopId, connection });
+  const discount = { type: checkout.discountType, value: checkout.discountValue };
+  const current = await deliveryQuotes.createQuote({
+    shopId: checkout.shopId, items: checkout.items, discount,
+    addressResolutionToken: checkout.addressResolutionToken, connection,
+  });
+  if (JSON.stringify(quoteIntent(signed)) !== JSON.stringify(quoteIntent(current))
+    || JSON.stringify(canonicalItems(signed.items)) !== JSON.stringify(canonicalItems(checkout.items))
+    || JSON.stringify(stable(signed.discount)) !== JSON.stringify(stable(discount))
+    || toCents(checkout.expectedTotal) !== current.grandTotalCents) {
+    throw new DomainError(409, "DELIVERY_QUOTE_CHANGED", "Delivery quote must be reconfirmed", { server_quote: current });
+  }
+  const itemQuote = await quoteItems({ shopId: checkout.shopId, items: checkout.items, isTakeaway: true, connection });
+  const integerDiscount = calculateDeliveryDiscount({ itemsTotalCents: toCents(itemQuote.total), ...discount });
+  if (toCents(itemQuote.total) !== current.itemsTotalCents || integerDiscount.itemsDiscountCents !== current.itemsDiscountCents) {
+    throw new DomainError(409, "DELIVERY_QUOTE_CHANGED", "Delivery quote must be reconfirmed");
+  }
+  return {
+    ...itemQuote, total: fromCents(current.grandTotalCents), deliveryQuote: current,
+    resolvedItems: applyDeliveryDiscountToItems(itemQuote.resolvedItems, integerDiscount.itemsDiscountCents),
+    discount: { ...discount, amount: fromCents(integerDiscount.itemsDiscountCents), total: fromCents(current.grandTotalCents) },
+  };
+};
+
 module.exports = {
   buildOrderQuoteModule,
   quoteOrderItems: orderQuoteModule.quoteOrderItems,
+  quoteDeliveryOrder,
 };

@@ -44,6 +44,12 @@ const normalizeAmendBody = (body) => {
     "expected_total",
     "is_takeaway",
     "items",
+    "delivery_quote_token",
+    "address_resolution_token",
+    "delivery_expected_version",
+    "delivery_idempotency_key",
+    "discount_type",
+    "discount_value",
   ]);
   if (!allowedKeys(body, topLevelKeys)) throw invalidRequest("body");
   if (!Array.isArray(body.items)) throw invalidRequest("items");
@@ -78,6 +84,12 @@ const normalizeAmendBody = (body) => {
       isTakeaway: [true, 1, "1"].includes(isTakeaway),
     }),
     items,
+    ...(body.delivery_quote_token !== undefined && { deliveryQuoteToken: body.delivery_quote_token }),
+    ...(body.address_resolution_token !== undefined && { addressResolutionToken: body.address_resolution_token }),
+    ...(body.delivery_expected_version !== undefined && { deliveryExpectedVersion: body.delivery_expected_version }),
+    ...(body.delivery_idempotency_key !== undefined && { deliveryIdempotencyKey: body.delivery_idempotency_key }),
+    ...(body.discount_type !== undefined && { discountType: body.discount_type }),
+    ...(body.discount_value !== undefined && { discountValue: body.discount_value }),
   };
 };
 
@@ -96,7 +108,7 @@ const buildOrderEditingController = ({
     return custom(res, 200, "Commande editable recuperee.", null, order);
   } catch (error) {
     if (error instanceof DomainError) return domainResponse(res, error);
-    logger.error("Editable order read failed", error);
+    logger.error("Editable order read failed");
     return custom(res, 500, "Erreur serveur.", null, { code: "INTERNAL_ERROR" });
   }
 };
@@ -117,6 +129,7 @@ const buildAmendOrderController = ({
   let succeededPaymentIntent = null;
   let replacementAttemptToken = null;
   let transactionCommitted = false;
+  let deliveryEdit = false;
   try {
     const normalized = normalizeAmendBody(req.body || {});
     const result = await amend({
@@ -125,6 +138,7 @@ const buildAmendOrderController = ({
       operatorId: Number(req.id),
       ...normalized,
       prepareStripeReplacement: async ({ order, connection }) => {
+        deliveryEdit = Boolean(order.delivery_id);
         if (order.payment_status === "unpaid" && !order.stripe_payment_intent_id) {
           const rotated = await rotateReplacement({
             orderId: order.id,
@@ -228,7 +242,7 @@ const buildAmendOrderController = ({
         payment,
       });
     } catch (error) {
-      logger.error("Stripe replacement PaymentIntent creation failed", error);
+      logger.error("Stripe replacement PaymentIntent creation failed");
       return custom(res, 200, "Commande modifiee avec succes.", null, {
         ...result,
         payment_status: "unpaid",
@@ -241,12 +255,12 @@ const buildAmendOrderController = ({
       try {
         await syncSucceededPayment(succeededPaymentIntent);
       } catch (syncError) {
-        logger.error("Succeeded Stripe edit payment synchronization failed", syncError);
+        logger.error("Succeeded Stripe edit payment synchronization failed");
         return custom(res, 500, "Erreur serveur.", null, { code: "INTERNAL_ERROR" });
       }
       error = new DomainError(
         409,
-        "ORDER_NOT_EDITABLE",
+        deliveryEdit ? "DELIVERY_EDIT_NOT_ALLOWED" : "ORDER_NOT_EDITABLE",
         "Cette commande est deja encaissee.",
         { payment_status: "paid" },
       );
@@ -255,13 +269,13 @@ const buildAmendOrderController = ({
       try {
         await recoverCanceledPayment({ orderId, shopId, paymentIntentId: canceledPaymentIntentId });
       } catch (recoveryError) {
-        logger.error("Canceled Stripe edit payment recovery failed", recoveryError);
+        logger.error("Canceled Stripe edit payment recovery failed");
       }
       error.payment_refresh = "required";
       error.payment_refresh_message = "Rechargez la commande avant de reessayer.";
     }
     if (error instanceof DomainError) return domainResponse(res, error);
-    logger.error("Transactional order amendment failed", error);
+    logger.error("Transactional order amendment failed");
     return custom(res, 500, "Erreur serveur.", null, {
       code: "INTERNAL_ERROR",
       ...(canceledPaymentIntentId && {
@@ -299,7 +313,7 @@ const buildReplacementPaymentController = ({
     return custom(res, 200, "Paiement Stripe regenere.", null, payment);
   } catch (error) {
     if (error instanceof DomainError) return domainResponse(res, error);
-    logger.error("Stripe replacement PaymentIntent retry failed", error);
+    logger.error("Stripe replacement PaymentIntent retry failed");
     return custom(res, 500, "Erreur serveur.", null, { code: "INTERNAL_ERROR" });
   }
 };

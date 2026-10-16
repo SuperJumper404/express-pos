@@ -14,7 +14,10 @@ const { envSTRIPESTOCKRESERVATIONMINUTES } = require("../helpers/env");
 const {
   getResolvedProductConfigurations,
 } = require("./m_customizations");
-const { buildOrderQuoteModule } = require("./m_orderQuote");
+const { buildOrderQuoteModule, quoteDeliveryOrder } = require("./m_orderQuote");
+const { buildDeliveryQuotes } = require("./m_deliveryQuotes");
+const { buildDeliveryOrders } = require("./m_deliveryOrders");
+const { hashTrackingToken } = require("../helpers/deliveryTrackingToken");
 const { calculateDiscount } = require("../helpers/discount");
 const { normalizePaymentMethod } = require("../helpers/paymentMethod");
 
@@ -63,12 +66,20 @@ const canonicalPayload = (input) => {
     },
     expected_total: parseMoney(input.expectedTotal),
     discount_type: input.discountType || "none",
-    discount_value: parseMoney(input.discountValue) || 0,
+    discount_value: input.fulfillmentType === "delivery" ? input.discountValue : parseMoney(input.discountValue) || 0,
     is_takeaway: input.isTakeaway === true,
     items,
     payment_mode: typeof input.paymentMode === "string"
       ? input.paymentMode.trim().toLowerCase()
       : input.paymentMode,
+    ...(input.fulfillmentType === "delivery" && {
+      fulfillment_type: "delivery",
+      actor_id: input.actorId,
+      session_subject: input.sessionSubject,
+      delivery_quote_hash: hashTrackingToken(input.deliveryQuoteToken),
+      address_resolution_hash: hashTrackingToken(input.addressResolutionToken),
+      confirmation_secret_hash: hashTrackingToken(input.deliveryConfirmationSecret),
+    }),
   });
 };
 
@@ -187,6 +198,10 @@ const normalizeCheckoutRequestBody = (body = {}, { paymentModeOverride } = {}) =
       : { discountValue: body.discount_value }),
     isTakeaway: normalizeBoolean(body.is_takeaway, "is_takeaway"),
     clientOrderToken: body.client_order_token,
+    ...(body.fulfillment_type !== undefined && { fulfillmentType: body.fulfillment_type }),
+    ...(body.delivery_quote_token !== undefined && { deliveryQuoteToken: body.delivery_quote_token }),
+    ...(body.address_resolution_token !== undefined && { addressResolutionToken: body.address_resolution_token }),
+    ...(body.delivery_confirmation_secret !== undefined && { deliveryConfirmationSecret: body.delivery_confirmation_secret }),
     paymentMode: paymentModeOverride !== undefined
       ? paymentModeOverride
       : body.payment_mode !== undefined ? body.payment_mode : body.payment,
@@ -247,8 +262,11 @@ const validateCheckoutInput = (input = {}) => {
   }
   const discountValue = input.discountValue == null || input.discountValue === ""
     ? 0
-    : parseMoney(input.discountValue);
-  if (discountValue === null || discountValue < 0
+    : input.fulfillmentType === "delivery"
+      ? typeof input.discountValue === "number" ? input.discountValue
+        : typeof input.discountValue === "string" && /^\d+(\.\d+)?$/.test(input.discountValue) ? Number(input.discountValue) : null
+      : parseMoney(input.discountValue);
+  if (discountValue === null || !Number.isFinite(discountValue) || discountValue < 0
     || (discountType === "percent" && discountValue > 100)) {
     throw invalidRequest("discount_value");
   }
@@ -261,6 +279,14 @@ const validateCheckoutInput = (input = {}) => {
     throw invalidRequest("payment_mode");
   }
   const isTakeaway = normalizeBoolean(input.isTakeaway, "is_takeaway");
+  const delivery = input.fulfillmentType === "delivery";
+  if (input.fulfillmentType !== undefined && !["dine_in", "takeaway", "delivery"].includes(input.fulfillmentType)) throw invalidRequest("fulfillment_type");
+  if (delivery) {
+    for (const key of ["deliveryQuoteToken", "addressResolutionToken"]) {
+      if (typeof input[key] !== "string" || !input[key] || input[key].length > 20000) throw invalidRequest(key);
+    }
+    if (typeof input.deliveryConfirmationSecret !== "string" || !/^[A-Za-z0-9_-]{43,128}$/.test(input.deliveryConfirmationSecret)) throw invalidRequest("delivery_confirmation_secret");
+  }
 
   return {
     shopId: Number(input.shopId),
@@ -280,7 +306,11 @@ const validateCheckoutInput = (input = {}) => {
     expectedTotal,
     discountType: discountValue > 0 ? discountType : "none",
     discountValue: discountValue > 0 ? discountValue : 0,
-    isTakeaway,
+    isTakeaway: delivery ? true : isTakeaway,
+    ...(delivery && {
+      fulfillmentType: "delivery", deliveryQuoteToken: input.deliveryQuoteToken,
+      addressResolutionToken: input.addressResolutionToken, deliveryConfirmationSecret: input.deliveryConfirmationSecret,
+    }),
     clientOrderToken: input.clientOrderToken.trim(),
     paymentMode: input.paymentMode.trim().toLowerCase(),
   };
@@ -319,14 +349,20 @@ const sqlRepository = {
     [shopId, systemKey],
   ).then((rows) => rows[0] || null),
 
-  findOrderByToken: ({ shopId, token, connection }) => queryResult(
-    connection,
-    `SELECT id, shopid, subtotal, payment_status, client_order_payload_hash
-     FROM orders
-     WHERE shopid = ? AND client_order_token = ?
-     LIMIT 1`,
-    [shopId, token],
-  ).then((rows) => rows[0] || null),
+  findOrderByToken: async ({ shopId, token, connection }) => {
+    const [active] = await queryResult(connection,
+      `SELECT id, shopid, subtotal, payment_status, client_order_payload_hash
+       FROM orders WHERE shopid = ? AND client_order_token = ? LIMIT 1`, [shopId, token]);
+    if (active) return active;
+    // A delivery checkout token remains occupied after its active order is archived.
+    const [durable] = await queryResult(connection,
+      `SELECT d.origin_order_id AS id, d.shopid, e.request_hash AS client_order_payload_hash,
+       JSON_UNQUOTE(JSON_EXTRACT(e.result, '$.total')) AS subtotal,
+       JSON_UNQUOTE(JSON_EXTRACT(e.result, '$.payment_status')) AS payment_status
+       FROM deliveries d JOIN delivery_events e ON e.shopid = d.shopid AND e.delivery_id = d.id
+       AND e.event_type = 'checkout_created' WHERE d.shopid = ? AND d.client_order_token = ? LIMIT 1`, [shopId, token]);
+    return durable || null;
+  },
 
   getProducts: ({ shopId, productIds, connection }) => queryResult(
     connection,
@@ -535,7 +571,8 @@ const buildCheckoutController = ({ checkout, logger = console }) => async (req, 
       }
       return custom(res, error.status, error.message, null, data);
     }
-    logger.error("Transactional checkout failed", error);
+    if (body.fulfillment_type === "delivery") logger.error("Transactional delivery checkout failed");
+    else logger.error("Transactional checkout failed", error);
     return custom(res, 500, "Erreur serveur.", null, { code: "INTERNAL_ERROR" });
   }
 };
@@ -548,6 +585,8 @@ const buildCheckoutModule = ({
   buildStockRequirements: stockRequirements = buildStockRequirements,
   now = () => new Date(),
   reservationTtlMs = RESERVATION_TTL_MS,
+  deliveryQuotes = buildDeliveryQuotes(),
+  deliveryOrders = buildDeliveryOrders({ clock: now }),
 } = {}) => {
   const runWithConnection = (connection, work) => (
     connection ? work(connection) : runInTransaction(work)
@@ -780,13 +819,22 @@ const buildCheckoutModule = ({
   const createCheckout = async (input) => {
     const checkout = validateCheckoutInput(input);
     const payloadHash = canonicalPayloadHash(checkout);
+    const isDelivery = checkout.fulfillmentType === "delivery";
+    const deliveryReplay = connection => deliveryOrders.findCheckoutReplay({
+      shopId: checkout.shopId, token: checkout.clientOrderToken, requestHash: payloadHash, connection,
+    });
     const transactionWork = async (connection) => {
+      if (isDelivery) {
+        const replay = await deliveryReplay(connection);
+        if (replay) return replay;
+      }
       const existing = await repository.findOrderByToken({
         shopId: checkout.shopId,
         token: checkout.clientOrderToken,
         connection,
       });
       if (existing) {
+        if (isDelivery) throw new DomainError(409, "DELIVERY_IDEMPOTENCY_CONFLICT", "Checkout token is already used");
         if (String(existing.client_order_payload_hash) !== payloadHash) {
           throw new DomainError(
             409,
@@ -797,23 +845,36 @@ const buildCheckoutModule = ({
         return replayResult(existing);
       }
 
+      let deliveryPricing;
+      let deliveryActor;
+      if (isDelivery) {
+        const actor = checkout.actorId ? await repository.findUserById({ userId: checkout.actorId, shopId: checkout.shopId, connection }) : null;
+        const point = checkout.sessionSubject === "service_point" ? await repository.findServicePoint({ servicePointId: checkout.servicePointId, shopId: checkout.shopId, connection }) : null;
+        const staff = checkout.sessionSubject === "staff" && actor && isOrderTakerAccess(actor.access);
+        const web = checkout.sessionSubject === "service_point" && checkout.orderSource === "web" && point && point.type === "click_collect" && Number(point.is_active) === 1;
+        if ((!staff && !web) || (!staff && checkout.discountType !== "none")
+          || (!staff && resolveCheckoutPaymentState(checkout.paymentMode).payment_status === "paid")
+          || checkout.paymentMode === "stripe_terminal_kiosk") throw new DomainError(403, "DELIVERY_FORBIDDEN", "Delivery checkout is not authorized");
+        deliveryActor = { subject: checkout.sessionSubject, id: checkout.actorId || checkout.servicePointId, shopId: checkout.shopId, access: actor && actor.access };
+        deliveryPricing = await quoteDeliveryOrder({ checkout, connection, deliveryQuotes, quoteItems: quoteOrderItems });
+      }
       const {
         resolvedItems,
         total: subtotalBeforeDiscount,
         serverQuote: quote,
         requirements,
-      } = await quoteOrderItems({
+      } = deliveryPricing ? { ...deliveryPricing, total: deliveryPricing.deliveryQuote.itemsTotalCents / 100 } : await quoteOrderItems({
         shopId: checkout.shopId,
         items: checkout.items,
         isTakeaway: checkout.isTakeaway,
         connection,
       });
-      const discount = calculateDiscount({
+      const discount = deliveryPricing ? deliveryPricing.discount : calculateDiscount({
         subtotal: subtotalBeforeDiscount,
         type: checkout.discountType,
         value: checkout.discountValue,
       });
-      const discountedItems = applyDiscountToItems(
+      const discountedItems = deliveryPricing ? deliveryPricing.resolvedItems : applyDiscountToItems(
         resolvedItems,
         discount.amount,
       );
@@ -1028,18 +1089,34 @@ const buildCheckoutModule = ({
         });
       }
 
-      return {
+      const result = {
         orderId,
         total,
         idempotent_replay: false,
         payment_status: paymentState.payment_status,
       };
+      if (isDelivery) {
+        const delivery = await deliveryOrders.createDeliveryForOrder({
+          checkout: {
+            ...checkout, orderId, orderReference: String(timestampDate.valueOf()).slice(-4).padStart(4, "0"),
+            requestHash: payloadHash, actor: deliveryActor, result,
+          },
+          quote: deliveryPricing.deliveryQuote, connection,
+        });
+        return { ...result, ...delivery };
+      }
+      return result;
     };
 
     try {
       return await runInTransaction(transactionWork);
     } catch (error) {
       if (!isDuplicateKeyError(error)) throw error;
+      if (isDelivery) {
+        const replay = await deliveryReplay();
+        if (replay) return replay;
+        throw new DomainError(409, "DELIVERY_IDEMPOTENCY_CONFLICT", "Checkout token is already used");
+      }
       const winner = await repository.findOrderByToken({
         shopId: checkout.shopId,
         token: checkout.clientOrderToken,
