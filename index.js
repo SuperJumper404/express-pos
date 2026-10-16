@@ -13,6 +13,7 @@ const routerPrinting = require("./src/routers/r_printing");
 const routerStripe = require("./src/routers/r_stripe");
 const routerCustomizations = require("./src/routers/r_customizations");
 const routerServicePoints = require("./src/routers/r_servicePoints");
+const routerDelivery = require("./src/routers/r_delivery");
 const {
   buildNonOverlappingRunner,
   runStripePaymentMaintenance,
@@ -87,6 +88,7 @@ app.use(`${prefix}`, routerPrinting);
 app.use(`${prefix}`, routerStripe.routers);
 app.use(`${prefix}`, routerCustomizations);
 app.use(`${prefix}`, routerServicePoints);
+app.use(`${prefix}`, routerDelivery);
 app.get(`${prefix}/testapi`, (req, res) => {
   res.json({ success: true, message: "API redirigée correctement 👌" });
 });

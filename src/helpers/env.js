@@ -59,6 +59,11 @@ module.exports = {
     15,
   ),
   parsePositiveIntegerEnv,
+  // Delivery config is read at the service boundary; disabled legacy boot needs no new secrets.
+  getDeliveryConfig: () => ({
+    tokenSecret: process.env.DELIVERY_TOKEN_SECRET,
+    geocodingBaseUrl: process.env.DELIVERY_GEOCODING_BASE_URL || "https://data.geopf.fr/geocodage",
+  }),
 };
 
 console.log("Loaded env file:", envFile);
