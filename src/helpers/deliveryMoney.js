@@ -15,6 +15,24 @@ const toCents = (euros) => {
   return assertCents(Number(value));
 };
 const fromCents = (cents) => assertCents(cents) / 100;
+const calculateDeliveryDiscount = ({ itemsTotalCents, type = "none", value = 0 }) => {
+  assertCents(itemsTotalCents);
+  const invalidDiscount = () => new DomainError(400, "DELIVERY_REQUEST_INVALID", "Invalid delivery discount");
+  if (!["none", "amount", "percent"].includes(type) || typeof value !== "number" || !Number.isFinite(value) || value < 0
+    || (type === "none" && value !== 0)) throw invalidDiscount();
+  let itemsDiscountCents = 0;
+  if (type === "percent") {
+    // Hundredths of a percentage point: denominator 10000, with integer half-up rounding.
+    if (value > 100 || !/^\d+(\.\d{1,2})?$/.test(String(value))) throw invalidDiscount();
+    const scaledPercent = BigInt(toCents(value));
+    itemsDiscountCents = Number((BigInt(itemsTotalCents) * scaledPercent + 5000n) / 10000n);
+  } else if (type === "amount") {
+    let amountCents;
+    try { amountCents = toCents(value); } catch (_) { throw invalidDiscount(); }
+    itemsDiscountCents = Math.min(itemsTotalCents, amountCents);
+  }
+  return { itemsDiscountCents, itemsNetCents: itemsTotalCents - itemsDiscountCents };
+};
 const buildDeliveryFinancials = ({ itemsTotalCents, itemsDiscountCents, deliveryFeeCents, vatRate }) => {
   [itemsTotalCents, itemsDiscountCents, deliveryFeeCents].forEach(assertCents);
   if (itemsDiscountCents > itemsTotalCents || ![5.5, 10, 20].includes(vatRate)) throw invalid();
@@ -30,4 +48,4 @@ const buildDeliveryFinancials = ({ itemsTotalCents, itemsDiscountCents, delivery
     },
   };
 };
-module.exports = { assertCents, toCents, fromCents, buildDeliveryFinancials };
+module.exports = { assertCents, toCents, fromCents, calculateDeliveryDiscount, buildDeliveryFinancials };

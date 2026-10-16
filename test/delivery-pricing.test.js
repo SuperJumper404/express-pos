@@ -1,6 +1,6 @@
 const assert = require("assert");
 const { distanceMeters, priceDelivery, validateDeliverySettings } = require("../src/helpers/deliveryPricing");
-const { toCents, fromCents, buildDeliveryFinancials } = require("../src/helpers/deliveryMoney");
+const { toCents, fromCents, buildDeliveryFinancials, calculateDeliveryDiscount } = require("../src/helpers/deliveryMoney");
 const { buildDeliveryTokenCodec, signAddressResolution, validateAddressResolution } = require("../src/helpers/deliveryAddress");
 
 const settings = {
@@ -56,4 +56,21 @@ assert.throws(() => validateAddressResolution(token, now, { tokenCodec: codec, s
 assert.throws(() => validateAddressResolution(`${token.slice(0, -4)}fake`, now, { tokenCodec: codec }), { code: "DELIVERY_ADDRESS_INVALID" });
 assert.throws(() => codec.verify(codec.sign({ kind: "quote", expiresAt: now.toISOString() }) + ".extra"));
 assert.throws(() => codec.sign({ payload: "x".repeat(20000) }), { code: "DELIVERY_REQUEST_INVALID" });
+assert.equal(typeof calculateDeliveryDiscount, "function", "delivery discount must expose an integer cents helper");
+for (const [itemsTotalCents, type, value, expectedDiscount, expectedNet] of [
+  [105, "percent", 10, 11, 94],
+  [1999, "percent", 12.5, 250, 1749],
+  [5000, "percent", 0.01, 1, 4999],
+  [105, "percent", 10.01, 11, 94],
+  [Number.MAX_SAFE_INTEGER, "percent", 100, Number.MAX_SAFE_INTEGER, 0],
+  [Number.MAX_SAFE_INTEGER, "percent", 50, 4503599627370496, 4503599627370495],
+  [105, "amount", 0.105, 11, 94],
+  [105, "amount", 100, 105, 0],
+  [105, "none", 0, 0, 105],
+]) {
+  assert.deepEqual(calculateDeliveryDiscount({ itemsTotalCents, type, value }), { itemsDiscountCents: expectedDiscount, itemsNetCents: expectedNet });
+}
+for (const [type, value] of [["percent", 0.001], ["percent", 100.01], ["amount", -1], ["percent", NaN], ["percent", Infinity], ["percent", "10"], ["none", 1], ["other", 0]]) {
+  assert.throws(() => calculateDeliveryDiscount({ itemsTotalCents: 105, type, value }), { code: "DELIVERY_REQUEST_INVALID" });
+}
 console.log("delivery pricing tests passed (distance, bands, money, fiscal snapshot, signed address expiry/scope)");

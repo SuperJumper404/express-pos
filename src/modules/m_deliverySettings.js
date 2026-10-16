@@ -2,6 +2,11 @@ const DomainError = require("../helpers/domainError");
 const { validateDeliverySettings } = require("../helpers/deliveryPricing");
 const { validateAddressResolution } = require("../helpers/deliveryAddress");
 
+const parseSettingsCents = value => {
+  if (typeof value !== "string" || !/^(0|[1-9]\d*)$/.test(value) || value.length > 16
+    || BigInt(value) > BigInt(Number.MAX_SAFE_INTEGER)) throw new DomainError(422, "DELIVERY_SETTINGS_INVALID", "Invalid stored delivery amount");
+  return Number(value);
+};
 const defaultSettings = (shopId) => ({
   shopId, revision: 0, enabled: false, origin: null, maxDistanceMeters: 0, minimumItemsCents: 0,
   freeDeliveryEnabled: false, freeDeliveryThresholdCents: null,
@@ -20,15 +25,15 @@ const buildSqlDeliverySettingsRepository = ({ pool = require("../config/dbPool")
     );
     if (!rows.length) return defaultSettings(shopId);
     const row = rows[0];
-    return {
+    return validateDeliverySettings({
       shopId, revision: row.revision, enabled: row.enabled === 1,
       origin: row.origin_latitude === null ? null : { latitude: Number(row.origin_latitude), longitude: Number(row.origin_longitude) },
-      maxDistanceMeters: row.max_distance_meters, minimumItemsCents: Number(row.minimum_items_cents),
+      maxDistanceMeters: row.max_distance_meters, minimumItemsCents: parseSettingsCents(row.minimum_items_cents),
       freeDeliveryEnabled: row.free_delivery_enabled === 1,
-      freeDeliveryThresholdCents: row.free_delivery_threshold_cents === null ? null : Number(row.free_delivery_threshold_cents),
+      freeDeliveryThresholdCents: row.free_delivery_threshold_cents === null ? null : parseSettingsCents(row.free_delivery_threshold_cents),
       fiscalPolicy: { mode: row.fiscal_mode, vatRate: row.vat_rate === null ? null : Number(row.vat_rate) },
-      bands: rows.filter(value => value.up_to_meters !== null).map(value => ({ upToMeters: value.up_to_meters, feeCents: Number(value.fee_cents) })),
-    };
+      bands: rows.filter(value => value.up_to_meters !== null).map(value => ({ upToMeters: value.up_to_meters, feeCents: parseSettingsCents(value.fee_cents) })),
+    });
   };
   return {
     getSettings,
@@ -60,10 +65,10 @@ const buildSqlDeliverySettingsRepository = ({ pool = require("../config/dbPool")
   };
 };
 const buildDeliverySettings = ({ repository = buildSqlDeliverySettingsRepository(), tokenCodec, clock = () => new Date() } = {}) => ({
-  getSettings: input => repository.getSettings(input),
+  getSettings: async input => validateDeliverySettings(await repository.getSettings(input)),
   async updateSettings({ shopId, expectedRevision, settings }) {
     if (!Number.isInteger(expectedRevision) || expectedRevision < 0 || expectedRevision >= 4294967295 || !settings) throw new DomainError(422, "DELIVERY_SETTINGS_INVALID", "Expected settings revision is required");
-    const current = await repository.getSettings({ shopId });
+    const current = validateDeliverySettings(await repository.getSettings({ shopId }));
     if (current.revision !== expectedRevision) throw new DomainError(409, "DELIVERY_VERSION_CONFLICT", "Delivery settings changed");
     let origin = settings.origin;
     if (settings.originResolutionToken) {

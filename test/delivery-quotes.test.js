@@ -4,7 +4,7 @@ const { buildDeliveryQuotes } = require("../src/modules/m_deliveryQuotes");
 const { buildOrderQuoteModule } = require("../src/modules/m_orderQuote");
 const { buildDeliveryTokenCodec } = require("../src/helpers/deliveryAddress");
 const { buildDeliveryGeocoding, buildSqlGeocodingQuota, requestJson } = require("../src/services/deliveryGeocoding");
-const { buildDeliverySettings, buildSqlDeliverySettingsRepository } = require("../src/modules/m_deliverySettings");
+const { buildDeliverySettings, buildSqlDeliverySettingsRepository, defaultSettings } = require("../src/modules/m_deliverySettings");
 const { buildDeliveryController } = require("../src/controllers/c_delivery");
 const { buildDeliveryRouter } = require("../src/routers/r_delivery");
 
@@ -20,7 +20,103 @@ const feature = (id = "address-12", coords = [2.41, 48.82]) => ({ type: "Feature
 } });
 const response = () => ({ status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return body; } });
 
+const reviewQuoteFixture = async (overrides = {}) => {
+  const tokenCodec = buildDeliveryTokenCodec({ secret: "test-only-delivery-token-secret-32-bytes" });
+  const quotedSettings = { ...settings, minimumItemsCents: 0, freeDeliveryThresholdCents: 95, bands: [{ upToMeters: 6000, feeCents: 200 }], ...overrides };
+  const quotes = buildDeliveryQuotes({
+    repository: { getSettings: async () => quotedSettings }, tokenCodec,
+    quoteOrderItems: async () => ({ total: 1.05 }),
+    geocoder: { resolve: async () => ({ ...address, ...settings.origin, providerId: "review-fixture" }) },
+  });
+  const proof = await quotes.resolveAddress({ shopId: 7, address });
+  return { quotes, input: { shopId: 7, items: [{ productId: 21, quantity: 1, selectedChoiceIds: [] }], discount: { type: "percent", value: 10 }, addressResolutionToken: proof.addressResolutionToken } };
+};
+
+async function reviewDiscountRegression() {
+  const { quotes, input } = await reviewQuoteFixture();
+  const quote = await quotes.createQuote(input);
+  assert.deepEqual([quote.itemsDiscountCents, quote.itemsNetCents, quote.deliveryFeeCents, quote.grandTotalCents], [11, 94, 200, 294], "105c at 10% must round half up before the free threshold");
+  const minimum = await reviewQuoteFixture({ minimumItemsCents: 95 });
+  await assert.rejects(minimum.quotes.createQuote(minimum.input), { code: "DELIVERY_MINIMUM_NOT_MET" });
+}
+
+async function reviewSettingsRegression() {
+  const sqlRows = [3000, 6000].map((upToMeters, i) => ({
+    revision: 1, enabled: 1, origin_latitude: "48.8200000", origin_longitude: "2.3600000", max_distance_meters: 6000,
+    minimum_items_cents: "1500", free_delivery_enabled: 1, free_delivery_threshold_cents: "2500",
+    fiscal_mode: "configured_rate", vat_rate: "10.00", up_to_meters: upToMeters, fee_cents: i ? "400" : "200",
+  }));
+  for (const field of ["minimum_items_cents", "free_delivery_threshold_cents", "fee_cents"]) {
+    for (const bad of ["9007199254740993", "broken", "1.5", "1e3", "", "-1", null, Infinity]) {
+      const repository = buildSqlDeliverySettingsRepository({ pool: { query: async () => [sqlRows.map(row => ({ ...row, [field]: bad }))] } });
+      await assert.rejects(repository.getSettings({ shopId: 7 }), { code: "DELIVERY_SETTINGS_INVALID" }, `${field} must reject ${String(bad)} before returning settings`);
+    }
+  }
+  const unsafe = { ...settings, minimumItemsCents: 9007199254740992 };
+  const invalidService = buildDeliverySettings({ repository: { getSettings: async () => unsafe } });
+  await assert.rejects(invalidService.getSettings({ shopId: 7 }), { code: "DELIVERY_SETTINGS_INVALID" });
+  const invalidQuote = await reviewQuoteFixture(unsafe);
+  await assert.rejects(invalidQuote.quotes.createQuote(invalidQuote.input), { code: "DELIVERY_SETTINGS_INVALID" });
+  const missing = buildDeliverySettings({ repository: buildSqlDeliverySettingsRepository({ pool: { query: async () => [[]] } }) });
+  assert.equal((await missing.getSettings({ shopId: 7 })).enabled, false);
+}
+
+async function reviewAddressRegression() {
+  const streetAddress = { street: "Rue Nationale", postalCode: "75013", city: "Paris", country: "FR", complement: "Portail B" };
+  const streetFeature = { ...feature("street-nationale"), properties: { ...feature().properties, id: "street-nationale", type: "street", housenumber: undefined, street: "Rue Nationale", name: "Rue Nationale", label: "Rue Nationale 75013 Paris", score: 0.65 } };
+  const localityAddress = { street: "Les Ch\u00eanes", postalCode: "12340", city: "Bozouls", country: "FR" };
+  const localityFeature = { ...feature("locality-chenes", [2.72, 44.47]), properties: { id: "locality-chenes", _type: "address", type: "locality", name: "Les Ch\u00eanes", label: "Les Ch\u00eanes 12340 Bozouls", postcode: "12340", city: "Bozouls", citycode: "12033", score: 0.65 } };
+  const serviceFor = payload => buildDeliveryGeocoding({ reserveQuota: async () => {}, transport: async () => ({ type: "FeatureCollection", features: [payload] }) });
+  for (const [input, candidate, precision] of [[streetAddress, streetFeature, "street"], [localityAddress, localityFeature, "locality"]]) {
+    const service = serviceFor(candidate);
+    const selected = await service.resolve({ shopId: 7, address: input, candidateId: candidate.properties.id });
+    assert.equal(selected.precision, precision);
+    assert.equal(selected.street, input.street);
+    assert.equal(selected.providerLabel, candidate.properties.label);
+    assert.equal(selected.providerId, candidate.properties.id);
+    assert.deepEqual([selected.longitude, selected.latitude], candidate.geometry.coordinates);
+    const codec = buildDeliveryTokenCodec({ secret: "test-only-delivery-token-secret-32-bytes" });
+    const quotes = buildDeliveryQuotes({
+      repository: { getSettings: async () => ({ ...settings, origin: { latitude: selected.latitude, longitude: selected.longitude } }) },
+      quoteOrderItems: async () => ({ total: 25 }), geocoder: service, tokenCodec: codec,
+    });
+    const proof = await quotes.resolveAddress({ shopId: 7, address: input, candidateId: candidate.properties.id });
+    const quote = await quotes.createQuote({ shopId: 7, items: [{ productId: 21, quantity: 1, selectedChoiceIds: [] }], addressResolutionToken: proof.addressResolutionToken });
+    assert.equal(quote.addressSnapshot.precision, precision);
+    assert.equal(quote.addressSnapshot.providerLabel, candidate.properties.label);
+    assert.equal(quotes.validateQuoteToken(quote.quoteToken, { shopId: 7 }).addressSnapshot.precision, precision);
+    assert.equal(quote.addressSnapshot.complement, input.complement || "");
+    await assert.rejects(service.resolve({ shopId: 7, address: input }), { code: "DELIVERY_ADDRESS_INVALID" }, "unnumbered locations always require explicit selection");
+    await assert.rejects(service.resolve({ shopId: 7, address: { ...input, street: `12 ${input.street}` }, candidateId: candidate.properties.id }), { code: "DELIVERY_ADDRESS_INVALID" }, "never silently discard a requested house number");
+    for (const properties of [
+      { ...candidate.properties, type: "municipality" },
+      { ...candidate.properties, _type: "poi" },
+      { ...candidate.properties, postcode: "99999" },
+      { ...candidate.properties, city: "Autre commune" },
+      { ...candidate.properties, street: "Autre voie", name: "Autre voie" },
+      { ...candidate.properties, label: "" },
+    ]) {
+      const bad = serviceFor({ ...candidate, properties });
+      await assert.rejects(bad.resolve({ shopId: 7, address: input, candidateId: properties.id }), { code: "DELIVERY_ADDRESS_INVALID" });
+    }
+  }
+  const lowScoreHouse = feature();
+  lowScoreHouse.properties.score = 0.65;
+  assert.equal((await serviceFor(lowScoreHouse).resolve({ shopId: 7, address })).precision, "housenumber");
+  await assert.rejects(serviceFor(feature()).resolve({ shopId: 7, address: { ...address, street: "13 rue de l'\u00c9glise" }, candidateId: "address-12" }), { code: "DELIVERY_ADDRESS_INVALID" });
+}
+
+async function reviewRegressions() {
+  const failures = [];
+  for (const [name, test] of [["I1 integer discount thresholds", reviewDiscountRegression], ["I2 loaded settings safety", reviewSettingsRegression], ["I3 selected postal precision", reviewAddressRegression]]) {
+    try { await test(); console.log(`PASS ${name}`); }
+    catch (error) { console.error(`FAIL ${name}: ${error.message}`); failures.push(error); }
+  }
+  assert.equal(failures.length, 0, "Task2 review regressions must all pass");
+}
+
 async function unitTests() {
+  await reviewRegressions();
   for (const failure of ["release-null", "release-throw", "rollback-throw"]) {
     let destroyed = false;
     let released = false;
@@ -190,7 +286,7 @@ async function unitTests() {
 
   const empty = buildDeliverySettings({ repository: { getSettings: async ({ shopId }) => ({ shopId, revision: 0, enabled: false, origin: null, maxDistanceMeters: 0, minimumItemsCents: 0, freeDeliveryEnabled: false, freeDeliveryThresholdCents: null, fiscalPolicy: { mode: "configured_rate", vatRate: null }, bands: [] }) } });
   assert.equal((await empty.getSettings({ shopId: 7 })).enabled, false);
-  const disabledQuotes = buildDeliveryQuotes({ repository: { getSettings: async () => ({ enabled: false }) } });
+  const disabledQuotes = buildDeliveryQuotes({ repository: { getSettings: async ({ shopId }) => defaultSettings(shopId) } });
   await assert.rejects(disabledQuotes.createQuote(input), { code: "DELIVERY_DISABLED" });
   const { execFileSync } = require("child_process");
   const childEnv = { ...process.env, ENV_FILE: ".env.delivery-test-does-not-exist" };
@@ -205,6 +301,17 @@ async function databaseTests() {
     await seedScenario();
     const settingsService = buildDeliverySettings({ repository: buildSqlDeliverySettingsRepository({ pool }) });
     assert.equal((await settingsService.getSettings({ shopId: 7 })).enabled, false);
+    await pool.query("UPDATE shop_delivery_settings SET minimum_items_cents = '9007199254740991', free_delivery_threshold_cents = '9007199254740991', max_distance_meters = 6000 WHERE shopid = 7");
+    await pool.query("INSERT INTO shop_delivery_fee_bands (shopid, up_to_meters, fee_cents) VALUES (7, 6000, '9007199254740991')");
+    const maximum = await settingsService.getSettings({ shopId: 7 });
+    assert.deepEqual([maximum.minimumItemsCents, maximum.freeDeliveryThresholdCents, maximum.bands[0].feeCents], [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]);
+    for (const field of ["minimum_items_cents", "free_delivery_threshold_cents", "fee_cents"]) {
+      const table = field === "fee_cents" ? "b" : "s";
+      const unsafeRead = buildSqlDeliverySettingsRepository({ pool: { query: (sql, params) => pool.query(sql.replace(`CAST(${table}.${field} AS CHAR)`, "CAST('9007199254740993' AS CHAR)"), params) } });
+      await assert.rejects(unsafeRead.getSettings({ shopId: 7 }), { code: "DELIVERY_SETTINGS_INVALID" }, "reject an unsafe CHAR returned by actual MySQL, even though stored values obey CHECK constraints");
+    }
+    await pool.query("DELETE FROM shop_delivery_fee_bands WHERE shopid = 7");
+    await pool.query("UPDATE shop_delivery_settings SET minimum_items_cents = 0, free_delivery_threshold_cents = NULL, max_distance_meters = 0 WHERE shopid = 7");
     const validOriginCodec = buildDeliveryTokenCodec({ secret: "test-only-delivery-token-secret-32-bytes" });
     const { signAddressResolution } = require("../src/helpers/deliveryAddress");
     const originToken = signAddressResolution({ shopId: 7, addressSnapshot: { ...address, latitude: 48.82, longitude: 2.36, providerId: "fixture" }, now: new Date(), tokenCodec: validOriginCodec });

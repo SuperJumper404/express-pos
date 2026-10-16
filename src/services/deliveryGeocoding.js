@@ -7,6 +7,33 @@ const { validCoordinates } = require("../helpers/deliveryPricing");
 
 const unavailable = () => new DomainError(503, "DELIVERY_GEOCODING_UNAVAILABLE", "Address provider unavailable; retry later");
 const invalid = (candidates = []) => new DomainError(422, "DELIVERY_ADDRESS_INVALID", "Select an unambiguous postal address", { candidates });
+const postalText = value => typeof value === "string" ? value.normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+  .toLowerCase().replace(/\u0153/g, "oe").replace(/[^a-z0-9]+/g, " ").trim() : "";
+const postalCandidate = (feature, address) => {
+  const p = feature.properties;
+  if (p._type !== "address" || !["housenumber", "street", "locality"].includes(p.type)
+    || typeof p.id !== "string" || !p.id.trim() || typeof p.label !== "string" || !p.label.trim()
+    || p.postcode !== address.postalCode || !postalText(p.city) || postalText(p.city) !== postalText(address.city)) return null;
+  const requestedNumber = address.street.match(/^(\d+(?:\s*(?:bis|ter|quater|[a-z]))?)[\s,]+(.+)$/i);
+  let street;
+  if (p.type === "housenumber") {
+    if (!requestedNumber || typeof p.housenumber !== "string" || !postalText(p.street)
+      || postalText(requestedNumber[1]).replace(/ /g, "") !== postalText(p.housenumber).replace(/ /g, "")
+      || postalText(requestedNumber[2]) !== postalText(p.street)) return null;
+    street = `${p.housenumber} ${p.street}`;
+  } else {
+    // A named postal place is selectable, not a fallback for a numbered address or another locality.
+    if (/^\d/.test(address.street) || p.housenumber) return null;
+    street = p.type === "locality" ? p.name : (p.street || p.name);
+    if (!postalText(street) || postalText(street) !== postalText(address.street)) return null;
+  }
+  return {
+    providerId: p.id, providerLabel: p.label, precision: p.type,
+    street, postalCode: p.postcode, city: p.city, country: "FR",
+    ...(typeof p.citycode === "string" ? { cityCode: p.citycode } : {}),
+    longitude: feature.geometry.coordinates[0], latitude: feature.geometry.coordinates[1],
+  };
+};
 const requestJson = (url, { timeoutMs = 5000 } = {}) => new Promise((resolve, reject) => {
   const transport = url.protocol === "https:" ? https : http;
   const request = transport.get(url, { headers: { Accept: "application/json" } }, response => {
@@ -122,21 +149,9 @@ const buildDeliveryGeocoding = ({
       const normalized = normalizeAddress(address);
       const postal = { street: normalized.street, postalCode: normalized.postalCode, city: normalized.city, country: normalized.country };
       const features = await search({ shopId, postal });
-      const candidates = features.filter(feature => {
-        const p = feature && feature.properties;
-        const geometry = feature && feature.geometry;
-        return feature && feature.type === "Feature" && p && p._type === "address" && p.type === "housenumber"
-          && typeof p.id === "string" && typeof p.street === "string" && typeof p.housenumber === "string" && typeof p.city === "string"
-          && p.postcode === normalized.postalCode && Number.isFinite(p.score) && p.score >= 0.7
-          && geometry && geometry.type === "Point" && Array.isArray(geometry.coordinates) && geometry.coordinates.length === 2
-          && validCoordinates({ longitude: geometry.coordinates[0], latitude: geometry.coordinates[1] });
-      }).map(feature => ({
-        providerId: feature.properties.id, street: `${feature.properties.housenumber} ${feature.properties.street}`,
-        postalCode: feature.properties.postcode, city: feature.properties.city, country: "FR",
-        longitude: feature.geometry.coordinates[0], latitude: feature.geometry.coordinates[1],
-      }));
+      const candidates = features.map(feature => postalCandidate(feature, normalized)).filter(Boolean);
       const selected = candidateId === undefined
-        ? (candidates.length === 1 ? candidates[0] : null)
+        ? (candidates.length === 1 && candidates[0].precision === "housenumber" ? candidates[0] : null)
         : candidates.find(candidate => candidate.providerId === candidateId);
       if (!selected) throw invalid(candidates);
       return { ...normalized, ...selected };

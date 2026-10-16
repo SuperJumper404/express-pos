@@ -1,7 +1,6 @@
 const DomainError = require("../helpers/domainError");
-const { calculateDiscount } = require("../helpers/discount");
-const { toCents, fromCents, buildDeliveryFinancials } = require("../helpers/deliveryMoney");
-const { distanceMeters, priceDelivery } = require("../helpers/deliveryPricing");
+const { toCents, calculateDeliveryDiscount, buildDeliveryFinancials } = require("../helpers/deliveryMoney");
+const { distanceMeters, priceDelivery, validateDeliverySettings } = require("../helpers/deliveryPricing");
 const { buildDeliveryTokenCodec, signAddressResolution, validateAddressResolution, validTokenTime } = require("../helpers/deliveryAddress");
 
 const invalidRequest = () => new DomainError(400, "DELIVERY_REQUEST_INVALID", "Invalid delivery quote request");
@@ -19,7 +18,7 @@ const normalizeQuoteDiscount = (discount) => {
   if (!discount || !["none", "amount", "percent"].includes(discount.type) || typeof discount.value !== "number"
     || !Number.isFinite(discount.value) || discount.value < 0 || (discount.type === "percent" && discount.value > 100)
     || (discount.type === "none" && discount.value !== 0)) throw invalidRequest();
-  if (discount.type === "amount") toCents(discount.value);
+  calculateDeliveryDiscount({ itemsTotalCents: 0, type: discount.type, value: discount.value });
   return { type: discount.type, value: discount.value };
 };
 const buildDeliveryQuotes = ({
@@ -43,14 +42,13 @@ const buildDeliveryQuotes = ({
     const normalizedItems = normalizeQuoteItems(items);
     // Internal callers supply only an already-authorized discount intent; HTTP enforces actor privileges.
     const intent = normalizeQuoteDiscount(discount);
-    const settings = await repository.getSettings({ shopId, connection });
+    const settings = validateDeliverySettings(await repository.getSettings({ shopId, connection }));
     if (!settings.enabled) throw new DomainError(422, "DELIVERY_DISABLED", "Delivery is disabled");
     const now = clock();
     const addressSnapshot = validateAddressResolution(addressResolutionToken, now, { tokenCodec, shopId });
     const itemQuote = await quoteOrderItems({ shopId, items: normalizedItems, isTakeaway: true, connection });
     const itemsTotalCents = toCents(itemQuote.total);
-    const calculated = calculateDiscount({ subtotal: fromCents(itemsTotalCents), ...intent });
-    const itemsDiscountCents = toCents(calculated.amount);
+    const { itemsDiscountCents } = calculateDeliveryDiscount({ itemsTotalCents, ...intent });
     const distance = distanceMeters(settings.origin, addressSnapshot);
     const { deliveryFeeCents } = priceDelivery({ settings, distanceMeters: distance, itemsNetCents: itemsTotalCents - itemsDiscountCents });
     const financials = buildDeliveryFinancials({ itemsTotalCents, itemsDiscountCents, deliveryFeeCents, vatRate: settings.fiscalPolicy.vatRate });
