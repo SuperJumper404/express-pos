@@ -33,7 +33,7 @@ const {
 } = require("../helpers/staffPermissions");
 const { findServicePoint, findKioskByLoginId } = require("../modules/m_servicePoints");
 
-const STAFF_ACCESS_VALUES = new Set([0, 1, 4, 5]);
+const STAFF_ACCESS_VALUES = new Set([0, 1, 4, 5, 6]);
 const isStaffAccess = (access) => STAFF_ACCESS_VALUES.has(Number(access));
 const invalidCredentials = (res) =>
   custom(res, 422, "Identifiant ou code incorrect.", {}, null);
@@ -44,6 +44,8 @@ const withModulePermissions = (user) => ({
     user.access,
   ),
 });
+const courierProfile = user => ({ id: user.id, shopid: user.shopid,
+  username: user.username, access: Number(user.access), status: Number(user.status) });
 const normalizeStaffServicePointId = (value) => {
   const id = Number(value);
   return Number.isInteger(id) && id > 0 ? id : null;
@@ -98,7 +100,9 @@ const createSession = async (user) => {
     user.id,
   );
   const sessionUsers = await mSessionUser(user.id);
-  return sessionUsers.map(withModulePermissions);
+  return sessionUsers.map(row => Number(user.access) === 6
+    ? { ...courierProfile(row), token, expired: expired.toISOString().substring(0, 10), module_permissions: [] }
+    : withModulePermissions(row));
 };
 
 const createKioskSession = (point) => {
@@ -181,7 +185,7 @@ const registerWithStaffCredentials = async (req, res) => {
         data.module_permissions = JSON.stringify(
           normalizeModulePermissions(body.module_permissions, access),
         );
-        data.service_point_id = await validateStaffServicePoint({
+        data.service_point_id = access === 6 ? null : await validateStaffServicePoint({
           value: body.service_point_id,
           shopid: req.shopid,
         });
@@ -363,6 +367,9 @@ module.exports = {
       });
   },
   activation: (req, res) => {
+    if (req.sessionSubject !== "staff" || !req.currentUser || Number(req.currentUser.access) !== 0 || Number(req.currentUser.status) !== 1) {
+      return custom(res, 403, "Access denied", {}, null);
+    }
     const token = req.params.token;
     const email = req.params.email;
     const position = req.params.position;
@@ -449,7 +456,7 @@ module.exports = {
       return success(res, "Déconnexion réussie !", {}, true);
     }
 
-    const id = req.body.id;
+    const id = Number(req.access) === 6 ? req.id : req.body.id;
     const data = {
       token: null,
       expired: null,
@@ -468,6 +475,9 @@ module.exports = {
       });
   },
   profileMe: (req, res) => {
+    if (Number(req.access) === 6) {
+      return success(res, "OK", null, [courierProfile(req.currentUser)]);
+    }
     const authorization = req.headers.authorization;
     const token = authorization.split(" ");
     mProfileMe(token[1])
@@ -508,6 +518,12 @@ module.exports = {
     body.updated = new Date();
     const id = req.params.id;
     const detail = await mDetailUser(id);
+    if (!detail[0] || String(detail[0].shopid) !== String(req.shopid)) return custom(res, 404, "Utilisateur introuvable.", {}, null);
+    const nextAccess = body.access === undefined ? Number(detail[0].access) : Number(body.access);
+    if (nextAccess === 6) {
+      body.module_permissions = "[]";
+      body.service_point_id = null;
+    }
     if (Object.prototype.hasOwnProperty.call(body, "module_permissions")) {
       const access =
         body.access === undefined ? detail[0].access : Number(body.access);
@@ -515,7 +531,7 @@ module.exports = {
         normalizeModulePermissions(body.module_permissions, access),
       );
     }
-    if (Object.prototype.hasOwnProperty.call(body, "service_point_id")) {
+    if (nextAccess !== 6 && Object.prototype.hasOwnProperty.call(body, "service_point_id")) {
       body.service_point_id = await validateStaffServicePoint({
         value: body.service_point_id,
         shopid: req.shopid,
@@ -559,6 +575,8 @@ module.exports = {
     try {
       const id = req.params.id;
       const callDetail = await mDetailUser(id);
+      if (!callDetail[0] || String(callDetail[0].shopid) !== String(req.shopid)) return custom(res, 404, "Utilisateur introuvable.", {}, null);
+      if (Number(callDetail[0].access) === 6) return custom(res, 409, "Deactivate the courier account to preserve history.", {}, null);
       mDeleteUser(id)
         .then((response) => {
           if (response.affectedRows) {

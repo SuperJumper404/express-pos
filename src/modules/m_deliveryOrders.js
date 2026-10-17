@@ -3,6 +3,7 @@ const DomainError = require("../helpers/domainError");
 const { toCents, fromCents, assertCents } = require("../helpers/deliveryMoney");
 const { createTrackingToken, hashTrackingToken } = require("../helpers/deliveryTrackingToken");
 const { isOrderTakerAccess } = require("../helpers/staffAccess");
+const { isCourier, isDeliveryOperator, assertDeliveryOwner } = require("../helpers/deliveryAuthorization");
 
 const json = value => typeof value === "string" ? JSON.parse(value) : value;
 const date = value => new Date(value).toISOString().slice(0, 19).replace("T", " ");
@@ -53,16 +54,37 @@ const financialsFor = (delivery, order) => {
   };
 };
 const toDeliveryView = ({ delivery, order, actor }) => {
-  const pending = ["requires_payment", "processing"].includes(order.payment_status);
-  const staff = actor && actor.subject === "staff" && String(actor.shopId) === String(delivery.shopid) && isOrderTakerAccess(actor.access);
+  const courier = isCourier(actor);
+  if (courier) assertDeliveryOwner(actor, delivery);
+  const pending = !["paid", "refunded", "unpaid"].includes(order.payment_status) ||
+    (order.payment_status === "unpaid" && order.payment_provider === "stripe");
+  const staff = isDeliveryOperator(actor) && String(actor.shopId) === String(delivery.shopid);
+  const closed = ["delivered", "failed", "canceled"].includes(delivery.delivery_status) || Boolean(delivery.closed_at);
+  const due = order.payment_status === "paid" || order.payment_status === "refunded" ? 0 : toCents(order.subtotal);
+  const preparation = order.status == null ? delivery.preparation_status : order.status;
+  const actions = [];
+  if (!pending && !closed) {
+    if (staff) {
+      if (["unassigned", "assigned"].includes(delivery.delivery_status)) actions.push("assign");
+      if (delivery.delivery_status === "issue") actions.push("resolveIssue");
+      if (["assigned", "in_transit"].includes(delivery.delivery_status)) actions.push("reportIssue");
+    }
+    if (courier) {
+      if (delivery.delivery_status === "assigned" && Number(preparation) === 3) actions.push("pickup");
+      if (delivery.delivery_status === "in_transit" && due === 0) actions.push("deliver");
+      if (["assigned", "in_transit"].includes(delivery.delivery_status)) actions.push("reportIssue");
+    }
+  }
   return {
     id: String(delivery.id), version: delivery.version, shopId: delivery.shopid,
-    orderReference: delivery.order_reference, preparationStatus: order.status == null ? delivery.preparation_status : order.status,
+    orderReference: delivery.order_reference, preparationStatus: preparation,
     paymentStatus: order.payment_status, deliveryStatus: delivery.delivery_status, courierId: delivery.courier_id,
     acceptanceStatus: pending ? "payment_pending" : "accepted",
-    remainingDueCents: order.payment_status === "paid" || order.payment_status === "refunded" ? 0 : toCents(order.subtotal),
-    addressSnapshot: json(delivery.address_snapshot), financials: financialsFor(delivery, order),
-    allowedActions: staff && !pending && ["unassigned", "assigned"].includes(delivery.delivery_status) ? ["assign"] : [],
+    remainingDueCents: due,
+    ...(!courier || !closed ? { addressSnapshot: json(delivery.address_snapshot),
+      contactSnapshot: json(delivery.contact_snapshot), ...(order.items ? { items: order.items } : {}) } : {}),
+    financials: financialsFor(delivery, order),
+    allowedActions: actions,
   };
 };
 

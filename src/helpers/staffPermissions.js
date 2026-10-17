@@ -5,6 +5,7 @@ const ACCESS = {
   CLICK_AND_COLLECT: 3,
   SERVER: 4,
   KITCHEN: 5,
+  COURIER: 6,
 };
 
 const STAFF_MODULE_KEYS = [
@@ -18,6 +19,7 @@ const STAFF_MODULE_KEYS = [
   "reports",
   "website",
   "borne",
+  "delivery",
 ];
 
 const DEFAULT_MODULES_BY_ACCESS = {
@@ -32,6 +34,7 @@ const getDefaultModulePermissions = (access) => [
 ];
 
 const normalizeModulePermissions = (value, access) => {
+  if (Number(access) === ACCESS.COURIER) return [];
   const source = Array.isArray(value)
     ? value
     : getDefaultModulePermissions(access);

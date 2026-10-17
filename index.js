@@ -14,6 +14,7 @@ const routerStripe = require("./src/routers/r_stripe");
 const routerCustomizations = require("./src/routers/r_customizations");
 const routerServicePoints = require("./src/routers/r_servicePoints");
 const routerDelivery = require("./src/routers/r_delivery");
+const routerCourier = require("./src/routers/r_courier");
 const {
   buildNonOverlappingRunner,
   runStripePaymentMaintenance,
@@ -74,6 +75,7 @@ app.use((error, req, res, next) => {
   }
   return next(error);
 });
+app.use(`${prefix}`, require("./src/helpers/middleware/auth").authenticationIfPresent);
 app.get(`${prefix}`, function (req, res) {
   res.json({ msg: "Hai" });
 });
@@ -89,6 +91,7 @@ app.use(`${prefix}`, routerStripe.routers);
 app.use(`${prefix}`, routerCustomizations);
 app.use(`${prefix}`, routerServicePoints);
 app.use(`${prefix}`, routerDelivery);
+app.use(`${prefix}`, routerCourier);
 app.get(`${prefix}/testapi`, (req, res) => {
   res.json({ success: true, message: "API redirigée correctement 👌" });
 });

@@ -1,6 +1,7 @@
 const DomainError = require("../helpers/domainError");
 const { custom, failed } = require("../helpers/response");
 const { isOrderTakerAccess } = require("../helpers/staffAccess");
+const { deliveryActor, deliveryEndpoint, deliveryMutation } = require("./c_courier");
 
 const forbidden = () => new DomainError(403, "DELIVERY_FORBIDDEN", "Access denied");
 const requireQuoteActor = req => {
@@ -12,6 +13,7 @@ const requireAdmin = req => {
 const buildDeliveryController = ({
   quotes = require("../modules/m_deliveryQuotes").buildDeliveryQuotes(),
   settings = require("../modules/m_deliverySettings").buildDeliverySettings(),
+  dispatch = require("../modules/m_deliveryDispatch").buildDeliveryDispatch(),
 } = {}) => {
   const endpoint = work => async (req, res) => {
     try { return custom(res, 200, "OK", null, await work(req)); }
@@ -24,6 +26,13 @@ const buildDeliveryController = ({
     }
   };
   return {
+    list: deliveryEndpoint(req => dispatch.list({ actor: deliveryActor(req) })),
+    detail: deliveryEndpoint(req => dispatch.get({ actor: deliveryActor(req), deliveryId: req.params.id })),
+    assign: deliveryEndpoint(req => dispatch.assign(deliveryMutation(req))),
+    resolveIssue: deliveryEndpoint(req => dispatch.resolveIssue(deliveryMutation(req))),
+    reportIssue: deliveryEndpoint(req => dispatch.reportIssue(deliveryMutation(req))),
+    couriers: deliveryEndpoint(req => dispatch.couriers({ actor: deliveryActor(req) })),
+    courierAvailability: deliveryEndpoint(req => dispatch.availability({ actor: deliveryActor(req), courierId: Number(req.params.id), available: (req.body || {}).available })),
     resolveAddress: endpoint(req => {
       requireQuoteActor(req);
       const body = req.body || {};

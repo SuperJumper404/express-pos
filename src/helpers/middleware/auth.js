@@ -2,12 +2,18 @@ const { custom, failed } = require("../response");
 const jwt = require("jsonwebtoken");
 const { envJWTKEY } = require("../env");
 const { parseModulePermissions } = require("../staffPermissions");
+const { assertStaffSurface } = require("../deliveryAuthorization");
+const prefix = require("../../config/prefix");
+const relativeStaffPath = req => {
+  const path = (req.originalUrl || req.path || "/").split("?")[0];
+  return path.toLowerCase().startsWith(prefix.toLowerCase() + "/") ? path.slice(prefix.length) : path;
+};
 
 const STAFF_ACCESS = new Set([0, 1, 4, 5]);
 const defaultFindUserByIdAndShop = async ({ id, shopId }) => {
   const pool = require("../../config/dbPool");
   const [rows] = await pool.query(
-    `SELECT id, access, status, module_permissions
+    `SELECT id, shopid, username, access, status, module_permissions
      FROM users
      WHERE id = ? AND shopid = ?
      LIMIT 1`,
@@ -38,39 +44,65 @@ const buildModuleAuthorization = ({
 
 const authorizeStocks = buildModuleAuthorization({ moduleKey: "stocks" });
 const authorizeCashRegister = buildModuleAuthorization({ moduleKey: "cashregister" });
+const buildAuthentication = ({ findUserByIdAndShop = defaultFindUserByIdAndShop } = {}) => (req, res, next) => {
+  const authorization = req.headers.authorization;
+  if (!authorization) return custom(res, 401, "Token requis, veuillez vous reconnecter.", {}, null);
+  let decoded;
+  try { decoded = jwt.verify(authorization.split(" ")[1], envJWTKEY); }
+  catch (error) { return failed(res, "Session expired", "SESSION_EXPIRED", 401); }
+  const surfacePath = relativeStaffPath(req);
+  let accountPath;
+  try { accountPath = decodeURIComponent(surfacePath).toLowerCase().replace(/\/$/, ""); }
+  catch (error) { return custom(res, 400, "Invalid request path", {}, null); }
+  const accountWrite = (req.method === "POST" && accountPath === "/register") ||
+    (["PATCH", "PUT", "DELETE"].includes(req.method) && /^\/user\/[^/]+(?:\/staff-credentials)?$/.test(accountPath));
+  req.shopid = decoded.shopid;
+  if (decoded.subject_type === "service_point") {
+    if (accountWrite) return custom(res, 403, "Access denied", {}, null);
+    req.access = decoded.access;
+    req.sessionSubject = "service_point";
+    req.servicePointId = decoded.service_point_id;
+    req.orderSource = decoded.source;
+    req.id = null;
+    req.email = null;
+    return next();
+  }
+  if ((decoded.subject_type && decoded.subject_type !== "staff") ||
+    (decoded.subject && decoded.subject !== "staff") || !decoded.id || !decoded.shopid) return custom(res, 403, "Access denied", {}, null);
+  return (async () => {
+    try {
+      const user = await findUserByIdAndShop({ id: decoded.id, shopId: req.shopid });
+      if (!user || Number(user.status) !== 1) return custom(res, 403, "Access denied", {}, null);
+      req.id = user.id;
+      req.access = Number(user.access);
+      req.email = decoded.email;
+      req.sessionSubject = "staff";
+      req.currentUser = user;
+      assertStaffSurface({ access: req.access, method: req.method, path: surfacePath });
+      if (req.access !== 0 && accountWrite) {
+        return custom(res, 403, "Access denied", {}, null);
+      }
+      return next();
+    } catch (error) {
+      return failed(res, "Access denied", error.code === "DELIVERY_FORBIDDEN" ? error.code : "AUTH_UNAVAILABLE", error.status || 503);
+    }
+  })();
+};
+const authentication = buildAuthentication();
+const authenticationIfPresent = (req, res, next) => {
+  const path = relativeStaffPath(req);
+  // Credential/proof entry points must remain usable with an expired staff header.
+  if (req.method === "POST" && (/^\/(login|table-access)\/?$/i.test(path) ||
+    /^\/shopInfo\/click-and-collect\/[^/]+\/session\/?$/i.test(path))) return next();
+  return req.headers.authorization ? authentication(req, res, next) : next();
+};
 module.exports = {
+  buildAuthentication,
+  authenticationIfPresent,
   buildModuleAuthorization,
   authorizeStocks,
   authorizeCashRegister,
-  authentication: (req, res, next) => {
-    const authorization = req.headers.authorization;
-    if (authorization) {
-      let token = authorization.split(" ");
-      jwt.verify(token[1], envJWTKEY, (error, decoded) => {
-        // console.log("Incomiing ", decoded);
-        if (!error) {
-          req.access = decoded.access;
-          req.shopid = decoded.shopid;
-          if (decoded.subject_type === "service_point") {
-            req.sessionSubject = "service_point";
-            req.servicePointId = decoded.service_point_id;
-            req.orderSource = decoded.source;
-            req.id = null;
-            req.email = null;
-          } else {
-            req.sessionSubject = "staff";
-            req.id = decoded.id;
-            req.email = decoded.email;
-          }
-          next();
-        } else {
-          failed(res, "Session expirée, veuillez vous reconnecter.", error.message, 401);
-        }
-      });
-    } else {
-      custom(res, 401, "Token requis, veuillez vous reconnecter.", {}, null);
-    }
-  },
+  authentication,
   authAdmin: (req, res, next) => {
     // console.log("Incomiing rqg ",req)
 

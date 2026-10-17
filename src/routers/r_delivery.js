@@ -8,6 +8,18 @@ const buildDeliveryRouter = ({
   router.post("/delivery/quotes", authentication, controller.createQuote);
   router.get("/delivery/settings", authentication, controller.getSettings);
   router.put("/delivery/settings", authentication, controller.updateSettings);
+  const operator = require("../helpers/middleware/auth").buildModuleAuthorization({ moduleKey: "delivery" });
+  const restaurant = (req, res, next) => {
+    if (req.sessionSubject !== "staff" || ![0, 1].includes(Number(req.access))) return require("../helpers/response").custom(res, 403, "Access denied", {}, null);
+    return operator(req, res, next);
+  };
+  router.get("/deliveries", authentication, restaurant, controller.list);
+  router.get("/deliveries/:id", authentication, restaurant, controller.detail);
+  router.post("/deliveries/:id/assign", authentication, restaurant, controller.assign);
+  router.post("/deliveries/:id/resolve-issue", authentication, restaurant, controller.resolveIssue);
+  router.post("/deliveries/:id/report-issue", authentication, restaurant, controller.reportIssue);
+  router.get("/delivery/couriers", authentication, restaurant, controller.couriers);
+  router.patch("/delivery/couriers/:id/availability", authentication, restaurant, controller.courierAvailability);
   return router;
 };
 module.exports = buildDeliveryRouter();

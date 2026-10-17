@@ -1,4 +1,4 @@
-const STAFF_ACCESS_VALUES = new Set([0, 1, 4, 5]);
+const STAFF_ACCESS_VALUES = new Set([0, 1, 4, 5, 6]);
 const ORDER_TAKER_ACCESS_VALUES = new Set([0, 1, 4]);
 
 const isStaffAccess = (access) => STAFF_ACCESS_VALUES.has(Number(access));
