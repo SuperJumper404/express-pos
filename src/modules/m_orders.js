@@ -424,6 +424,9 @@ const buildOrderArchiveModule = ({
       let deliveryContext;
       if (order.delivery_id != null) {
         deliveryContext = await deliveryOrders.resolveDeliveryOrder({ shopId: order.shopid, deliveryId: order.delivery_id, connection, forUpdate: true });
+        if (order.payment_status === "unpaid" && deliveryContext.delivery.delivery_status === "issue") {
+          throw new DomainError(409, "DELIVERY_TRANSITION_INVALID", "Resolve the delivery issue before manual settlement");
+        }
         if (Number(order.status) !== 3) {
           throw new DomainError(409, "DELIVERY_PREPARATION_NOT_FINISHED", "Delivery preparation must be finished before archive");
         }
@@ -1317,6 +1320,9 @@ module.exports.collectDeliveryOrderPayment = ({ orderId, shopId, paymentMethod, 
   const order = await deliveryOrders.resolveCommercialOrder({ orderId, shopId, connection, forUpdate: true });
   if (!order || order.delivery_id == null || order.archive_id != null) throw new DomainError(404, "ORDER_NOT_FOUND", "Order unavailable");
   const context = await deliveryOrders.resolveDeliveryOrder({ shopId, deliveryId: order.delivery_id, connection, forUpdate: true });
+  if (context.delivery.delivery_status === "issue") {
+    throw new DomainError(409, "DELIVERY_TRANSITION_INVALID", "Resolve the delivery issue before manual settlement");
+  }
   deliveryOrders.toDeliveryView(context);
   assertDeliverySettlementDiscount(order, discount);
   assertDeliveryCollectionAllowed(order);

@@ -69,7 +69,12 @@ async function main() {
     await db.pool.query("UPDATE users SET status = 1, courier_available = 1 WHERE id = 11");
     await db.pool.query(`INSERT INTO users (id, shopid, username, email, password, phone, access, status, created, clearpass, courier_available)
       VALUES (13,7,'Courier 13','13@example.test','not-a-login','',6,1,NOW(),'',1),
-      (14,7,'Admin','14@example.test','not-a-login','',0,1,NOW(),'',0)`);
+      (14,7,'Admin','14@example.test','not-a-login','',0,1,NOW(),'',0),
+      (15,7,'Server','15@example.test','not-a-login','',4,1,NOW(),'',0),
+      (16,7,'Kitchen','16@example.test','not-a-login','',5,1,NOW(),'',0),
+      (17,7,'Legacy customer','17@example.test','not-a-login','',3,1,NOW(),'',0),
+      (18,7,'Legacy cashier','18@example.test','not-a-login','',1,1,NOW(),'',0)`);
+    await db.pool.query("UPDATE users SET module_permissions = '[]' WHERE id = 18");
     let next = 100;
     const make = async ({ status = 3, payment = "paid", deliveryId } = {}) => {
       const id = next++;
@@ -252,8 +257,8 @@ async function main() {
     const server = app.listen(0, "127.0.0.1");
     await new Promise(resolve => server.once("listening", resolve));
     const url = `http://127.0.0.1:${server.address().port}/baseurl/api/v1`;
-    const http = async (path, { method = "GET", id = 11, access = 0, body } = {}) => {
-      const token = jwt.sign({ id, access, shopid: 7, module_permissions: ["orders", "stocks", "delivery"] }, process.env.JWTKEY);
+    const http = async (path, { method = "GET", id = 11, access = 0, body, claims = {} } = {}) => {
+      const token = jwt.sign({ id, access, shopid: 7, module_permissions: ["orders", "stocks", "delivery"], ...claims }, process.env.JWTKEY);
       const res = await fetch(url + path, { method, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
       return { status: res.status, cache: res.headers.get("cache-control"), body: await res.text() };
     };
@@ -297,12 +302,134 @@ async function main() {
       assert.equal(session.staff_pin_hash, undefined);
       console.log("PASS SQL actual HTTP courier/operator routes, stale admin JWT, availability and active-account reload");
       await db.pool.query("UPDATE users SET courier_available = 1 WHERE id = 11");
-      const unresolved = await make({ payment: "unpaid" });
-      await dispatch.assign(mutation(unresolved, operator, 1, "legacy-issue-assign", { courierId: 11 }));
-      await dispatch.reportIssue(mutation(unresolved, courier, 2, "legacy-issue", { reason: "Restaurant resolution required" }));
-      const collection = await http(`/orders/collect/${unresolved.id}`, { method: "POST", id: 10, access: 1, body: { payment_method: "cash" } });
-      assert.equal(collection.status, 409, "Unresolved issue must block the existing manual collection transaction (unowned m_orders.js)");
-      assert.equal((await db.readRows("SELECT payment_status FROM orders WHERE id = ?", [unresolved.id]))[0].payment_status, "unpaid");
+      const failures = [];
+      const test = async (name, work) => {
+        try { await work(); console.log(`PASS SQL ${name}`); }
+        catch (error) { failures.push(name); console.log(`FAIL SQL ${name}: ${error.code || error.name} actual=${error.actual} expected=${error.expected}`); }
+      };
+      const issue = async payment => {
+        const item = await make({ payment });
+        await dispatch.assign(mutation(item, operator, 1, `issue-assign-${item.id}`, { courierId: 11 }));
+        await dispatch.reportIssue(mutation(item, courier, 2, `issue-${item.id}`, { reason: "Restaurant resolution required" }));
+        return item;
+      };
+      await test("unresolved issue blocks actual manual collection then reasoned resume permits legacy cashier", async () => {
+        const item = await issue("unpaid");
+        const collection = await http(`/orders/collect/${item.id}`, { method: "POST", id: 10, body: { payment_method: "cash" } });
+        assert.equal(collection.status, 409, collection.body);
+        assert.equal(JSON.parse(collection.body).data.code, "DELIVERY_TRANSITION_INVALID");
+        assert.equal((await db.readRows("SELECT payment_status FROM orders WHERE id = ?", [item.id]))[0].payment_status, "unpaid");
+        await dispatch.resolveIssue(mutation(item, operator, 3, `resume-${item.id}`, { action: "resume", reason: "Restaurant authorizes retry before settlement" }));
+        const accepted = await http(`/orders/collect/${item.id}`, { method: "POST", id: 18, body: { payment_method: "cash" } });
+        assert.equal(accepted.status, 200, accepted.body);
+        const view = await dispatch.get({ actor: operator, deliveryId: item.deliveryId });
+        assert.equal(view.paymentStatus, "paid");
+        assert.equal(view.deliveryStatus, "assigned");
+        assert.equal(view.version, 4);
+        const events = await db.readRows("SELECT reason, actor_id FROM delivery_events WHERE delivery_id = ? AND event_type = 'resolveIssue'", [item.deliveryId]);
+        assert.equal(events.length, 1);
+        assert.equal(events[0].actor_id, "10");
+        assert.equal(events[0].reason, "Restaurant authorizes retry before settlement");
+      });
+      await test("unpaid issue blocks actual archive settlement without changing active rows", async () => {
+        const item = await issue("unpaid");
+        await assert.rejects(orders.mArchiveOrder(item.id, "cash", 7), { code: "DELIVERY_TRANSITION_INVALID", status: 409 });
+        const archived = await http(`/orders/archive/${item.id}`, { method: "POST", id: 10, body: { payment_method: "cash" } });
+        assert.equal(archived.status, 409, archived.body);
+        assert.equal(JSON.parse(archived.body).data.code, "DELIVERY_TRANSITION_INVALID");
+        assert.equal((await db.readRows("SELECT payment_status FROM orders WHERE id = ?", [item.id]))[0].payment_status, "unpaid");
+        assert.equal((await db.readRows("SELECT id FROM archives WHERE delivery_id = ?", [item.deliveryId])).length, 0);
+        await dispatch.resolveIssue(mutation(item, operator, 3, `archive-resume-${item.id}`, { action: "resume", reason: "Incident resolved before settlement" }));
+        assert.equal((await http(`/orders/archive/${item.id}`, { method: "POST", id: 18, body: { payment_method: "cash" } })).status, 200);
+        assert.equal((await dispatch.get({ actor: operator, deliveryId: item.deliveryId })).deliveryStatus, "assigned");
+      });
+      for (const [id, label, claims] of [[15, "server", {}], [16, "kitchen", {}], [17, "legacy customer", {}],
+        [14, "customer subject", { subject_type: "customer" }], [14, "point3", { subject_type: "service_point", access: 3, service_point_id: 701 }],
+        [14, "point2", { subject_type: "service_point", access: 2, service_point_id: 702 }]]) {
+        await test(`${label} cannot manually settle or archive an unpaid delivery`, async () => {
+          const item = await make({ payment: "unpaid" });
+          const forged = { payment_method: "cash", actor: { subject: "staff", id: 14, access: 0 }, access: 0, currentUser: { id: 14, access: 0, status: 1 } };
+          const collection = await http(`/orders/collect/${item.id}`, { method: "POST", id, claims, body: forged });
+          assert.equal(collection.status, 403, collection.body);
+          assert.equal((await http(`/orders/archive/${item.id}`, { method: "POST", id, claims, body: forged })).status, 403);
+          assert.equal((await db.readRows("SELECT payment_status FROM orders WHERE id = ?", [item.id]))[0].payment_status, "unpaid");
+        });
+      }
+      for (const claims of [{ subject_type: "service_point", access: 3, service_point_id: 701 }, { subject_type: "customer" }]) {
+        await test(`${claims.subject_type} cannot archive a paid delivery`, async () => {
+          const item = await make();
+          assert.equal((await http(`/orders/archive/${item.id}`, { method: "POST", id: 14, claims, body: {} })).status, 403);
+          assert.equal((await db.readRows("SELECT id FROM orders WHERE id = ?", [item.id])).length, 1);
+        });
+      }
+      await test("active staff preparation roles archive paid or refunded issues without clearing logistics", async () => {
+        for (const [id, payment] of [[14, "paid"], [10, "paid"], [15, "refunded"], [16, "paid"], [16, "refunded"]]) {
+          const item = await issue(payment);
+          const archived = await http(`/orders/archive/${item.id}`, { method: "POST", id, body: {} });
+          assert.equal(archived.status, 200, archived.body);
+          const view = await dispatch.get({ actor: operator, deliveryId: item.deliveryId });
+          assert.equal(view.paymentStatus, payment);
+          assert.equal(view.preparationStatus, 3);
+          assert.equal(view.deliveryStatus, "issue");
+          assert.equal(view.version, 3);
+        }
+        const item = await make();
+        await db.pool.query("UPDATE users SET status = 0 WHERE id = 16");
+        try { assert.equal((await http(`/orders/archive/${item.id}`, { method: "POST", id: 16, body: {} })).status, 403); }
+        finally { await db.pool.query("UPDATE users SET status = 1 WHERE id = 16"); }
+        const guest = await fetch(url + `/orders/archive/${item.id}`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+        assert.equal(guest.status, 401);
+      });
+      await test("admin manual settlement and non-delivery legacy permissions remain unchanged", async () => {
+        const item = await make({ payment: "unpaid" });
+        assert.equal((await http(`/orders/collect/${item.id}`, { method: "POST", id: 14, body: { payment_method: "cash" } })).status, 200);
+        const id = next++;
+        await db.pool.query(`INSERT INTO orders (id,shopid,ordernumber,customer,customerID,operator,subtotal,subtotal_before_discount,discount_amount,payment_status,status,created,finished,is_takeaway)
+          VALUES (?,7,?,'Legacy',10,10,12.50,12.50,0,'unpaid',3,NOW(),NOW(),1)`, [id, `TASK5-LEGACY-${id}`]);
+        await db.pool.query("INSERT INTO orderdetail (orderid,productid,qty,price,total) VALUES (?,21,1,12.50,12.50)", [id]);
+        assert.equal((await http(`/orders/collect/${id}`, { method: "POST", id: 15, body: { payment_method: "cash" } })).status, 200);
+        assert.equal((await http(`/orders/archive/${id}`, { method: "POST", claims: { subject_type: "service_point", access: 3, service_point_id: 701 }, body: {} })).status, 200);
+      });
+      await test("locked issue wins against queued manual collection and unpaid archive", async () => {
+        for (const action of ["collect", "archive"]) {
+          const item = await make({ payment: "unpaid" });
+          await dispatch.assign(mutation(item, operator, 1, `racing-assign-${item.id}`, { courierId: 11 }));
+          const gate = await db.pool.getConnection();
+          let racing = [];
+          try {
+            await gate.beginTransaction();
+            await gate.query("SELECT id FROM orders WHERE id = ? FOR UPDATE", [item.id]);
+            racing.push(dispatch.reportIssue(mutation(item, courier, 2, `racing-issue-${item.id}`, { reason: "Incident wins commercial lock" })));
+            const incident = Promise.allSettled(racing);
+            await waitForLocks(1);
+            racing.push(action === "collect" ? orders.collectDeliveryOrderPayment({ orderId: item.id, shopId: 7, paymentMethod: "cash" }) : orders.mArchiveOrder(item.id, "cash", 7));
+            const outcomes = Promise.allSettled(racing);
+            await waitForLocks(2);
+            await gate.commit();
+            const [reported, rejected] = await outcomes;
+            assert.equal(reported.status, "fulfilled");
+            assert.equal(rejected.status, "rejected");
+            assert.equal(rejected.reason.code, "DELIVERY_TRANSITION_INVALID");
+            assert.equal((await incident)[0].status, "fulfilled");
+            assert.equal((await db.readRows("SELECT payment_status FROM orders WHERE id = ?", [item.id]))[0].payment_status, "unpaid");
+          } finally { await gate.rollback(); gate.release(); await Promise.allSettled(racing); }
+        }
+      });
+      await test("engaged provider reconciliation remains allowed during issue", async () => {
+        const item = await issue("unpaid");
+        const intentId = `pi_task5_issue_${item.id}`;
+        await db.pool.query("UPDATE orders SET payment_status = 'requires_payment', payment_provider = 'stripe', stripe_payment_intent_id = ? WHERE id = ?", [intentId, item.id]);
+        await db.pool.query(`INSERT INTO payments (order_id,shop_id,stripe_payment_intent_id,amount,amount_cents,application_fee_amount,currency,status,created)
+          VALUES (?,7,?,12.50,1250,0,'eur','requires_payment_method',NOW())`, [item.id, intentId]);
+        const payment = await require("../src/modules/m_payments").markPaymentSucceeded({ id: intentId, latest_charge: `ch_${intentId}`, payment_method_types: ["card"] });
+        assert.equal(payment.paid, true);
+        const view = await dispatch.get({ actor: operator, deliveryId: item.deliveryId });
+        assert.equal(view.paymentStatus, "paid");
+        assert.equal(view.deliveryStatus, "issue");
+        assert.equal(view.preparationStatus, 3);
+        assert.equal(view.version, 3);
+      });
+      assert.deepEqual(failures, [], "All bounded completion SQL/HTTP contracts must pass");
     } finally { await new Promise(resolve => server.close(resolve)); }
   });
 }

@@ -54,6 +54,16 @@ exports.checkout = buildCheckoutController({
   checkout: { createCheckout },
 });
 
+const requireDeliveryStaff = (req, manualSettlement) => {
+  const account = req.currentUser;
+  const roles = manualSettlement ? [0, 1] : [0, 1, 4, 5];
+  if (req.sessionSubject !== "staff" || !account || Number(account.status) !== 1 ||
+    req.id == null || String(account.id) !== String(req.id) || String(account.shopid) !== String(req.shopid) ||
+    !roles.includes(Number(account.access))) {
+    throw new DomainError(403, "DELIVERY_FORBIDDEN", "Access denied");
+  }
+};
+
 const moneyOrZero = (value) => {
   const parsed = parseMoney(value);
   return parsed === null ? 0 : parsed;
@@ -435,6 +445,7 @@ exports.collectOrderPayment = async (req, res) => {
     }
 
     deliveryOrder = orders[0].delivery_id != null || orders[0].fulfillment_type === "delivery";
+    if (deliveryOrder) requireDeliveryStaff(req, true);
     const result = deliveryOrder ? await collectDeliveryOrderPayment({
       orderId: id, shopId: req.shopid, paymentMethod: req.body.payment_method,
       discount: { discountType: req.body.discount_type, discountValue: req.body.discount_value },
@@ -487,6 +498,7 @@ const buildArchiveOrderController = ({
 
     terminalOrder = orders[0].stripe_terminal_payment_id != null;
     deliveryOrder = orders[0].delivery_id != null || orders[0].fulfillment_type === "delivery";
+    if (deliveryOrder) requireDeliveryStaff(req, !["paid", "refunded"].includes(orders[0].payment_status));
     if (terminalOrder) buildCashRegisterArchiveFields({ order: orders[0] });
     else if (!deliveryOrder) await syncPendingStripe(orders[0]);
 

@@ -253,7 +253,10 @@ async function main() {
 
     await test("manual delivery collection refuses duplicate pending Stripe and inline discounts", async () => {
       const item = await make({ discount: true });
-      const request = (id, extra = {}) => ({ params: { id: String(id) }, shopid: 7, body: { payment_method: "Especes", ...extra } });
+      const [cashier] = await db.readRows("SELECT id, shopid, access, status FROM users WHERE id = 10 AND shopid = 7");
+      const request = (id, extra = {}) => ({ params: { id: String(id) }, shopid: 7,
+        sessionSubject: "staff", id: cashier.id, access: cashier.access, currentUser: cashier,
+        body: { payment_method: "Especes", ...extra } });
       const rejected = response();
       await controllers.collectOrderPayment(request(item.id, { discount_type: "amount", discount_value: 1 }), rejected);
       assert.equal(rejected.code, 409);
