@@ -103,6 +103,8 @@ async function withDeliveryDatabase(callback, { beforeDeliveryMigrations } = {})
           (id, shopid, ordernumber, customer, customerID, operator, subtotal, created, finished, token, is_takeaway)
           VALUES (32, 7, 'FIXTURE-32', 'Archived guest', 10, 10, 12.50, '2026-10-16 12:00:00', '2026-10-16 12:00:00', 'fixture-archive', 1)`);
         if (!legacy) {
+          await pool.query(`INSERT INTO customers (id, shopid, name, contact_phone)
+            VALUES ('51', 7, 'Customer 51', '0700000051'), ('52', 8, 'Customer 52', '0800000052')`);
           await pool.query("INSERT IGNORE INTO shop_delivery_settings (shopid) VALUES (7), (8)");
           await pool.query(`INSERT INTO deliveries
             (id, shopid, origin_order_id, order_reference, address_snapshot, contact_snapshot,
@@ -115,7 +117,8 @@ async function withDeliveryDatabase(callback, { beforeDeliveryMigrations } = {})
           await pool.query("UPDATE orders SET delivery_id = '41', fulfillment_type = 'delivery' WHERE id = 31");
         }
         return { shopId: 7, otherShopId: 8, cashierId: 10, courierId: 11,
-          otherCourierId: 12, productId: 21, orderId: 31, deliveryId: legacy ? null : "41" };
+          otherCourierId: 12, productId: 21, orderId: 31, deliveryId: legacy ? null : "41",
+          customerId: legacy ? null : "51", otherCustomerId: legacy ? null : "52" };
       },
     };
     if (beforeDeliveryMigrations) await beforeDeliveryMigrations(db);
