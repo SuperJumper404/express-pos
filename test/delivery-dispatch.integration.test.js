@@ -284,7 +284,16 @@ async function main() {
       for (const path of ["/users", "/metrics", "/detailorder/31", "/products", "/stocks"]) assert.equal((await http(path)).status, 403, path);
       assert.equal((await http("/product/21", { method: "PATCH", body: { stock: 100 } })).status, 403);
       assert.equal((await http("/stocks", { method: "POST", body: { productid: 21 } })).status, 403);
-      assert.equal((await http("/courier/cash-balance")).status, 404);
+      const ownCash = await http("/courier/cash-balance");
+      assert.equal(ownCash.status, 200);
+      const cashBalance = JSON.parse(ownCash.body).data;
+      assert.equal(cashBalance.shopId, 7);
+      assert.equal(cashBalance.courierId, 11);
+      assert.equal(cashBalance.remainingDueCents, 0);
+      assert.equal(cashBalance.collectedCents, 0);
+      assert.equal(cashBalance.receivedCents, 0);
+      assert.equal(cashBalance.version, 1);
+      assert.deepEqual(cashBalance.collections, []);
       const emptyCollection = await http("/courier/deliveries/41/collect-payment", { method: "POST", body: {} });
       assert.equal(emptyCollection.status, 400);
       assert.equal(JSON.parse(emptyCollection.body).error, "DELIVERY_REQUEST_INVALID");

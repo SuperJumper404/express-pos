@@ -1,6 +1,7 @@
 const pool = require("../config/dbPool");
-const { withTransaction: runInTransaction } = require("../helpers/withTransaction");
+const { withTransaction } = require("../helpers/withTransaction");
 const { buildCashClosureSnapshot } = require("../helpers/cashClosure");
+const { buildCourierCashSummary, cashPostingTime } = require("./m_courierCash");
 
 const queryResult = async (sql, params = [], connection = pool) => {
   const [result] = await connection.query(sql, params);
@@ -8,7 +9,7 @@ const queryResult = async (sql, params = [], connection = pool) => {
 };
 
 const parseJson = (value, fallback) => {
-  if (Array.isArray(value)) return value;
+  if (value && typeof value === "object") return value;
   if (!value) return fallback;
   try {
     return JSON.parse(value);
@@ -24,6 +25,7 @@ const normalizeClosureRow = (row) => {
     total_revenue: Number(row.total_revenue || 0),
     payments_summary: parseJson(row.payments_summary, []),
     vat_summary: parseJson(row.vat_summary, []),
+    courier_cash: parseJson(row.courier_cash, null),
   };
 };
 
@@ -71,11 +73,16 @@ const getNextClosureNumber = (shopId, connection) =>
 
 const getDatabaseNow = (connection) =>
   queryResult(
-    `SELECT DATE_FORMAT(CURRENT_TIMESTAMP(6), '%Y-%m-%d %H:%i:%s.%f')
-            AS database_now`,
+    `SELECT DATE_FORMAT(CURRENT_TIMESTAMP(6), '%Y-%m-%d %H:%i:%s.%f') AS session_now,
+            DATE_FORMAT(UTC_TIMESTAMP(6), '%Y-%m-%d %H:%i:%s.%f') AS database_now`,
     [],
     connection
-  ).then((rows) => rows[0].database_now);
+  ).then((rows) => {
+    // Existing cutoffs used session time. Refuse a non-UTC session rather than
+    // silently reinterpret those historic boundaries under a new clock.
+    if (rows[0].session_now !== rows[0].database_now) throw new Error("Cash closures require a UTC database session");
+    return rows[0].database_now;
+  });
 
 const getArchivedOrdersForPeriod = ({ shopId, openedAt, closedAt, connection = pool }) => {
   const params = [shopId];
@@ -87,7 +94,7 @@ const getArchivedOrdersForPeriod = ({ shopId, openedAt, closedAt, connection = p
   params.push(closedAt);
 
   return queryResult(
-    `SELECT archives.*,
+    `SELECT archives.*, CAST(archives.delivery_id AS CHAR) AS delivery_id,
             DATE_FORMAT(archives.archived_at, '%Y-%m-%d %H:%i:%s.%f') AS archived_at
      FROM archives
      WHERE archives.shopid = ?
@@ -109,10 +116,11 @@ const getArchiveDetailsForOrders = ({ orderIds, connection = pool }) => {
   );
 };
 
+const buildCashClosures = ({ runInTransaction = withTransaction, clock } = {}) => {
 const buildCurrentSnapshot = async ({ shopId, now, connection = pool }) => {
   const lastClosure = await getLastClosure(shopId, connection);
   const openedAt = lastClosure && lastClosure.closed_at ? lastClosure.closed_at : null;
-  const closedAt = now || await getDatabaseNow(connection);
+  const closedAt = now || (clock ? cashPostingTime(await clock({ connection })) : await getDatabaseNow(connection));
   const archivedOrders = await getArchivedOrdersForPeriod({
     shopId,
     openedAt,
@@ -123,30 +131,35 @@ const buildCurrentSnapshot = async ({ shopId, now, connection = pool }) => {
     orderIds: archivedOrders.map((order) => order.id),
     connection,
   });
+  const courierCash = await buildCourierCashSummary({ shopId, openedAt, closedAt, archivedOrders, connection });
 
   return buildCashClosureSnapshot({
     lastClosure,
     archivedOrders,
     detailRows,
     now: closedAt,
+    courierCash,
   });
 };
 
-const mGetCurrentCashClosure = (shopId) => buildCurrentSnapshot({ shopId });
+const mGetCurrentCashClosure = (shopId) => runInTransaction(async connection => {
+  await lockShopForCashClosure(shopId, connection);
+  return buildCurrentSnapshot({ shopId, connection });
+});
 
 const mCloseCurrentCashClosure = ({ shopId, userId }) =>
   runInTransaction(async (connection) => {
     await lockShopForCashClosure(shopId, connection);
     await getLastClosureForUpdate(shopId, connection);
     const closureNumber = await getNextClosureNumber(shopId, connection);
-    const now = await getDatabaseNow(connection);
+    const now = clock ? cashPostingTime(await clock({ connection })) : await getDatabaseNow(connection);
     const snapshot = await buildCurrentSnapshot({
       shopId,
       now,
       connection,
     });
 
-    if (snapshot.orders_count <= 0) {
+    if (snapshot.orders_count <= 0 && snapshot.courier_cash.remittances_count <= 0 && snapshot.courier_cash.adjustments_count <= 0) {
       const error = new Error("La periode ne contient aucune commande a cloturer.");
       error.statusCode = 400;
       throw error;
@@ -162,7 +175,8 @@ const mCloseCurrentCashClosure = ({ shopId, userId }) =>
            orders_count = ?,
            total_revenue = ?,
            payments_summary = ?,
-           vat_summary = ?`,
+           vat_summary = ?,
+           courier_cash = ?`,
       [
         shopId,
         closureNumber,
@@ -173,6 +187,7 @@ const mCloseCurrentCashClosure = ({ shopId, userId }) =>
         snapshot.total_revenue,
         JSON.stringify(snapshot.payments_summary),
         JSON.stringify(snapshot.vat_summary),
+        JSON.stringify(snapshot.courier_cash),
       ],
       connection
     );
@@ -205,9 +220,11 @@ const mGetCashClosureById = ({ shopId, id }) =>
     [shopId, id]
   ).then((rows) => normalizeClosureRow(rows[0]));
 
-module.exports = {
+return {
   mCloseCurrentCashClosure,
   mGetCashClosureById,
   mGetCashClosures,
   mGetCurrentCashClosure,
 };
+};
+module.exports = { ...buildCashClosures(), buildCashClosures };

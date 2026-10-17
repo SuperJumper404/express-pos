@@ -14,6 +14,7 @@ const buildDeliveryController = ({
   quotes = require("../modules/m_deliveryQuotes").buildDeliveryQuotes(),
   settings = require("../modules/m_deliverySettings").buildDeliverySettings(),
   dispatch = require("../modules/m_deliveryDispatch").buildDeliveryDispatch(),
+  cash = require("../modules/m_courierCash").buildCourierCash(),
 } = {}) => {
   const endpoint = work => async (req, res) => {
     try { return custom(res, 200, "OK", null, await work(req)); }
@@ -32,6 +33,23 @@ const buildDeliveryController = ({
     resolveIssue: deliveryEndpoint(req => dispatch.resolveIssue(deliveryMutation(req))),
     reportIssue: deliveryEndpoint(req => dispatch.reportIssue(deliveryMutation(req))),
     couriers: deliveryEndpoint(req => dispatch.couriers({ actor: deliveryActor(req) })),
+    courierCashBalance: deliveryEndpoint(req => cash.balance({ actor: deliveryActor(req), courierId: req.params.id })),
+    remitCourierCash: deliveryEndpoint(req => {
+      const body = req.body || {};
+      if (Object.keys(body).some(key => !["receivedCents", "expectedBalanceVersion", "idempotencyKey"].includes(key))) {
+        throw new DomainError(400, "DELIVERY_REQUEST_INVALID", "Invalid courier handover");
+      }
+      return cash.remit({ actor: deliveryActor(req), courierId: req.params.id, receivedCents: body.receivedCents,
+        expectedBalanceVersion: body.expectedBalanceVersion, idempotencyKey: body.idempotencyKey });
+    }),
+    adjustCourierCash: deliveryEndpoint(req => {
+      const body = req.body || {};
+      if (Object.keys(body).some(key => !["collectionId", "remittanceId", "deltaDueCents", "reason", "idempotencyKey"].includes(key))) {
+        throw new DomainError(400, "DELIVERY_REQUEST_INVALID", "Invalid courier correction");
+      }
+      return cash.adjust({ actor: deliveryActor(req), courierId: req.params.id, collectionId: body.collectionId,
+        remittanceId: body.remittanceId, deltaDueCents: body.deltaDueCents, reason: body.reason, idempotencyKey: body.idempotencyKey });
+    }),
     courierAvailability: deliveryEndpoint(req => dispatch.availability({ actor: deliveryActor(req), courierId: Number(req.params.id), available: (req.body || {}).available })),
     resolveAddress: endpoint(req => {
       requireQuoteActor(req);

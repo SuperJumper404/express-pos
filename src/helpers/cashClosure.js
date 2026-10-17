@@ -113,6 +113,7 @@ const buildCashClosureSnapshot = ({
   archivedOrders = [],
   detailRows = [],
   now,
+  courierCash,
 }) => {
   const periodOrders = filterArchivedOrdersForPeriod({
     lastClosure,
@@ -124,6 +125,10 @@ const buildCashClosureSnapshot = ({
     archivedOrders: periodOrders,
     now,
   });
+  if (!(lastClosure && lastClosure.closed_at) && courierCash && courierCash.first_event_at &&
+    (!bounds.opened_at || timestampSortKey(courierCash.first_event_at) < timestampSortKey(bounds.opened_at))) {
+    bounds.opened_at = courierCash.first_event_at;
+  }
 
   return {
     ...bounds,
@@ -136,6 +141,7 @@ const buildCashClosureSnapshot = ({
     ),
     payments_summary: buildPaymentSummary(periodOrders),
     vat_summary: buildVatSummary(detailRows),
+    ...(courierCash ? { courier_cash: courierCash } : {}),
   };
 };
 

@@ -10,6 +10,7 @@ const buildCourierRouter = ({
     return next();
   });
   router.get("/courier/deliveries", controller.list);
+  router.get("/courier/cash-balance", controller.cashBalance);
   router.get("/courier/deliveries/:id", controller.detail);
   router.patch("/courier/availability", controller.availability);
   router.post("/courier/deliveries/:id/pickup", controller.pickup);

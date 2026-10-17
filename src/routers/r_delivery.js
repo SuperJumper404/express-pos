@@ -19,6 +19,9 @@ const buildDeliveryRouter = ({
   router.post("/deliveries/:id/resolve-issue", authentication, restaurant, controller.resolveIssue);
   router.post("/deliveries/:id/report-issue", authentication, restaurant, controller.reportIssue);
   router.get("/delivery/couriers", authentication, restaurant, controller.couriers);
+  router.get("/delivery/couriers/:id/cash-balance", authentication, restaurant, controller.courierCashBalance);
+  router.post("/delivery/couriers/:id/remittances", authentication, restaurant, controller.remitCourierCash);
+  router.post("/delivery/couriers/:id/adjustments", authentication, restaurant, controller.adjustCourierCash);
   router.patch("/delivery/couriers/:id/availability", authentication, restaurant, controller.courierAvailability);
   return router;
 };

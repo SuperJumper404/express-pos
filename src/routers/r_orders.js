@@ -1,7 +1,7 @@
 const orders = require("../controllers/c_orders");
 const orderEditing = require("../controllers/c_orderEditing");
 const cashClosures = require("../controllers/c_cashClosures");
-const { authentication } = require("../helpers/middleware/auth");
+const { authentication, authorizeCashRegister } = require("../helpers/middleware/auth");
 const express = require("express");
 const routers = express.Router();
 
@@ -22,10 +22,10 @@ routers
   .get("/orders/archives", authentication, orders.allArchivedOrders)
   .get("/detailorder/archive/:id", authentication, orders.detailArchivedOrder)
   .get("/orderbytoken/:id", orders.orderByToken)
-  .get("/reports/z/current", authentication, cashClosures.currentCashClosure)
-  .post("/reports/z/close", authentication, cashClosures.closeCashClosure)
-  .get("/reports/z", authentication, cashClosures.allCashClosures)
-  .get("/reports/z/:id", authentication, cashClosures.cashClosureById)
+  .get("/reports/z/current", authentication, authorizeCashRegister, cashClosures.currentCashClosure)
+  .post("/reports/z/close", authentication, authorizeCashRegister, cashClosures.closeCashClosure)
+  .get("/reports/z", authentication, authorizeCashRegister, cashClosures.allCashClosures)
+  .get("/reports/z/:id", authentication, authorizeCashRegister, cashClosures.cashClosureById)
   .get("/metrics", authentication, orders.metrics);
 // URL : /metrics/abc123/2025-07-01/2025-07-22
 
