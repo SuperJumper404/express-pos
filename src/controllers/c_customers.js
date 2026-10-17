@@ -38,4 +38,23 @@ const buildCustomersController = ({ customers = require("../modules/m_customers"
   };
 };
 
-module.exports = { buildCustomersController };
+const buildCustomerAuthController = ({ customerAuth = require("../modules/m_customerAuth").buildCustomerAuth(),
+  transports = require("../services/customerCodeTransports").buildCustomerCodeTransports() } = {}) => {
+  const endpoint = work => async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    try { return custom(res, 200, "OK", null, await work(req)); }
+    catch (error) {
+      if (error instanceof DomainError) return failed(res, error.message, error.code, error.status);
+      return failed(res, "Customer authentication unavailable", "CUSTOMER_AUTH_UNAVAILABLE", 503);
+    }
+  };
+  return {
+    channels: endpoint(() => transports.channels()),
+    requestChallenge: endpoint(req => {
+      const body = bodyFields(req, ["shopId", "channel", "destination", "countryCode", "browserBinding", "locale"]);
+      return customerAuth.requestChallenge({ ...body, ip: req.ip, purpose: "login", customerId: null });
+    }),
+  };
+};
+
+module.exports = { buildCustomersController, buildCustomerAuthController };

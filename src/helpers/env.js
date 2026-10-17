@@ -64,6 +64,18 @@ module.exports = {
     tokenSecret: process.env.DELIVERY_TOKEN_SECRET,
     geocodingBaseUrl: process.env.DELIVERY_GEOCODING_BASE_URL || "https://data.geopf.fr/geocodage",
   }),
+  getCustomerAuthConfig: () => ({
+    secret: process.env.CUSTOMER_AUTH_SECRET,
+    jwtSecret: process.env.JWTKEY,
+    email: process.env.EMAIL,
+    mailApiKey: process.env.MAILAPIKEY,
+    mailSecretKey: process.env.MAILSECRETKEY,
+    whatsappAccessToken: process.env.CUSTOMER_WHATSAPP_ACCESS_TOKEN,
+    whatsappPhoneNumberId: process.env.CUSTOMER_WHATSAPP_PHONE_NUMBER_ID,
+    whatsappTemplateName: process.env.CUSTOMER_WHATSAPP_TEMPLATE_NAME,
+    whatsappTemplateLanguage: process.env.CUSTOMER_WHATSAPP_TEMPLATE_LANGUAGE,
+    whatsappGraphVersion: process.env.CUSTOMER_WHATSAPP_GRAPH_VERSION,
+  }),
 };
 
 console.log("Loaded env file:", envFile);

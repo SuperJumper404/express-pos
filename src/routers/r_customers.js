@@ -1,8 +1,11 @@
 const express = require("express");
 
 const buildCustomersRouter = ({ controller = require("../controllers/c_customers").buildCustomersController(),
+  customerAuthController = require("../controllers/c_customers").buildCustomerAuthController(),
   authentication = require("../helpers/middleware/auth").authentication } = {}) => {
   const router = express.Router();
+  router.get("/customer-auth/channels", customerAuthController.channels);
+  router.post("/customer-auth/challenges", customerAuthController.requestChallenge);
   router.get("/delivery/customers", authentication, controller.searchProfiles);
   router.post("/delivery/customers", authentication, controller.createProfile);
   router.get("/delivery/customers/:customerId/addresses", authentication, controller.listAddresses);
