@@ -71,18 +71,30 @@ const getNextClosureNumber = (shopId, connection) =>
     connection
   ).then((rows) => Number(rows[0] && rows[0].next_number) || 1);
 
-const getDatabaseNow = (connection) =>
-  queryResult(
+const getDatabaseNow = async (shopId, connection) => {
+  const [now] = await queryResult(
     `SELECT DATE_FORMAT(CURRENT_TIMESTAMP(6), '%Y-%m-%d %H:%i:%s.%f') AS session_now,
             DATE_FORMAT(UTC_TIMESTAMP(6), '%Y-%m-%d %H:%i:%s.%f') AS database_now`,
     [],
     connection
-  ).then((rows) => {
-    // Existing cutoffs used session time. Refuse a non-UTC session rather than
-    // silently reinterpret those historic boundaries under a new clock.
-    if (rows[0].session_now !== rows[0].database_now) throw new Error("Cash closures require a UTC database session");
-    return rows[0].database_now;
-  });
+  );
+  if (now.session_now !== now.database_now) {
+    // Check all history, including external-card collections and settled debt:
+    // disabling delivery cannot make UTC journals safe to compare to local time.
+    const [delivery] = await queryResult(
+      `SELECT EXISTS(SELECT 1 FROM shop_delivery_settings WHERE shopid=? AND enabled=1)
+         OR EXISTS(SELECT 1 FROM delivery_payment_collections WHERE shopid=?)
+         OR EXISTS(SELECT 1 FROM courier_cash_remittances WHERE shopid=?)
+         OR EXISTS(SELECT 1 FROM courier_cash_adjustments WHERE shopid=?)
+         OR EXISTS(SELECT 1 FROM delivery_manual_refunds WHERE shopid=?) AS requires_utc`,
+      [shopId, shopId, shopId, shopId, shopId],
+      connection
+    );
+    if (Number(delivery.requires_utc)) throw new Error("Delivery financial summaries require a UTC database session");
+  }
+  // Ordinary POS archives and cutoffs retain their existing session time basis.
+  return now.session_now;
+};
 
 const getArchivedOrdersForPeriod = ({ shopId, openedAt, closedAt, connection = pool }) => {
   const params = [shopId];
@@ -120,7 +132,7 @@ const buildCashClosures = ({ runInTransaction = withTransaction, clock } = {}) =
 const buildCurrentSnapshot = async ({ shopId, now, connection = pool }) => {
   const lastClosure = await getLastClosure(shopId, connection);
   const openedAt = lastClosure && lastClosure.closed_at ? lastClosure.closed_at : null;
-  const closedAt = now || (clock ? cashPostingTime(await clock({ connection })) : await getDatabaseNow(connection));
+  const closedAt = now || (clock ? cashPostingTime(await clock({ connection })) : await getDatabaseNow(shopId, connection));
   const archivedOrders = await getArchivedOrdersForPeriod({
     shopId,
     openedAt,
@@ -152,7 +164,7 @@ const mCloseCurrentCashClosure = ({ shopId, userId }) =>
     await lockShopForCashClosure(shopId, connection);
     await getLastClosureForUpdate(shopId, connection);
     const closureNumber = await getNextClosureNumber(shopId, connection);
-    const now = clock ? cashPostingTime(await clock({ connection })) : await getDatabaseNow(connection);
+    const now = clock ? cashPostingTime(await clock({ connection })) : await getDatabaseNow(shopId, connection);
     const snapshot = await buildCurrentSnapshot({
       shopId,
       now,

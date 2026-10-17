@@ -46,6 +46,10 @@ const buildSqlDeliverySettingsRepository = ({ pool = require("../config/dbPool")
         if (!shop) throw new DomainError(404, "SHOP_NOT_FOUND", "Shop not found");
         const [[current]] = await connection.query("SELECT revision FROM shop_delivery_settings WHERE shopid = ? FOR UPDATE", [shopId]);
         if ((current ? current.revision : 0) !== expectedRevision) throw new DomainError(409, "DELIVERY_VERSION_CONFLICT", "Delivery settings changed");
+        if (settings.enabled) {
+          const [[readiness]] = await connection.query("SELECT CURRENT_TIMESTAMP(6) = UTC_TIMESTAMP(6) AS utc_ready");
+          if (Number(readiness.utc_ready) !== 1) throw new DomainError(503, "DELIVERY_UTC_SESSION_REQUIRED", "Delivery activation requires a UTC database session; audit historical archive and closure time bases before activation");
+        }
         if (!current) await connection.query("INSERT INTO shop_delivery_settings (shopid) VALUES (?)", [shopId]);
         await connection.query(
           `UPDATE shop_delivery_settings SET revision = ?, enabled = ?, origin_latitude = ?, origin_longitude = ?,

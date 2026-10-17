@@ -313,7 +313,7 @@ test("actual queued close/remittance takes posting clock after shop barrier at s
   assert.equal((await db.readRows("SELECT DATE_FORMAT(created_at,'%Y-%m-%d %H:%i:%s.%f') t FROM courier_cash_remittances"))[0].t, "2026-10-24 22:00:00.500124");
 });
 
-test("production DB UTC clocks retain queued submillisecond receipt after closure and refuse timezone reinterpretation", async ({ db, collect, cash }) => {
+test("production DB UTC clocks retain queued submillisecond receipt and refuse non-UTC delivery history even when disabled", async ({ db, collect, cash }) => {
   await collect();
   await require("../src/modules/m_orders").mArchiveOrder(31, undefined, 7);
   const { createTransactionRunner } = require("../src/helpers/withTransaction");
@@ -372,7 +372,132 @@ test("production DB UTC clocks retain queued submillisecond receipt after closur
     try { return await work(connection); }
     finally { await connection.query("SET time_zone='+00:00'"); }
   }) });
+  const before = await db.readRows("SELECT *,DATE_FORMAT(closed_at,'%Y-%m-%d %H:%i:%s.%f') exact_cutoff FROM cash_closures ORDER BY id");
+  assert.equal((await db.readRows("SELECT enabled FROM shop_delivery_settings WHERE shopid=7"))[0].enabled, 0);
+  await assert.rejects(shifted.mGetCurrentCashClosure(7), /Delivery.*UTC database session/);
+  await assert.rejects(shifted.mCloseCurrentCashClosure({ shopId: 7, userId: 10 }), /Delivery.*UTC database session/);
+  await db.pool.query("DELETE FROM shop_delivery_settings WHERE shopid=7");
+  await assert.rejects(shifted.mGetCurrentCashClosure(7), /Delivery.*UTC database session/);
+  assert.deepEqual(await db.readRows("SELECT *,DATE_FORMAT(closed_at,'%Y-%m-%d %H:%i:%s.%f') exact_cutoff FROM cash_closures ORDER BY id"), before);
+});
+
+for (const settingsPresent of [false, true]) {
+test(`non-UTC ordinary archived counter HTTP preview and close preserve session periods (${settingsPresent ? "disabled" : "missing"} delivery settings)`, async ({ db }) => {
+  if (!settingsPresent) await db.pool.query("DELETE FROM shop_delivery_settings WHERE shopid=7");
+  await db.pool.query(`UPDATE users SET module_permissions='["cashregister"]' WHERE id=10`);
+  await db.pool.query(`INSERT INTO cash_closures (shopid,closure_number,closed_at,orders_count,total_revenue,payments_summary,vat_summary)
+    VALUES (7,1,'2026-10-24 23:59:59.123456',1,9,'[{"historic":true}]','[]')`);
+  const { buildCashClosures } = require("../src/modules/m_cashClosures");
+  const run = require("../src/helpers/withTransaction").createTransactionRunner(require("../src/config/dbPool"));
+  const shiftedRun = work => run(async connection => {
+    await connection.query("SET time_zone='+02:00'");
+    await connection.query("SET timestamp=UNIX_TIMESTAMP('2026-10-25 00:00:00.500123')");
+    try { return await work(connection); }
+    finally { await connection.query("SET timestamp=DEFAULT"); await connection.query("SET time_zone='+00:00'"); }
+  });
+  await shiftedRun(async connection => {
+    for (const [id, archivedAt] of [[50, "2026-10-24 23:59:59.123456"], [51, null],
+      [52, "2026-10-25 00:00:00.500124"], [53, "2026-10-24 23:59:59.123457"]]) {
+      await connection.query(`INSERT INTO archives
+        (id,shopid,ordernumber,customer,customerID,operator,subtotal,created,finished,token,is_takeaway,payment,archived_at)
+        VALUES (?,7,?,'Counter guest',10,10,?,'2026-10-16','2026-10-16',?,1,'cash',COALESCE(?,CURRENT_TIMESTAMP(6)))`,
+      [id, `COUNTER-${id}`, id === 50 ? 100 : id === 52 ? 200 : 12.5, `counter-${id}`, archivedAt]);
+    }
+  });
+  const historic = await db.readRows("SELECT *,DATE_FORMAT(closed_at,'%Y-%m-%d %H:%i:%s.%f') exact_cutoff FROM cash_closures");
+  const archives = await db.readRows("SELECT *,DATE_FORMAT(archived_at,'%Y-%m-%d %H:%i:%s.%f') exact_archive FROM archives ORDER BY id");
+  Object.assign(require.cache[require.resolve("../src/modules/m_cashClosures")].exports, buildCashClosures({ runInTransaction: shiftedRun }));
+  const app = express();
+  app.use(express.json());
+  app.use(require("../src/routers/r_orders"));
+  const server = await new Promise(resolve => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
+  const http = async (url, method = "GET") => {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}${url}`, { method,
+      headers: { Authorization: `Bearer ${jwt.sign({ id: 10, shopid: 7, access: 0 }, process.env.JWTKEY)}` } });
+    return { status: response.status, body: await response.json() };
+  };
+  try {
+    await db.pool.query("UPDATE users SET status=0 WHERE id=10");
+    assert.equal((await http("/reports/z/current")).status, 403);
+    assert.equal((await http("/reports/z/close", "POST")).status, 403);
+    await db.pool.query(`UPDATE users SET status=1,module_permissions='["delivery"]' WHERE id=10`);
+    assert.equal((await http("/reports/z/current")).status, 403);
+    assert.equal((await http("/reports/z/close", "POST")).status, 403);
+    await db.pool.query(`UPDATE users SET module_permissions='["cashregister"]' WHERE id=10`);
+    const preview = await http("/reports/z/current");
+    assert.equal(preview.status, 200, JSON.stringify(preview));
+    assert.equal(preview.body.data.opened_at, "2026-10-24 23:59:59.123456");
+    assert.equal(preview.body.data.closed_at, "2026-10-25 00:00:00.500123");
+    assert.equal(preview.body.data.orders_count, 2);
+    assert.equal(preview.body.data.total_revenue, 25);
+    assert.equal(preview.body.data.courier_cash.register_cash_sales_cents, 2500);
+    assert.equal(preview.body.data.courier_cash.outstanding_cents, 0);
+    const closed = await http("/reports/z/close", "POST");
+    assert.equal(closed.status, 201, JSON.stringify(closed));
+    assert.equal(closed.body.data.closed_by_user_id, 10);
+    assert.equal(closed.body.data.closure_number, 2);
+    assert.equal(closed.body.data.orders_count, 2);
+    assert.equal(closed.body.data.total_revenue, 25);
+    assert.deepEqual(closed.body.data.courier_cash, preview.body.data.courier_cash);
+    const stored = await db.readRows("SELECT DATE_FORMAT(opened_at,'%Y-%m-%d %H:%i:%s.%f') opened_at,DATE_FORMAT(closed_at,'%Y-%m-%d %H:%i:%s.%f') closed_at FROM cash_closures WHERE closure_number=2");
+    assert.deepEqual(stored, [{ opened_at: preview.body.data.opened_at, closed_at: preview.body.data.closed_at }]);
+    assert.equal((await http("/reports/z/current")).body.data.orders_count, 0);
+    assert.deepEqual(await db.readRows("SELECT *,DATE_FORMAT(closed_at,'%Y-%m-%d %H:%i:%s.%f') exact_cutoff FROM cash_closures WHERE closure_number=1"), historic);
+    assert.deepEqual(await db.readRows("SELECT *,DATE_FORMAT(archived_at,'%Y-%m-%d %H:%i:%s.%f') exact_archive FROM archives ORDER BY id"), archives);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+}
+
+test("non-UTC delivery requirement covers enabled settings and external-card financial history", async ({ db, collect }) => {
+  const run = require("../src/helpers/withTransaction").createTransactionRunner(require("../src/config/dbPool"));
+  const shifted = require("../src/modules/m_cashClosures").buildCashClosures({ runInTransaction: work => run(async connection => {
+    await connection.query("SET time_zone='+02:00'");
+    try { return await work(connection); }
+    finally { await connection.query("SET time_zone='+00:00'"); }
+  }) });
+  await db.pool.query("UPDATE shop_delivery_settings SET enabled=1,origin_latitude=48.8566,origin_longitude=2.3522,max_distance_meters=6000,vat_rate=10 WHERE shopid=7");
   await assert.rejects(shifted.mGetCurrentCashClosure(7), /UTC database session/);
+  await db.pool.query("UPDATE shop_delivery_settings SET enabled=0 WHERE shopid=7");
+  assert.equal((await shifted.mGetCurrentCashClosure(7)).orders_count, 0);
+  await collect("external_card");
+  await assert.rejects(shifted.mGetCurrentCashClosure(7), /Delivery.*UTC database session/);
+  await assert.rejects(shifted.mCloseCurrentCashClosure({ shopId: 7, userId: 10 }), /Delivery.*UTC database session/);
+  assert.equal((await db.readRows("SELECT COUNT(*) n FROM cash_closures"))[0].n, 0);
+});
+
+test("non-UTC delivery activation refuses before settings or revision writes on the same SQL connection", async ({ db }) => {
+  const { buildSqlDeliverySettingsRepository } = require("../src/modules/m_deliverySettings");
+  const settings = { enabled: true, origin: { latitude: 48.8566, longitude: 2.3522 }, maxDistanceMeters: 6000,
+    minimumItemsCents: 0, freeDeliveryEnabled: false, freeDeliveryThresholdCents: null,
+    fiscalPolicy: { mode: "configured_rate", vatRate: 10 }, bands: [{ upToMeters: 6000, feeCents: 400 }] };
+  const connection = await db.pool.getConnection();
+  let writes = 0;
+  const observed = new Proxy(connection, { get(target, key) {
+    if (key === "release") return () => {};
+    if (key === "query") return (sql, values) => { if (/^(INSERT|UPDATE|DELETE)\b/i.test(sql)) writes++; return target.query(sql, values); };
+    const value = target[key];
+    return typeof value === "function" ? value.bind(target) : value;
+  } });
+  const repository = buildSqlDeliverySettingsRepository({ pool: { getConnection: async () => observed } });
+  try {
+    await connection.query("SET time_zone='+02:00'");
+    await db.pool.query("DELETE FROM shop_delivery_settings WHERE shopid=8");
+    const before = await db.readRows("SELECT * FROM shop_delivery_settings ORDER BY shopid");
+    for (const [shopId, expectedRevision] of [[7, 1], [8, 0]]) {
+      writes = 0;
+      await assert.rejects(repository.saveSettings({ shopId, expectedRevision, settings }), { code: "DELIVERY_UTC_SESSION_REQUIRED" });
+      assert.equal(writes, 0);
+      assert.deepEqual(await db.readRows("SELECT * FROM shop_delivery_settings ORDER BY shopid"), before);
+      assert.deepEqual(await db.readRows("SELECT * FROM shop_delivery_fee_bands"), []);
+    }
+    const disabled = await repository.saveSettings({ shopId: 7, expectedRevision: 1, settings: { ...settings, enabled: false } });
+    assert.equal(disabled.revision, 2);
+    assert.equal(disabled.enabled, false);
+    await connection.query("SET time_zone='+00:00'");
+    const enabled = await repository.saveSettings({ shopId: 7, expectedRevision: 2, settings });
+    assert.equal(enabled.revision, 3);
+    assert.equal(enabled.enabled, true);
+  } finally { await connection.query("SET time_zone='+00:00'"); connection.release(); }
 });
 
 test("additive migration up/down/up preserves historic null snapshots and journal constraints", async ({ db }) => {
