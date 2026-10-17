@@ -13,6 +13,7 @@ const {
   mDetailArchivedOrder,
   mDetailArchivedOrderByToken,
   mAllArchivedOrdersWithDetails,
+  collectDeliveryOrderPayment,
 } = require("../modules/m_orders");
 
 const { custom, success, failed } = require("../helpers/response");
@@ -425,6 +426,7 @@ exports.updateOrder = buildUpdateOrderController();
 
 exports.collectOrderPayment = async (req, res) => {
   const id = req.params.id;
+  let deliveryOrder = false;
 
   try {
     const orders = await mFindOrderById(id, req.shopid);
@@ -432,7 +434,11 @@ exports.collectOrderPayment = async (req, res) => {
       return custom(res, 404, "Commande introuvable.", null, null);
     }
 
-    const result = await mUpdateOrders(
+    deliveryOrder = orders[0].delivery_id != null || orders[0].fulfillment_type === "delivery";
+    const result = deliveryOrder ? await collectDeliveryOrderPayment({
+      orderId: id, shopId: req.shopid, paymentMethod: req.body.payment_method,
+      discount: { discountType: req.body.discount_type, discountValue: req.body.discount_value },
+    }) : await mUpdateOrders(
       {
         ...buildCashRegisterCollectionFields(req.body.payment_method),
         ...buildOrderCollectionDiscountFields(orders[0], {
@@ -448,10 +454,11 @@ exports.collectOrderPayment = async (req, res) => {
 
     return success(res, "Commande encaissée avec succès.", null, null);
   } catch (error) {
+    if (error instanceof DomainError) return custom(res, error.status, error.message, null, { code: error.code });
     if (String(error.message || "").includes("Moyen de paiement requis")) {
       return custom(res, 422, error.message, null, null);
     }
-    return failed(res, "Erreur serveur.", error.message);
+    return deliveryOrder ? failed(res, "Impossible d'encaisser la livraison.") : failed(res, "Erreur serveur.", error.message);
   }
 };
 
@@ -470,6 +477,7 @@ const buildArchiveOrderController = ({
   };
   console.log("ON archive :", id);
   let terminalOrder = false;
+  let deliveryOrder = false;
 
   try {
     const orders = await findOrderById(id, req.shopid);
@@ -478,8 +486,9 @@ const buildArchiveOrderController = ({
     }
 
     terminalOrder = orders[0].stripe_terminal_payment_id != null;
+    deliveryOrder = orders[0].delivery_id != null || orders[0].fulfillment_type === "delivery";
     if (terminalOrder) buildCashRegisterArchiveFields({ order: orders[0] });
-    else await syncPendingStripe(orders[0]);
+    else if (!deliveryOrder) await syncPendingStripe(orders[0]);
 
     const response = await archiveOrder(id, payment_method, req.shopid, discount);
     if (response.affectedRows) {
@@ -488,6 +497,10 @@ const buildArchiveOrderController = ({
 
     return custom(res, 404, "Commande introuvable.", null, null);
   } catch (error) {
+    if (deliveryOrder) {
+      if (error instanceof DomainError) return custom(res, error.status, error.message, null, { code: error.code });
+      return failed(res, "Impossible d'archiver la livraison.");
+    }
     if (terminalOrder) {
       if (error instanceof DomainError) return custom(res, error.status, error.message, null, { code: error.code });
       return failed(res, "Impossible d'archiver la commande payee sur le terminal.");

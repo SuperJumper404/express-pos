@@ -78,6 +78,9 @@ const buildOrderTransitionModule = ({
       if (!order) {
         throw new DomainError(404, "ORDER_NOT_FOUND", "Commande introuvable.");
       }
+      if (order.delivery_id != null && Number(nextStatus) === ORDER_STATUSES.CANCELED) {
+        throw new DomainError(409, "DELIVERY_TRANSITION_NOT_ALLOWED", "Delivery cancellation requires its explicit commercial workflow");
+      }
       assertOrderStatusTransition(order, nextStatus);
       if (beforeTransition) {
         await beforeTransition({ order, connection });

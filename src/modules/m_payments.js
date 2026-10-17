@@ -4,6 +4,9 @@ const { ORDER_STATUSES } = require("../helpers/orderStatus");
 const { finalizeReservations } = require("./m_checkout");
 const { resolveStripePaymentMethod } = require("../helpers/stripePaymentMethod");
 const { withTransaction } = require("../helpers/withTransaction");
+const { resolveCommercialOrder } = require("./m_deliveryOrders");
+const { toCents, assertCents } = require("../helpers/deliveryMoney");
+const DomainError = require("../helpers/domainError");
 
 const formatDate = (value) => value.toISOString().slice(0, 19).replace("T", " ");
 const SQL_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
@@ -130,17 +133,7 @@ const sqlRepository = {
     ).then((rows) => rows[0] || null);
   },
 
-  lockOrder: ({ orderId, shopId, connection }) => {
-    const shopClause = shopId == null ? "" : " AND shopid = ?";
-    const params = shopId == null ? [orderId] : [orderId, shopId];
-    return queryResult(
-      connection,
-      `SELECT * FROM orders
-       WHERE id = ?${shopClause}
-       LIMIT 1 FOR UPDATE`,
-      params,
-    ).then((rows) => rows[0] || null);
-  },
+  lockOrder: (input) => resolveCommercialOrder({ ...input, forUpdate: true }),
 
   lockOrderReservations: ({ orderId, connection }) => queryResult(
     connection,
@@ -152,29 +145,31 @@ const sqlRepository = {
     [orderId],
   ),
 
-  getPaidOrderForRefund: ({ orderId, shopId, connection }) => queryResult(
-    connection,
-    `SELECT orders.*, payments.stripe_payment_intent_id,
-            payments.stripe_charge_id,
-            payments.stripe_refund_id,
-            payments.refund_status,
-            payments.refund_failure_reason,
-            payments.amount_cents,
-            payments.status AS payment_record_status
-     FROM orders
-     JOIN payments
-       ON payments.order_id = orders.id
-      AND payments.stripe_payment_intent_id = orders.stripe_payment_intent_id
-      AND payments.status IN ('succeeded', 'refunded')
-     WHERE orders.id = ?
-       AND orders.shopid = ?
-       AND (
-         (orders.payment_status = 'paid' AND payments.status = 'succeeded')
-         OR (orders.payment_status = 'refunded' AND payments.status = 'refunded')
-       )
-     LIMIT 1`,
-    [orderId, shopId],
-  ),
+  getPaidOrderForRefund: async ({ orderId, shopId, connection }) => {
+    let rows = await queryResult(connection, `SELECT orders.*, CAST(orders.delivery_id AS CHAR) AS delivery_id,
+      CAST(orders.customer_account_id AS CHAR) AS customer_account_id,
+      payments.stripe_charge_id, payments.stripe_refund_id, payments.refund_status,
+      payments.refund_failure_reason, payments.amount_cents, payments.status AS payment_record_status
+      FROM orders JOIN payments ON payments.order_id = orders.id
+        AND payments.stripe_payment_intent_id = orders.stripe_payment_intent_id
+        AND payments.status IN ('succeeded', 'refunded')
+      WHERE orders.id = ? AND orders.shopid = ?
+        AND ((orders.payment_status = 'paid' AND payments.status = 'succeeded')
+          OR (orders.payment_status = 'refunded' AND payments.status = 'refunded')) LIMIT 1`, [orderId, shopId]);
+    if (!rows.length) {
+      const order = await resolveCommercialOrder({ orderId, shopId, connection });
+      if (!order || order.archive_id == null || !["paid", "refunded"].includes(order.payment_status)) return [];
+      const [payment] = await queryResult(connection, `SELECT stripe_charge_id, stripe_refund_id, refund_status,
+        refund_failure_reason, amount_cents, status AS payment_record_status FROM payments
+        WHERE order_id = ? AND shop_id = ? AND stripe_payment_intent_id = ? AND status = ? LIMIT 1`,
+      [orderId, shopId, order.stripe_payment_intent_id, order.payment_status === "paid" ? "succeeded" : "refunded"]);
+      rows = payment ? [{ ...order, ...payment }] : [];
+    }
+    if (rows[0] && rows[0].delivery_id != null && assertCents(rows[0].amount_cents) !== toCents(rows[0].subtotal)) {
+      throw new DomainError(409, "DELIVERY_TOTAL_MISMATCH", "Delivery payment does not match accepted total");
+    }
+    return rows;
+  },
 
   getPendingStripeOrderForCounter: ({ orderId, shopId, connection }) => queryResult(
     connection,
@@ -281,7 +276,7 @@ const sqlRepository = {
     `UPDATE orders
      SET payment_status = 'paid',
          payment = ?,
-         finished = ?
+         finished = CASE WHEN delivery_id IS NULL THEN ? ELSE finished END
      WHERE id = ?
        AND shopid = ?
        AND payment_status = 'requires_payment'
@@ -326,12 +321,12 @@ const sqlRepository = {
   }) => queryResult(
     connection,
     `UPDATE orders
-     SET status = 1,
+     SET status = CASE WHEN delivery_id IS NULL THEN 1 ELSE status END,
          payment_status = 'unpaid',
          payment = 'Paiement au comptoir',
          payment_provider = NULL,
          stripe_payment_intent_id = NULL,
-         finished = ?
+         finished = CASE WHEN delivery_id IS NULL THEN ? ELSE finished END
      WHERE id = ?
        AND shopid = ?
        AND payment_status = 'requires_payment'
@@ -428,26 +423,26 @@ const sqlRepository = {
     ],
   ),
 
-  updateOrderRefunded: ({ orderId, shopId, connection }) => queryResult(
+  updateOrderRefunded: ({ orderId, archiveId, shopId, connection }) => queryResult(
     connection,
-    `UPDATE orders
-     SET payment_status = 'refunded', status = ?
+    `UPDATE ${archiveId == null ? "orders" : "archives"}
+     SET payment_status = 'refunded', status = CASE WHEN delivery_id IS NULL THEN ? ELSE status END
      WHERE id = ?
        AND shopid = ?
        AND payment_status = 'paid'
        AND payment_provider = 'stripe'`,
-    [ORDER_STATUSES.CANCELED, orderId, shopId],
+    [ORDER_STATUSES.CANCELED, archiveId == null ? orderId : archiveId, shopId],
   ),
 
-  updateOrderRefundNonFinal: ({ orderId, shopId, connection }) => queryResult(
+  updateOrderRefundNonFinal: ({ orderId, archiveId, shopId, connection }) => queryResult(
     connection,
-    `UPDATE orders
+    `UPDATE ${archiveId == null ? "orders" : "archives"}
      SET payment_status = 'paid'
      WHERE id = ?
        AND shopid = ?
        AND payment_status = 'refunded'
        AND payment_provider = 'stripe'`,
-    [orderId, shopId],
+    [archiveId == null ? orderId : archiveId, shopId],
   ),
 
   backfillRefundCharge: ({
@@ -511,6 +506,9 @@ const buildPaymentModule = ({
         connection,
       });
       if (!order) return { attached: false, missing: true };
+      if (order.delivery_id != null && assertCents(data.amount_cents) !== toCents(order.subtotal)) {
+        throw new DomainError(409, "DELIVERY_TOTAL_MISMATCH", "Delivery payment does not match accepted total");
+      }
       const existingPayment = await repository.findPaymentByIntent({
         paymentIntentId: data.stripe_payment_intent_id,
         connection,
@@ -1192,6 +1190,7 @@ const buildPaymentModule = ({
       }
       const updatedOrder = await repository.updateOrderRefundNonFinal({
         orderId: order.id,
+        archiveId: order.archive_id,
         shopId: order.shopid,
         connection,
       });
@@ -1241,6 +1240,7 @@ const buildPaymentModule = ({
       }
       const updatedOrder = await repository.updateOrderRefunded({
         orderId: order.id,
+        archiveId: order.archive_id,
         shopId: order.shopid,
         connection,
       });

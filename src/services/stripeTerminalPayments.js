@@ -10,6 +10,7 @@ const {
 } = require("../helpers/stripeTerminalCardTicket");
 
 const ERRORS = {
+  DELIVERY_REQUOTE_REQUIRED: [409, "Les changements de prix livraison exigent un devis confirme."],
   TERMINAL_INVALID_INPUT: [422, "Parametres du paiement invalides."],
   TERMINAL_INVALID_ORDERS: [409, "Ces commandes ne peuvent pas etre encaissees sur le terminal."],
   TERMINAL_ORDER_BUSY: [409, "Une commande a deja un paiement sur un autre terminal."],
@@ -285,6 +286,8 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
         throw error;
       }
       const { reader, orders, activePayment } = locked;
+      if (orders.some(order => order.delivery_id != null || order.fulfillment_type === "delivery")
+        && Number(input.discountValue || 0) !== 0) fail("DELIVERY_REQUOTE_REQUIRED");
       if (activePayment) {
         if (activePayment.stripe_payment_intent_id) return { activePayment };
         if (Number(activePayment.cashier_user_id) !== cashierUserId) fail("TERMINAL_READER_BUSY");

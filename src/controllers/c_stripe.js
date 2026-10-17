@@ -41,7 +41,8 @@ const {
 } = require("../modules/m_checkout");
 
 const getBaseUrl = (req) => `${req.protocol}://${req.get("host")}`;
-const { mFindOrderById } = require("../modules/m_orders");
+const { mFindOrderById, findCommercialOrderById } = require("../modules/m_orders");
+const deliveryOrders = require("../modules/m_deliveryOrders");
 const { buildStripeTerminalModule } = require("../modules/m_stripeTerminal");
 const { buildStripeTerminalWebhookHandler, retryTerminalTransaction } = require("../services/stripeTerminalWebhooks");
 
@@ -154,6 +155,7 @@ exports.getConnectStatus = async (req, res) => {
 const buildQrTablePaymentIntentController = ({
   getShopInfo = mGetShopInfo,
   createCheckout: createStripeCheckout = createCheckout,
+  resolveDeliveryOrder = deliveryOrders.resolveDeliveryOrder,
   getStripe: getStripeClient = getStripe,
   persistPaymentIntentForOrder: persistPaymentIntent = persistPaymentIntentForOrder,
   cancelProvisionalStripeOrder: cancelProvisional = cancelProvisionalStripeOrder,
@@ -164,8 +166,11 @@ const buildQrTablePaymentIntentController = ({
 } = {}) => async (req, res) => {
   let provisionalOrderId = null;
   let paymentIntent = null;
+  let deliveryOrder = false;
+  const logFailure = (message, error) => deliveryOrder ? logger.error(message) : logger.error(message, error);
   try {
     const body = req.body || {};
+    deliveryOrder = String(body.fulfillment_type || "").trim().toLowerCase() === "delivery";
     const rows = await getShopInfo(req.shopid);
     const shop = rows[0];
     if (!shop) {
@@ -214,6 +219,25 @@ const buildQrTablePaymentIntentController = ({
       checkoutInput.orderSource = req.orderSource;
     }
     const checkoutResult = await createStripeCheckout(checkoutInput);
+    deliveryOrder = deliveryOrder || Boolean(checkoutResult.delivery);
+    let payableTotal = checkoutResult.total;
+    if (deliveryOrder) {
+      // Accepted checkout replay is immutable; it is never payment authority.
+      const current = checkoutResult.delivery && await resolveDeliveryOrder({ shopId: req.shopid, deliveryId: checkoutResult.delivery.id });
+      if (!current || current.orderKind !== "active" || current.order.id !== checkoutResult.orderId
+        || current.order.payment_status !== "requires_payment" || current.order.payment_provider !== "stripe") {
+        return custom(res, 409, "Cette commande a deja ete traitee.", null, { orderId: checkoutResult.orderId, code: "DELIVERY_PAYMENT_NOT_SETTLED" });
+      }
+      payableTotal = deliveryOrders.toDeliveryView(current).financials.grand_total;
+      if (current.order.stripe_payment_intent_id) {
+        const existing = await getStripeClient().paymentIntents.retrieve(current.order.stripe_payment_intent_id);
+        if (!existing || ["succeeded", "canceled"].includes(existing.status)
+          || existing.amount !== toStripeAmount(payableTotal) || existing.currency !== "eur") {
+          return custom(res, 409, "Le paiement doit etre reconcilie.", null, { code: "DELIVERY_PAYMENT_NOT_SETTLED" });
+        }
+        return success(res, "Paiement Stripe cree.", null, { orderId: current.order.id, paymentIntentId: existing.id, clientSecret: existing.client_secret, publishableKey });
+      }
+    }
     provisionalOrderId = checkoutResult.orderId;
     if (checkoutResult.payment_status !== "requires_payment") {
       provisionalOrderId = null;
@@ -223,7 +247,7 @@ const buildQrTablePaymentIntentController = ({
     }
 
     const stripeParams = buildDestinationPaymentIntentParams({
-      amount: checkoutResult.total,
+      amount: payableTotal,
       currency: "eur",
       connectedAccountId: shop.stripe_account_id,
       orderId: provisionalOrderId,
@@ -248,7 +272,7 @@ const buildQrTablePaymentIntentController = ({
       if (!stripeParams.payment_method_configuration || !paymentConfigurationError(error)) {
         throw error;
       }
-      logger.error("Stripe payment method configuration failed; retrying with defaults", error);
+      logFailure("Stripe payment method configuration failed; retrying with defaults", error);
       const fallbackStripeParams = { ...stripeParams };
       delete fallbackStripeParams.payment_method_configuration;
       paymentIntent = await stripe.paymentIntents.create(fallbackStripeParams, {
@@ -259,18 +283,18 @@ const buildQrTablePaymentIntentController = ({
       orderId: provisionalOrderId,
       shopId: req.shopid,
       stripe_payment_intent_id: paymentIntent.id,
-      amount: checkoutResult.total,
-      amount_cents: toStripeAmount(checkoutResult.total),
+      amount: payableTotal,
+      amount_cents: toStripeAmount(payableTotal),
       application_fee_amount: stripeParams.application_fee_amount,
       currency: stripeParams.currency,
       status: paymentIntent.status,
     });
     if (!persistence.attached) {
-      if (paymentIntent.status !== "canceled") {
+      if (!deliveryOrder && paymentIntent.status !== "canceled") {
         try {
           await getStripeClient().paymentIntents.cancel(paymentIntent.id);
         } catch (cancelError) {
-          logger.error("Stripe terminal PaymentIntent cleanup failed", cancelError);
+          logFailure("Stripe terminal PaymentIntent cleanup failed", cancelError);
         }
       }
       provisionalOrderId = null;
@@ -287,7 +311,7 @@ const buildQrTablePaymentIntentController = ({
       publishableKey,
     });
   } catch (error) {
-    if (provisionalOrderId) {
+    if (provisionalOrderId && !deliveryOrder) {
       let externalCancellationConfirmed = !paymentIntent;
       if (paymentIntent && paymentIntent.status !== "canceled") {
         try {
@@ -323,7 +347,7 @@ const buildQrTablePaymentIntentController = ({
       return custom(res, error.status, error.message, null, data);
     }
 
-    logger.error("Stripe payment creation failed", error);
+    logFailure("Stripe payment creation failed", error);
     return failed(res, "Erreur lors de la creation du paiement Stripe.");
   }
 };
@@ -333,11 +357,28 @@ exports.createQrTablePaymentIntent = buildQrTablePaymentIntentController();
 
 const buildRegenerateOrderPaymentIntent = ({
   getShopInfo = mGetShopInfo,
+  resolveOrder = null,
   getStripe: getStripeClient = getStripe,
   persistReplacementPaymentIntent: persistReplacement = persistReplacementPaymentIntent,
   publishableKey = envSTRIPEPUBLISHABLEKEY,
   paymentMethodConfigurationId = envSTRIPEPAYMENTMETHODCONFIGURATIONID,
 } = {}) => async ({ order, contentRevision }) => {
+  const [current] = resolveOrder
+    ? await resolveOrder(order.id, order.shopid)
+    : order.delivery_id != null ? await findCommercialOrderById(order.id, order.shopid) : [];
+  if (resolveOrder && !current) throw new DomainError(404, "ORDER_NOT_FOUND", "Order unavailable");
+  if (order.delivery_id != null || (current && current.delivery_id != null)) {
+    if (!current || current.archive_id != null || current.payment_provider !== "stripe"
+      || !["unpaid", "requires_payment"].includes(current.payment_status)) {
+      throw new DomainError(409, "DELIVERY_PAYMENT_NOT_SETTLED", "Delivery payment must be reconciled before starting payment");
+    }
+    if (order.stripe_replacement_attempt_token !== current.stripe_replacement_attempt_token
+      || order.stripe_payment_intent_id !== current.stripe_payment_intent_id
+      || toStripeAmount(order.subtotal) !== toStripeAmount(current.subtotal)) {
+      throw new DomainError(409, "ORDER_EDIT_CONFLICT", "The accepted delivery payment attempt changed");
+    }
+    order = current;
+  }
   const stripe = getStripeClient();
   const paymentResponse = (paymentIntent) => ({
     orderId: Number(order.id),
@@ -437,7 +478,7 @@ const buildRegenerateOrderPaymentIntent = ({
 };
 
 exports.buildRegenerateOrderPaymentIntent = buildRegenerateOrderPaymentIntent;
-exports.regenerateOrderPaymentIntent = buildRegenerateOrderPaymentIntent();
+exports.regenerateOrderPaymentIntent = buildRegenerateOrderPaymentIntent({ resolveOrder: findCommercialOrderById });
 
 const isPositiveOrderId = (value) => {
   if (typeof value === "number") return Number.isSafeInteger(value) && value > 0;
@@ -884,7 +925,8 @@ const buildRefundPaidOrderController = ({
   getPaidOrderForRefund: findPaidOrder = async (orderId, shopId) => {
     const payments = await getPaidOrderForRefund(orderId, shopId);
     if (payments.length) return payments;
-    const orders = await mFindOrderById(orderId, shopId);
+    let orders = await mFindOrderById(orderId, shopId);
+    if (!orders.length) orders = await findCommercialOrderById(orderId, shopId);
     return orders[0] && orders[0].stripe_terminal_payment_id != null ? orders : payments;
   },
   refundTerminalOrder: refundTerminal = (input) => terminalOrderRefundService.refundTerminalOrder(input),
@@ -1042,6 +1084,7 @@ const buildRefundPaidOrderController = ({
           : 0;
         refund = await stripe.refunds.create({
           payment_intent: payment.stripe_payment_intent_id,
+          ...(payment.delivery_id != null && { amount: payment.amount_cents }),
           reverse_transfer: true,
           refund_application_fee: true,
           metadata: {
@@ -1149,7 +1192,10 @@ exports.refundPaidOrder = buildRefundPaidOrderController();
 const buildTerminalOrderRefundService = ({
   getStripe: getStripeClient = getStripe,
   terminalStore,
-  findOrderById = mFindOrderById,
+  findOrderById = async (orderId, shopId) => {
+    const rows = await mFindOrderById(orderId, shopId);
+    return rows.length ? rows : findCommercialOrderById(orderId, shopId);
+  },
 } = {}) => {
   const context = async (shopId, orderId) => {
     const [order] = await findOrderById(orderId, shopId);

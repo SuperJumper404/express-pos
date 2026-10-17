@@ -3,16 +3,28 @@ const conn = require("../config/db");
 const pool = require("../config/dbPool");
 const {
   buildCashRegisterArchiveFields,
+  buildCashRegisterCollectionFields,
+  assertDeliveryCollectionAllowed,
+  assertDeliverySettlementDiscount,
 } = require("../helpers/cashRegisterPayment");
 const { calculateDiscount } = require("../helpers/discount");
 const { parseMoney } = require("../helpers/money");
 const { withTransaction } = require("../helpers/withTransaction");
 const { buildStripeTerminalModule } = require("./m_stripeTerminal");
 const DomainError = require("../helpers/domainError");
+const deliveryOrders = require("./m_deliveryOrders");
+const { toCents, assertCents } = require("../helpers/deliveryMoney");
 
 const queryResult = async (connection, sql, params = []) => {
   const [result] = await (connection || pool).query(sql, params);
   return result;
+};
+
+const assertNoPendingDeliveryTerminal = async ({ orderId, shopId, connection }) => {
+  const pending = await queryResult(connection, `SELECT p.id FROM stripe_terminal_payment_orders a
+    JOIN stripe_terminal_payments p ON p.id = a.terminal_payment_id AND p.shopid = a.shopid
+    WHERE a.shopid = ? AND a.order_id = ? AND p.status IN ('creating','processing') LIMIT 1 FOR UPDATE`, [shopId, orderId]);
+  if (pending.length) throw new DomainError(409, "DELIVERY_PAYMENT_NOT_SETTLED", "Delivery payment must be reconciled before collection");
 };
 
 const archiveSqlRepository = {
@@ -29,7 +41,8 @@ const archiveSqlRepository = {
     const params = shopId == null ? [orderId] : [orderId, shopId];
     return queryResult(
       connection,
-      `SELECT * FROM orders
+      `SELECT orders.*, CAST(delivery_id AS CHAR) AS delivery_id,
+              CAST(customer_account_id AS CHAR) AS customer_account_id FROM orders
        WHERE id = ?${shopClause}
        LIMIT 1 FOR UPDATE`,
       params,
@@ -93,7 +106,9 @@ const archiveSqlRepository = {
             orderdetail.unit_price_ht AS unit_price_ht,
             orderdetail.unit_vat AS unit_vat,
             orderdetail.total_ht AS total_ht,
-            orderdetail.total_vat AS total_vat
+            orderdetail.total_vat AS total_vat,
+            CAST(orders.delivery_id AS CHAR) AS delivery_id,
+            CAST(orders.customer_account_id AS CHAR) AS customer_account_id
      FROM orders
      LEFT JOIN orderdetail ON orders.id = orderdetail.orderid
      LEFT JOIN products ON orderdetail.productid = products.id
@@ -126,7 +141,9 @@ const archiveSqlRepository = {
             archivesdetail.unit_price_ht AS unit_price_ht,
             archivesdetail.unit_vat AS unit_vat,
             archivesdetail.total_ht AS total_ht,
-            archivesdetail.total_vat AS total_vat
+            archivesdetail.total_vat AS total_vat,
+            CAST(archives.delivery_id AS CHAR) AS delivery_id,
+            CAST(archives.customer_account_id AS CHAR) AS customer_account_id
      FROM archives
      LEFT JOIN archivesdetail ON archives.id = archivesdetail.orderId
      LEFT JOIN products ON archivesdetail.productid = products.id
@@ -142,7 +159,9 @@ const archiveSqlRepository = {
             archivesdetail.unit_price_ht AS unit_price_ht,
             archivesdetail.unit_vat AS unit_vat,
             archivesdetail.total_ht AS total_ht,
-            archivesdetail.total_vat AS total_vat
+            archivesdetail.total_vat AS total_vat,
+            CAST(archives.delivery_id AS CHAR) AS delivery_id,
+            CAST(archives.customer_account_id AS CHAR) AS customer_account_id
      FROM archives
      LEFT JOIN archivesdetail ON archives.id = archivesdetail.orderId
      LEFT JOIN products ON archivesdetail.productid = products.id
@@ -192,6 +211,9 @@ const ARCHIVE_ORDER_FIELDS = [
   "finished",
   "remark",
   "is_takeaway",
+  "delivery_id",
+  "customer_account_id",
+  "fulfillment_type",
 ];
 
 const pickArchiveOrderFields = (order = {}) => ARCHIVE_ORDER_FIELDS.reduce(
@@ -399,6 +421,20 @@ const buildOrderArchiveModule = ({
       });
       if (!order) throw new Error("Commande introuvable");
 
+      let deliveryContext;
+      if (order.delivery_id != null) {
+        deliveryContext = await deliveryOrders.resolveDeliveryOrder({ shopId: order.shopid, deliveryId: order.delivery_id, connection, forUpdate: true });
+        if (Number(order.status) !== 3) {
+          throw new DomainError(409, "DELIVERY_PREPARATION_NOT_FINISHED", "Delivery preparation must be finished before archive");
+        }
+        if (discount.hiddenFromHistory) {
+          throw new DomainError(409, "DELIVERY_ARCHIVE_NOT_ALLOWED", "Delivery cancellation requires its explicit workflow");
+        }
+        assertDeliverySettlementDiscount(order, discount);
+        buildCashRegisterArchiveFields({ order, paymentMethod });
+        await assertNoPendingDeliveryTerminal({ orderId: order.id, shopId: order.shopid, connection });
+      }
+
       const hiddenFromHistory = Boolean(discount.hiddenFromHistory);
       if (hiddenFromHistory && Array.isArray(discount.allowedStatuses)) {
         const allowedStatuses = new Set(discount.allowedStatuses.map(Number));
@@ -426,16 +462,24 @@ const buildOrderArchiveModule = ({
         orderId: id,
         connection,
       });
+      if (deliveryContext) {
+        const view = deliveryOrders.toDeliveryView(deliveryContext);
+        const products = orderDetails.reduce((sum, detail) => assertCents(sum + toCents(detail.total)), 0);
+        if (assertCents(products + view.financials.delivery_charge.feeCents) !== toCents(order.subtotal)
+          || (terminalAllocation && terminalAllocation.amount_cents !== toCents(order.subtotal))) {
+          throw new DomainError(409, "DELIVERY_TOTAL_MISMATCH", "Delivery settlement must match its accepted total");
+        }
+      }
       const discountApplication = applyArchiveDiscountToDetails({
         order,
         orderDetails,
-        discount: terminalAllocation && orderDetails.length ? {
+        discount: deliveryContext ? {} : terminalAllocation && orderDetails.length ? {
           discountType: "amount",
           discountValue: (orderDetails.reduce((sum, detail) => sum + cents(detail.total), 0)
             - terminalAllocation.amount_cents) / 100,
         } : terminalAllocation ? {} : discount,
       });
-      if (terminalAllocation && !orderDetails.length) {
+      if (!deliveryContext && terminalAllocation && !orderDetails.length) {
         const discountAmount = (cents(order.subtotal) - terminalAllocation.amount_cents) / 100;
         discountApplication.archiveDiscountFields = {
           subtotal: terminalAllocation.amount_cents / 100, subtotal_before_discount: parseMoney(order.subtotal),
@@ -457,6 +501,10 @@ const buildOrderArchiveModule = ({
       };
       const archiveResult = await repository.insertArchive({ archive, connection });
       const archiveOrderId = archiveResult.insertId;
+      if (deliveryContext) {
+        await deliveryOrders.archiveDeliveryOrder({ shopId: order.shopid, deliveryId: order.delivery_id,
+          archiveId: archiveOrderId, preparationStatus: order.status, connection });
+      }
 
       const detailIds = orderDetails.map((detail) => detail.id);
       const activeSnapshots = await repository.findActiveSnapshots({
@@ -1055,7 +1103,8 @@ module.exports = {
   mAllArchivedOrders: (shopid) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        `SELECT archives.*,
+        `SELECT archives.*, CAST(archives.delivery_id AS CHAR) AS delivery_id,
+                CAST(archives.customer_account_id AS CHAR) AS customer_account_id,
                 service_points.name AS service_point_name,
                 CASE WHEN archives.payment_provider = 'stripe_terminal'
                   AND terminal_payment.status = 'succeeded'
@@ -1185,7 +1234,8 @@ module.exports = {
     return new Promise((resolve, reject) => {
       // Étape 1 : Récupérer les commandes archivées dans la plage de dates
       const query1 = `
-      SELECT archives.*, service_points.name AS service_point_name
+      SELECT archives.*, CAST(archives.delivery_id AS CHAR) AS delivery_id,
+        CAST(archives.customer_account_id AS CHAR) AS customer_account_id, service_points.name AS service_point_name
       FROM archives 
       LEFT JOIN service_points ON service_points.id = archives.service_point_id
       WHERE archives.shopid = ? 
@@ -1244,16 +1294,46 @@ module.exports = {
 };
 
 const legacyAllArchivedOrdersWithDetails = module.exports.mAllArchivedOrdersWithDetails;
+const legacyAllArchivedOrders = module.exports.mAllArchivedOrders;
+const withDeliveryFinancials = async (rows) => {
+  const contexts = new Map();
+  return Promise.all(rows.map(async row => {
+    if (row.delivery_id == null) return row;
+    const key = `${row.shopid}:${row.delivery_id}`;
+    if (!contexts.has(key)) contexts.set(key, deliveryOrders.resolveDeliveryOrder({ shopId: row.shopid, deliveryId: row.delivery_id }));
+    const resolved = await contexts.get(key);
+    if (!resolved) throw new DomainError(409, "DELIVERY_ORDER_MISSING", "Delivery commercial order is unavailable");
+    const { financials } = deliveryOrders.toDeliveryView(resolved);
+    return { ...row, delivery_id: resolved.delivery.id, customer_account_id: resolved.delivery.customer_account_id,
+      originalorderID: resolved.delivery.origin_order_id, payment_order_id: resolved.delivery.origin_order_id,
+      financials, ...financials };
+  }));
+};
+module.exports.findCommercialOrderById = async (orderId, shopId) => {
+  const order = await deliveryOrders.resolveCommercialOrder({ orderId, shopId });
+  return order ? [order] : [];
+};
+module.exports.collectDeliveryOrderPayment = ({ orderId, shopId, paymentMethod, discount }) => withTransaction(async connection => {
+  const order = await deliveryOrders.resolveCommercialOrder({ orderId, shopId, connection, forUpdate: true });
+  if (!order || order.delivery_id == null || order.archive_id != null) throw new DomainError(404, "ORDER_NOT_FOUND", "Order unavailable");
+  const context = await deliveryOrders.resolveDeliveryOrder({ shopId, deliveryId: order.delivery_id, connection, forUpdate: true });
+  deliveryOrders.toDeliveryView(context);
+  assertDeliverySettlementDiscount(order, discount);
+  assertDeliveryCollectionAllowed(order);
+  await assertNoPendingDeliveryTerminal({ orderId, shopId, connection });
+  return queryResult(connection, "UPDATE orders SET ? WHERE shopid = ? AND id = ? AND payment_status = 'unpaid'", [buildCashRegisterCollectionFields(paymentMethod), shopId, orderId]);
+});
 module.exports.buildOrderArchiveModule = buildOrderArchiveModule;
 module.exports.pickArchiveOrderFields = pickArchiveOrderFields;
 module.exports.mArchiveOrder = orderArchiveModule.mArchiveOrder;
-module.exports.mDetailArchivedOrder = orderArchiveModule.mDetailArchivedOrder;
-module.exports.mDetailArchivedOrderByToken = orderArchiveModule.mDetailArchivedOrderByToken;
-module.exports.mDetailOrder = orderArchiveModule.mDetailOrder;
+module.exports.mDetailArchivedOrder = async (...args) => withDeliveryFinancials(await orderArchiveModule.mDetailArchivedOrder(...args));
+module.exports.mDetailArchivedOrderByToken = async (...args) => withDeliveryFinancials(await orderArchiveModule.mDetailArchivedOrderByToken(...args));
+module.exports.mDetailOrder = async (...args) => withDeliveryFinancials(await orderArchiveModule.mDetailOrder(...args));
+module.exports.mAllArchivedOrders = async (...args) => withDeliveryFinancials(await legacyAllArchivedOrders(...args));
 module.exports.mAllArchivedOrdersWithDetails = async (...args) => {
   const orders = await legacyAllArchivedOrdersWithDetails(...args);
-  return Promise.all(orders.map(async (order) => ({
+  return withDeliveryFinancials(await Promise.all(orders.map(async (order) => ({
     ...order,
     details: await orderArchiveModule.hydrateArchivedDetails(order.details || []),
-  })));
+  }))));
 };

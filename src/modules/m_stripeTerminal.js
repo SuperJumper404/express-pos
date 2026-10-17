@@ -1,3 +1,6 @@
+const { resolveCommercialOrder } = require("./m_deliveryOrders");
+const { toCents } = require("../helpers/deliveryMoney");
+
 const queryWith = async (connection, sql, params = []) => {
   if (typeof connection.promise === "function") {
     return new Promise((resolve, reject) => {
@@ -36,9 +39,9 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
     let reusable = false;
     try {
       const rows = await queryWith(dedicated, `SELECT GET_LOCK(?, ${waitSeconds}) AS acquired`, [lockName]);
-      acquired = rows[0].acquired === 1;
+      acquired = String(rows[0].acquired) === "1";
       if (!acquired) {
-        reusable = rows[0].acquired === 0;
+        reusable = String(rows[0].acquired) === "0";
         if (reusable) return null;
         throw new Error("Terminal payment lock unavailable");
       }
@@ -63,7 +66,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
       if (acquired) {
         try {
           const rows = await queryWith(dedicated, "SELECT RELEASE_LOCK(?) AS released", [lockName]);
-          reusable = rows[0].released === 1;
+          reusable = String(rows[0].released) === "1";
         } catch (error) { reusable = false; }
       }
       context.healthy = context.healthy && reusable;
@@ -102,9 +105,9 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
     let reusable = false;
     try {
       const rows = await queryWith(dedicated, "SELECT GET_LOCK(?, 10) AS acquired", [lockName]);
-      acquired = rows[0].acquired === 1;
+      acquired = String(rows[0].acquired) === "1";
       if (!acquired) {
-        reusable = rows[0].acquired === 0;
+        reusable = String(rows[0].acquired) === "0";
         const error = new Error("Terminal registration is busy");
         error.code = "TERMINAL_REGISTRATION_BUSY";
         throw error;
@@ -123,7 +126,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
       if (acquired) {
         try {
           const rows = await queryWith(dedicated, "SELECT RELEASE_LOCK(?) AS released", [lockName]);
-          reusable = rows[0].released === 1;
+          reusable = String(rows[0].released) === "1";
         } catch (error) {
           reusable = false;
         }
@@ -414,7 +417,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
   const listPaymentAllocations = ({ shopId, paymentId }) => {
     requireShopId(shopId);
     return query(
-      `SELECT a.* FROM stripe_terminal_payment_orders a
+      `SELECT a.*, p.status AS terminal_payment_status FROM stripe_terminal_payment_orders a
        JOIN stripe_terminal_payments p ON p.id = a.terminal_payment_id
          AND p.shopid = a.shopid
        WHERE a.shopid = ? AND a.terminal_payment_id = ? AND p.shopid = ?
@@ -451,7 +454,8 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
     if (!reader) throw new Error("No active assigned Terminal reader");
     const sortedIds = [...orderIds].sort((a, b) => a - b);
     const orders = await query(
-      `SELECT o.* FROM orders o
+      `SELECT o.*, CAST(o.delivery_id AS CHAR) AS delivery_id,
+              CAST(o.customer_account_id AS CHAR) AS customer_account_id FROM orders o
        WHERE o.shopid = ? AND o.id IN (${sortedIds.map(() => "?").join(", ")})
        ORDER BY o.id FOR UPDATE`,
       [shopId, ...sortedIds],
@@ -462,6 +466,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
       || Number(order.status) !== 3
       || order.payment_status !== "unpaid"
       || order.stripe_terminal_payment_id != null
+      || (order.delivery_id != null && (order.payment_provider != null || order.stripe_payment_intent_id != null))
     ))) throw new Error("Invalid Terminal order selection");
     const activePayment = await findActivePaymentForReader({
       shopId, readerId: reader.id, forUpdate: true,
@@ -493,6 +498,15 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
        ORDER BY o.id FOR UPDATE`,
       [shopId, ...orderIds],
     ) : [];
+    // Only settled deliveries can have moved to archives. Keep every commercial
+    // lock before the payment lock, and retain original IDs for allocations.
+    if (allocations.some(allocation => allocation.terminal_payment_status === "succeeded")) {
+      for (const orderId of orderIds) {
+        if (orders.some(order => order.id === orderId)) continue;
+        const archived = await resolveCommercialOrder({ shopId, orderId, connection, forUpdate: true });
+        if (archived && archived.archive_id != null) orders.push(archived);
+      }
+    }
     const payment = await findPaymentSession({ shopId, paymentId, forUpdate: true });
     return { payment, orders, allocations };
   };
@@ -513,6 +527,10 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
       Number(order.shopid) !== Number(shopId) || Number(order.status) !== 3
       || order.payment_status !== "unpaid" || order.stripe_terminal_payment_id != null
     ))) throw new Error("Terminal order finalization incomplete");
+    if (lockedOrders.some(order => order.delivery_id != null && (
+      !allocations.some(allocation => allocation.order_id === order.id && allocation.amount_cents === toCents(order.subtotal))
+      || order.payment_provider != null || order.stripe_payment_intent_id != null
+    ))) throw new Error("Terminal delivery allocation does not match accepted total");
     const orders = await query(
       `UPDATE orders o
        JOIN stripe_terminal_payment_orders a ON a.order_id = o.id
@@ -521,7 +539,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
            o.payment_provider = 'stripe_terminal',
            o.payment = 'Carte bancaire - TPE Stripe',
            o.stripe_terminal_payment_id = ?,
-           o.finished = ?
+           o.finished = CASE WHEN o.delivery_id IS NULL THEN ? ELSE o.finished END
        WHERE o.shopid = ? AND a.shopid = ? AND a.terminal_payment_id = ?
          AND o.payment_status = 'unpaid' AND o.stripe_terminal_payment_id IS NULL`,
       [paymentId, timestamp, shopId, shopId, paymentId],
@@ -646,9 +664,9 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
       : ["failed", "canceled"].includes(refundStatus) ? "paid" : "refund_pending";
     if (current.order.payment_status !== paymentStatus) {
       const saved = await query(
-        `UPDATE orders SET payment_status = ?
+        `UPDATE ${current.order.archive_id == null ? "orders" : "archives"} SET payment_status = ?
          WHERE shopid = ? AND id = ? AND stripe_terminal_payment_id = ?`,
-        [paymentStatus, scope.shopId, scope.orderId, scope.paymentId],
+        [paymentStatus, scope.shopId, current.order.archive_id == null ? scope.orderId : current.order.archive_id, scope.paymentId],
       );
       if (saved.affectedRows !== 1) throw new Error("Terminal refund order update failed");
     }

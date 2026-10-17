@@ -17,14 +17,38 @@ const projection = `CAST(d.id AS CHAR) AS id, d.shopid, d.origin_order_id, d.ord
   d.tracking_expires_at, d.closed_at, d.created_at, d.updated_at`;
 const orderProjection = `id, shopid, ordernumber, subtotal, subtotal_before_discount,
   discount_amount, discount_type, discount_value, payment_status, payment_provider, status,
+  payment, stripe_payment_intent_id, stripe_terminal_payment_id, finished,
   customerID, CAST(delivery_id AS CHAR) AS delivery_id, CAST(customer_account_id AS CHAR) AS customer_account_id,
   fulfillment_type, order_source`;
 
+// Payment references always use the original order ID, never the archive PK.
+// Lock commercial rows before the dossier, compatible with edits and Terminal.
+const resolveCommercialOrder = async ({ shopId, orderId, connection, forUpdate = false }) => {
+  if (forUpdate) requireConnection(connection);
+  const lock = forUpdate ? " FOR UPDATE" : "";
+  const shopClause = shopId == null ? "" : " AND shopid = ?";
+  const values = shopId == null ? [orderId] : [orderId, shopId];
+  const [active] = await query(connection, `SELECT orders.*, CAST(delivery_id AS CHAR) AS delivery_id,
+    CAST(customer_account_id AS CHAR) AS customer_account_id FROM orders WHERE id = ?${shopClause} LIMIT 1${lock}`, values);
+  if (active || shopId == null) return active || null;
+  const [link] = await query(connection, "SELECT CAST(id AS CHAR) AS id FROM deliveries WHERE shopid = ? AND origin_order_id = ?", [shopId, orderId]);
+  if (!link) return null;
+  const [archive] = await query(connection, `SELECT archives.*, CAST(delivery_id AS CHAR) AS delivery_id,
+    CAST(customer_account_id AS CHAR) AS customer_account_id FROM archives WHERE shopid = ? AND delivery_id = ? LIMIT 1${lock}`, [shopId, link.id]);
+  return archive ? { ...archive, id: orderId, archive_id: archive.id } : null;
+};
+
 const financialsFor = (delivery, order) => {
   const charge = delivery.charge;
+  const items = toCents(order.subtotal_before_discount);
+  const discount = toCents(order.discount_amount || 0);
+  const total = toCents(order.subtotal);
+  if (discount > items || assertCents(items - discount + charge.feeCents) !== total) {
+    throw new DomainError(409, "DELIVERY_TOTAL_MISMATCH", "Delivery financial snapshot is inconsistent");
+  }
   return {
-    items_total: Number(order.subtotal_before_discount), items_discount: Number(order.discount_amount || 0),
-    delivery_fee: fromCents(charge.feeCents), grand_total: Number(order.subtotal),
+    items_total: fromCents(items), items_discount: fromCents(discount),
+    delivery_fee: fromCents(charge.feeCents), grand_total: fromCents(total),
     delivery_charge: charge,
   };
 };
@@ -55,19 +79,23 @@ const buildDeliveryOrders = ({ clock = () => new Date(), randomToken = createTra
     if (!/^[1-9]\d{0,19}$/.test(String(deliveryId))) throw new DomainError(400, "DELIVERY_REQUEST_INVALID", "Invalid delivery identifier");
     if (forUpdate) requireConnection(connection);
     const lock = forUpdate ? " FOR UPDATE" : "";
-    const [delivery] = await query(connection, `SELECT ${projection} FROM deliveries d WHERE d.shopid = ? AND d.id = ?${lock}`, [shopId, deliveryId]);
-    if (!delivery) return null;
-    let [order] = await query(connection, `SELECT ${orderProjection} FROM orders WHERE shopid = ? AND delivery_id = ?${lock}`, [shopId, deliveryId]);
+    const [identity] = await query(connection, "SELECT origin_order_id FROM deliveries WHERE shopid = ? AND id = ?", [shopId, deliveryId]);
+    if (!identity) return null;
+    let [order] = await query(connection, `SELECT ${orderProjection} FROM orders WHERE shopid = ? AND id = ?${lock}`, [shopId, identity.origin_order_id]);
     let orderKind = "active";
     if (!order) {
       [order] = await query(connection, `SELECT ${orderProjection} FROM archives WHERE shopid = ? AND delivery_id = ?${lock}`, [shopId, deliveryId]);
       orderKind = "archive";
     }
     if (!order) throw new DomainError(409, "DELIVERY_ORDER_MISSING", "Delivery commercial order is unavailable");
+    const [delivery] = await query(connection, `SELECT ${projection} FROM deliveries d WHERE d.shopid = ? AND d.id = ?${lock}`, [shopId, deliveryId]);
+    if (!delivery || String(order.delivery_id) !== String(deliveryId) || delivery.origin_order_id !== identity.origin_order_id) {
+      throw new DomainError(409, "DELIVERY_ORDER_MISSING", "Delivery commercial link changed");
+    }
     const [charge] = await query(connection, `SELECT CAST(band_fee_cents AS CHAR) AS band_fee_cents,
       free_delivery_applied, CAST(fee_cents AS CHAR) AS fee_cents,
       CAST(total_excl_tax_cents AS CHAR) AS total_excl_tax_cents, CAST(tax_cents AS CHAR) AS tax_cents,
-      vat_rate, fiscal_policy FROM delivery_charge_snapshots WHERE shopid = ? AND delivery_id = ? AND revision = ?`,
+      vat_rate, fiscal_policy FROM delivery_charge_snapshots WHERE shopid = ? AND delivery_id = ? AND revision = ?${lock}`,
     [shopId, deliveryId, delivery.charge_revision]);
     if (!charge) throw new DomainError(409, "DELIVERY_CHARGE_MISSING", "Delivery financial snapshot is unavailable");
     delivery.charge = {
@@ -76,6 +104,18 @@ const buildDeliveryOrders = ({ clock = () => new Date(), randomToken = createTra
       taxCents: assertCents(Number(charge.tax_cents)), vatRate: Number(charge.vat_rate), fiscalPolicy: json(charge.fiscal_policy),
     };
     return { delivery, order, orderKind };
+  };
+  const archiveDeliveryOrder = async ({ shopId, deliveryId, archiveId, preparationStatus, connection }) => {
+    requireConnection(connection);
+    const current = await resolveDeliveryOrder({ shopId, deliveryId, connection, forUpdate: true });
+    if (!current || Number(preparationStatus) !== 3 || Number(current.order.status) !== 3) {
+      throw new DomainError(409, "DELIVERY_PREPARATION_NOT_FINISHED", "Delivery preparation must be finished before archive");
+    }
+    const [archive] = await query(connection, "SELECT id, payment_status FROM archives WHERE shopid = ? AND id = ? AND delivery_id = ? FOR UPDATE", [shopId, archiveId, deliveryId]);
+    if (!archive || !["paid", "refunded"].includes(archive.payment_status)) {
+      throw new DomainError(409, "DELIVERY_PAYMENT_NOT_SETTLED", "Delivery payment must be settled before archive");
+    }
+    await query(connection, "UPDATE deliveries SET preparation_status = ?, updated_at = ? WHERE shopid = ? AND id = ?", [preparationStatus, date(clock()), shopId, deliveryId]);
   };
   const insertCharge = async ({ deliveryId, shopId, revision, quote, connection }) => {
     const charge = quote.chargeSnapshot;
@@ -154,7 +194,7 @@ const buildDeliveryOrders = ({ clock = () => new Date(), randomToken = createTra
       next: { delivery: view, settingsRevision: quote.settingsRevision, chargeRevision: revision, distanceMeters: quote.distanceMeters }, result: response, connection });
     return response;
   };
-  return { createDeliveryForOrder, resolveDeliveryOrder, toDeliveryView, findCheckoutReplay, findEditReplay, assertEditable, reviseDeliveryForOrder };
+  return { createDeliveryForOrder, resolveDeliveryOrder, archiveDeliveryOrder, toDeliveryView, findCheckoutReplay, findEditReplay, assertEditable, reviseDeliveryForOrder };
 };
 const service = buildDeliveryOrders();
-module.exports = { buildDeliveryOrders, ...service };
+module.exports = { buildDeliveryOrders, resolveCommercialOrder, ...service };
