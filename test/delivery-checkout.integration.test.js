@@ -6,6 +6,9 @@ async function main() {
     await db.seedScenario();
     // Exercise production repositories against SQL; never load application credentials.
     require.cache[require.resolve("../src/config/dbPool")] = { exports: db.pool };
+    require.cache[require.resolve("../src/config/db")] = { exports: db.pool.pool };
+    // Bridge the real ESM dependency for legacy CommonJS handlers on Node 18.
+    require.cache[require.resolve("nanoid")] = { exports: await import("nanoid") };
     const { createTransactionRunner } = require("../src/helpers/withTransaction");
     const { buildCheckoutModule } = require("../src/modules/m_checkout");
     const { buildDeliveryQuotes } = require("../src/modules/m_deliveryQuotes");
@@ -65,7 +68,11 @@ async function main() {
     assert.equal(first.delivery.financials.delivery_fee, 4);
     assert.equal(first.delivery.financials.grand_total, 24);
     const { hashTrackingToken } = require("../src/helpers/deliveryTrackingToken");
-    const previousToken = first.tracking_url.split("/").pop();
+    assert.equal(/^\/livraison\/suivi#[A-Za-z0-9_-]{43}$/.test(first.tracking_url), true, "Initial tracking link must use /livraison/suivi#<token>");
+    const trackingLink = new URL(first.tracking_url, "https://delivery.example.test");
+    assert.equal(trackingLink.pathname, "/livraison/suivi");
+    assert.equal(trackingLink.search, "");
+    const previousToken = trackingLink.hash.slice(1);
     assert.equal(Buffer.from(previousToken, "base64url").length, 32);
     const [delivery] = await db.readRows("SELECT * FROM deliveries WHERE id = ?", [order.delivery_id]);
     assert.equal(delivery.tracking_token_hash, hashTrackingToken(previousToken));
@@ -277,7 +284,97 @@ async function main() {
       assert.equal((await checkout.createCheckout(original)).orderId, accepted.orderId);
       await assert.rejects(checkout.createCheckout({ ...original, fulfillmentType: "takeaway", isTakeaway: true, expectedTotal: 20 }), { code: "IDEMPOTENCY_KEY_REUSED" });
     });
-    assert.deepStrictEqual(reviewFailures, [], "Self-review regressions must pass");
+    const legacy = require("../src/controllers/c_orders");
+    const invokeLegacy = (handler, req) => new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Legacy handler did not respond")), 5000);
+      const response = {
+        status(code) { this.statusCode = code; return this; },
+        json(body) { clearTimeout(timeout); this.body = body; resolve(this); return this; },
+      };
+      Promise.resolve().then(() => handler(req, response)).catch(error => { clearTimeout(timeout); reject(error); });
+    });
+    const legacyHeader = {
+      customer: "Legacy handler fixture", customerID: 70, operator: 10,
+      subtotal: 20, payment: "cash", status: 1,
+    };
+    const legacyDetail = { productid: 21, price: 20, qty: 1, total: 20, operator: 10, customizationList: [] };
+    const legacyState = async () => ({
+      counts: await counts(),
+      products: await db.readRows("SELECT id, stock FROM products ORDER BY id"),
+      orders: await db.readRows("SELECT id, shopid, subtotal, fulfillment_type, CAST(delivery_id AS CHAR) AS delivery_id FROM orders ORDER BY id"),
+    });
+    const invokeHeader = (body, shopid = 7) => invokeLegacy(legacy.addOrder, { shopid, body });
+    const invokeDetail = (orderid, shopid = 7) => invokeLegacy(legacy.addDetailOrder, { shopid, body: { ...legacyDetail, orderid } });
+    for (const intent of [
+      { fulfillment_type: "delivery" }, { fulfillment_type: " DELIVERY " },
+      { delivery_quote_token: "fixture-proof" }, { address_resolution_token: "fixture-proof" },
+      { delivery_confirmation_secret: "fixture-private-context" }, { delivery_id: "41" },
+      { delivery_quote_token: null }, { address_resolution_token: "" },
+    ]) {
+      await reviewCase(`SQL actual legacy header rejects ${Object.keys(intent)[0]}=${intent.fulfillment_type || typeof Object.values(intent)[0]}`, async () => {
+        const before = await legacyState();
+        const response = await invokeHeader({ ...legacyHeader, ...intent });
+        assert.equal(response.statusCode, 409);
+        assert.equal(response.body.data.code, "DELIVERY_CHECKOUT_REQUIRED");
+        assert.deepStrictEqual(await legacyState(), before);
+      });
+    }
+    await reviewCase("SQL actual legacy detail rejects linked delivery before mutation", async () => {
+      const before = await legacyState();
+      const response = await invokeDetail(first.orderId);
+      assert.equal(response.statusCode, 409);
+      assert.equal(response.body.data.code, "DELIVERY_CHECKOUT_REQUIRED");
+      assert.deepStrictEqual(await legacyState(), before);
+    });
+    const normalHeader = await invokeHeader(legacyHeader);
+    assert.equal(normalHeader.statusCode, 201);
+    const normalOrderId = normalHeader.body.data.insertId;
+    await reviewCase("SQL actual normal legacy header and detail retain sale and stock behavior", async () => {
+      const [created] = await db.readRows("SELECT * FROM orders WHERE id = ?", [normalOrderId]);
+      assert.equal(created.shopid, 7);
+      assert.equal(created.customerID, 70);
+      assert.equal(Number(created.subtotal), 20);
+      assert.equal(created.delivery_id, null);
+      const beforeStock = (await db.readRows("SELECT stock FROM products WHERE id = 21"))[0].stock;
+      const beforeMovements = (await db.readRows("SELECT * FROM stocks WHERE productid = 21")).length;
+      const response = await invokeDetail(normalOrderId);
+      assert.equal(response.statusCode, 200);
+      const [detail] = await db.readRows("SELECT * FROM orderdetail WHERE orderid = ?", [normalOrderId]);
+      assert.equal(detail.productid, 21);
+      assert.equal(Number(detail.total), 20);
+      assert.equal(Number(detail.qty), 1);
+      assert.equal((await db.readRows("SELECT stock FROM products WHERE id = 21"))[0].stock, beforeStock - 1);
+      assert.equal((await db.readRows("SELECT * FROM stocks WHERE productid = 21")).length, beforeMovements + 1);
+    });
+    await reviewCase("SQL actual legacy detail rejects delivery fulfillment without linked ID", async () => {
+      await db.pool.query("UPDATE orders SET fulfillment_type = 'delivery' WHERE id = ?", [normalOrderId]);
+      const before = await legacyState();
+      const response = await invokeDetail(normalOrderId);
+      assert.equal(response.statusCode, 409);
+      assert.deepStrictEqual(await legacyState(), before);
+    });
+    const foreignHeader = await invokeHeader(legacyHeader, 8);
+    assert.equal(foreignHeader.statusCode, 201);
+    const foreignOrderId = foreignHeader.body.data.insertId;
+    await reviewCase("SQL actual legacy detail hides foreign delivery/legacy and missing targets without mutations", async () => {
+      const before = await legacyState();
+      const foreignDelivery = await invokeDetail(first.orderId, 8);
+      const foreignLegacy = await invokeDetail(foreignOrderId, 7);
+      const missing = await invokeDetail(2147483647, 7);
+      assert.equal(foreignDelivery.statusCode, 404);
+      assert.equal(foreignLegacy.statusCode, 404);
+      assert.equal(missing.statusCode, 404);
+      assert.deepStrictEqual(foreignDelivery.body, missing.body);
+      assert.deepStrictEqual(foreignLegacy.body, missing.body);
+      assert.deepStrictEqual(await legacyState(), before);
+    });
+    await reviewCase("SQL actual legacy invalid detail retains validation response without mutations", async () => {
+      const before = await legacyState();
+      const response = await invokeLegacy(legacy.addDetailOrder, { shopid: 7, body: { ...legacyDetail, orderid: normalOrderId, qty: 0 } });
+      assert.equal(response.statusCode, 400);
+      assert.deepStrictEqual(await legacyState(), before);
+    });
+    assert.deepStrictEqual(reviewFailures, [], "Self-review and actual-handler regressions must pass");
   });
   console.log("delivery checkout SQL tests passed");
 }

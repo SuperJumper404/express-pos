@@ -198,6 +198,14 @@ exports.detailOrder = (req, res) => {
 };
 exports.addOrder = async (req, res) => {
   const body = req.body;
+  if ((typeof body.fulfillment_type === "string"
+    && body.fulfillment_type.trim().toLowerCase() === "delivery")
+    || ["delivery_quote_token", "address_resolution_token", "delivery_confirmation_secret", "delivery_id"]
+      .some((key) => Object.prototype.hasOwnProperty.call(body, key))) {
+    return custom(res, 409, "Utilisez le checkout pour une livraison.", null, {
+      code: "DELIVERY_CHECKOUT_REQUIRED",
+    });
+  }
   const subtotal = parseMoney(body.subtotal);
   const shopRows = await mGetShopInfo(req.shopid).catch((error) => {
     failed(res, "Erreur serveur.", error.message);
@@ -309,25 +317,39 @@ exports.addDetailOrder = (req, res) => {
   ) {
     custom(res, 400, "Requête invalide.", null, null);
   } else {
-    const dataDetail = {
-      orderid,
-      productid,
-      price,
-      qty,
-      total,
-    };
-    mAddDetailOrder(dataDetail, customizationList)
-      .then(() => {
-        mReduceStock(qty, productid)
+    if (!req.shopid) return custom(res, 404, "Commande introuvable.", null, null);
+    return mFindOrderById(orderid, req.shopid)
+      .then((orders) => {
+        if (!orders.length) return custom(res, 404, "Commande introuvable.", null, null);
+        const order = orders[0];
+        if (order.delivery_id != null || order.fulfillment_type === "delivery") {
+          return custom(res, 409, "Utilisez le checkout pour une livraison.", null, {
+            code: "DELIVERY_CHECKOUT_REQUIRED",
+          });
+        }
+        const dataDetail = {
+          orderid,
+          productid,
+          price,
+          qty,
+          total,
+        };
+        return mAddDetailOrder(dataDetail, customizationList)
           .then(() => {
-            const addStock = buildOrderDetailStockEntry({
-              productid,
-              qty,
-              operator,
-            });
-            mAddNewStocks(addStock)
+            mReduceStock(qty, productid)
               .then(() => {
-                success(res, "Détail de commande ajouté avec succès.", null, null);
+                const addStock = buildOrderDetailStockEntry({
+                  productid,
+                  qty,
+                  operator,
+                });
+                mAddNewStocks(addStock)
+                  .then(() => {
+                    success(res, "Détail de commande ajouté avec succès.", null, null);
+                  })
+                  .catch((error) => {
+                    failed(res, "Erreur serveur.", error.message);
+                  });
               })
               .catch((error) => {
                 failed(res, "Erreur serveur.", error.message);

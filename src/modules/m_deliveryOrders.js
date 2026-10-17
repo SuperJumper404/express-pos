@@ -119,7 +119,7 @@ const buildDeliveryOrders = ({ clock = () => new Date(), randomToken = createTra
     const result = { ...checkout.result, delivery: view };
     await insertEvent({ checkout, deliveryId, version: 1, type: "checkout_created", previous: {},
       next: { delivery: view, settingsRevision: quote.settingsRevision, chargeRevision: 1, distanceMeters: quote.distanceMeters }, result, connection });
-    return { delivery: view, tracking_url: `/livraison/suivi/${rawToken}` };
+    return { delivery: view, tracking_url: `/livraison/suivi#${rawToken}` };
   };
   const findEditReplay = async ({ shopId, idempotencyKey, requestHash, connection }) => {
     const [event] = await query(connection, "SELECT request_hash, result FROM delivery_events WHERE shopid = ? AND idempotency_key = ?", [shopId, `checkout_revised:${idempotencyKey}`]);
