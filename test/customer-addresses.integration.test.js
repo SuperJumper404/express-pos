@@ -198,7 +198,8 @@ test("customer SQL services, staff HTTP and legacy isolation", async t => {
         assert.equal((await http(base)).status, 200);
         assert.equal((await http(base, { claims: { subject_type: "service_point", service_point_id: 701 } })).status, 403);
         assert.equal((await http(base, { claims: { subject_type: "customer" } })).status, 403);
-        for (const route of ["/customer/addresses", "/customer-auth/session", "/customers?phone=0612345678"]) assert.equal((await http(route, { anonymous: true })).status, 404);
+        for (const route of ["/customer/addresses", "/customer-auth/session"]) assert.equal((await http(route, { anonymous: true })).status, 401);
+        assert.equal((await http("/customers?phone=0612345678", { anonymous: true })).status, 404);
       } finally { await new Promise(resolve => server.close(resolve)); }
     });
     await t.test("deleting the last address clears the pointer and never resets numbering", async () => {

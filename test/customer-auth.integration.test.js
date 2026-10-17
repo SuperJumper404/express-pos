@@ -459,8 +459,11 @@ test("customer auth with actual SQL and crypto, only provider HTTP doubled", asy
           assert.equal(challenge.body.data.code, undefined);
           const subject = crypto.createHmac("sha256", config().secret).update(JSON.stringify(["ip", "127.0.0.1"])).digest("hex");
           assert.equal(Number((await db.readRows("SELECT SUM(attempts) AS n FROM service_rate_limits WHERE scope='customer_otp_ip' AND subject_hash=?", [subject]))[0].n), 1);
-          // HTTP verify/session/cookie wiring belongs to Task10.
-          assert.equal((await fetch(`http://127.0.0.1:${server.address().port}/customer-auth/verify`, { method: "POST" })).status, 404);
+          // Task10 mounts verification; an empty proof must not create a session.
+          const emptyVerification = await fetch(`http://127.0.0.1:${server.address().port}/customer-auth/verify`, { method: "POST" });
+          assert.equal(emptyVerification.status, 401);
+          assert.equal((await emptyVerification.json()).error, "CUSTOMER_CODE_INVALID");
+          assert.equal(emptyVerification.headers.get("set-cookie"), null);
         } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
       });
     });
