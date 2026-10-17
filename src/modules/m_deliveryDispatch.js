@@ -29,9 +29,15 @@ const repository = {
     // insertId is not exact on the production mysql2 pool for BIGINT values.
     return (await query(connection, "SELECT CAST(LAST_INSERT_ID() AS CHAR) AS id"))[0].id;
   },
-  listIds: ({ actor, connection }) => query(connection,
-    `SELECT CAST(id AS CHAR) AS id FROM deliveries WHERE shopid = ?${isCourier(actor) ? " AND courier_id = ?" : ""} ORDER BY created_at DESC, id DESC LIMIT 100`,
-    isCourier(actor) ? [actor.shopId, actor.id] : [actor.shopId]),
+  listIds: ({ actor, connection }) => {
+    const scope = `shopid = ?${isCourier(actor) ? " AND courier_id = ?" : ""}`;
+    const values = isCourier(actor) ? [actor.shopId, actor.id] : [actor.shopId];
+    return query(connection, `SELECT CAST(listed.id AS CHAR) AS id FROM (
+      (SELECT id, created_at FROM deliveries WHERE ${scope} AND delivery_status IN ('unassigned','assigned','in_transit','issue'))
+      UNION ALL
+      (SELECT id, created_at FROM deliveries WHERE ${scope} AND delivery_status IN ('delivered','failed','canceled') ORDER BY created_at DESC, id DESC LIMIT 100)
+    ) listed ORDER BY listed.created_at DESC, listed.id DESC`, [...values, ...values]);
+  },
   items: async ({ order, orderKind, connection }) => {
     const archived = orderKind === "archive";
     const table = archived ? "archivesdetail" : "orderdetail";
@@ -57,6 +63,26 @@ const repository = {
 };
 
 const buildDeliveryDispatch = ({ repository: repo = repository, runInTransaction = withTransaction, clock = () => new Date() } = {}) => {
+  const runMutation = async work => {
+    for (let attempt = 0; ; attempt++) {
+      let rolledBackDeadlock;
+      try {
+        return await runInTransaction(async connection => {
+          try { return await work(connection); }
+          catch (error) {
+            if (error.code === "ER_LOCK_DEADLOCK") {
+              await connection.rollback();
+              rolledBackDeadlock = error;
+            }
+            throw error;
+          }
+        });
+      } catch (error) {
+        // Replay only SQL work with a confirmed rollback, never a runner/commit error.
+        if (error !== rolledBackDeadlock || attempt >= 2) throw error;
+      }
+    }
+  };
   const reload = async (actor, connection) => {
     if (!actor || actor.subject !== "staff" || !actor.id || !actor.shopId) throw forbidden();
     const account = await repo.findAccount({ id: actor.id, shopId: actor.shopId, connection });
@@ -92,7 +118,7 @@ const buildDeliveryDispatch = ({ repository: repo = repository, runInTransaction
       courierId: input.courierId === undefined ? null : input.courierId, action: input.action || null, reason,
       physicalTransferConfirmed: input.physicalTransferConfirmed === true };
     const requestHash = crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex");
-    try { return await runInTransaction(async connection => {
+    try { return await runMutation(async connection => {
       const current = await resolve(input.actor, deliveryId, connection);
       const { actor, delivery, order } = current;
       const operator = isDeliveryOperator(actor);

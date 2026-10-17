@@ -51,11 +51,11 @@ const buildAuthentication = ({ findUserByIdAndShop = defaultFindUserByIdAndShop 
   try { decoded = jwt.verify(authorization.split(" ")[1], envJWTKEY); }
   catch (error) { return failed(res, "Session expired", "SESSION_EXPIRED", 401); }
   const surfacePath = relativeStaffPath(req);
-  let accountPath;
-  try { accountPath = decodeURIComponent(surfacePath).toLowerCase().replace(/\/$/, ""); }
+  let accountSegments;
+  try { accountSegments = surfacePath.replace(/\/$/, "").split("/").map(segment => decodeURIComponent(segment).toLowerCase()); }
   catch (error) { return custom(res, 400, "Invalid request path", {}, null); }
-  const accountWrite = (req.method === "POST" && accountPath === "/register") ||
-    (["PATCH", "PUT", "DELETE"].includes(req.method) && /^\/user\/[^/]+(?:\/staff-credentials)?$/.test(accountPath));
+  const accountWrite = (req.method === "POST" && accountSegments.length === 2 && accountSegments[1] === "register") ||
+    (["PATCH", "PUT", "DELETE"].includes(req.method) && accountSegments[1] === "user");
   req.shopid = decoded.shopid;
   if (decoded.subject_type === "service_point") {
     if (accountWrite) return custom(res, 403, "Access denied", {}, null);

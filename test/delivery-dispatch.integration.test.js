@@ -4,12 +4,27 @@ const jwt = require("jsonwebtoken");
 const mysql = require("mysql2/promise");
 const { withDeliveryDatabase } = require("./helpers/deliveryDatabase");
 
+async function captureRegistrationDiagnostic(work) {
+  const originalLog = console.log;
+  const diagnostics = [];
+  console.log = (...args) => {
+    if (args.length === 1 && args[0] === "GOOD") diagnostics.push(args[0]);
+    else originalLog.apply(console, args);
+  };
+  try {
+    const result = await work();
+    assert.deepEqual(diagnostics, ["GOOD"]);
+    return result;
+  } finally { console.log = originalLog; }
+}
+
 async function main() {
   await withDeliveryDatabase(async db => {
     await db.seedScenario();
     require.cache[require.resolve("../src/config/dbPool")] = { exports: db.pool };
     require.cache[require.resolve("../src/config/db")] = { exports: db.pool.pool };
     if (Number(process.versions.node.split(".")[0]) < 22) require.cache[require.resolve("nanoid")] = { exports: await import("nanoid") };
+    if (process.env.TASK5_REVIEW_FILTER) return runReviewRegressions(db, process.env.TASK5_REVIEW_FILTER);
     const { buildDeliveryDispatch } = require("../src/modules/m_deliveryDispatch");
     const dispatch = buildDeliveryDispatch();
     const operator = { subject: "staff", id: 10, shopId: 7, access: 1 };
@@ -286,7 +301,7 @@ async function main() {
       assert.equal((await http("/courier/deliveries")).status, 403);
       assert.equal((await http("/deliveries/41", { id: 10 })).status, 200);
       await db.pool.query("UPDATE users SET status = 1 WHERE id = 11");
-      const created = await http("/register", { method: "POST", id: 14, body: { username: "New courier", access: 6, module_permissions: ["orders", "stocks", "delivery"], service_point_id: 999 } });
+      const created = await captureRegistrationDiagnostic(() => http("/register", { method: "POST", id: 14, body: { username: "New courier", access: 6, module_permissions: ["orders", "stocks", "delivery"], service_point_id: 999 } }));
       assert.equal(created.status, 200, created.body);
       const credentials = JSON.parse(created.body).data;
       const [account] = await db.readRows("SELECT id, access, module_permissions, service_point_id FROM users WHERE staff_login_id = ?", [credentials.staff_login_id]);
@@ -431,6 +446,202 @@ async function main() {
       });
       assert.deepEqual(failures, [], "All bounded completion SQL/HTTP contracts must pass");
     } finally { await new Promise(resolve => server.close(resolve)); }
+    await runReviewRegressions(db);
   });
+}
+
+async function runReviewRegressions(db, filter) {
+  const { buildDeliveryDispatch } = require("../src/modules/m_deliveryDispatch");
+  const { createTransactionRunner } = require("../src/helpers/withTransaction");
+  await db.pool.query("UPDATE orders SET subtotal_before_discount = COALESCE(subtotal_before_discount, subtotal), discount_amount = COALESCE(discount_amount, 0) WHERE id = 31");
+  await db.pool.query(`INSERT IGNORE INTO delivery_charge_snapshots (shopid,delivery_id,revision,band_fee_cents,free_delivery_applied,fee_cents,total_excl_tax_cents,tax_cents,vat_rate,fiscal_policy)
+    VALUES (7,'41',1,0,0,0,0,0,10,'{"mode":"configured_rate","vatRate":10}')`);
+  await db.pool.query(`INSERT IGNORE INTO users (id, shopid, username, email, password, phone, access, status, created, clearpass, courier_available, image)
+    VALUES (13,7,'Courier 13','13@example.test','fixture','',6,1,NOW(),'',1,'defaultuser.png'),
+    (14,7,'Admin','14@example.test','fixture','',0,1,NOW(),'',0,'defaultuser.png'),
+    (15,7,'Server','15@example.test','fixture','',4,1,NOW(),'',0,'defaultuser.png'),
+    (16,7,'Kitchen','16@example.test','fixture','',5,1,NOW(),'',0,'defaultuser.png'),
+    (900,7,'Account target','900@example.test','fixture','',1,1,NOW(),'',0,'defaultuser.png')`);
+  await db.pool.query("UPDATE users SET courier_available = 1 WHERE id IN (11,13)");
+  await db.pool.query(`UPDATE users SET module_permissions = '["delivery"]' WHERE id = 10`);
+  const operator = { subject: "staff", id: 10, shopId: 7, access: 1 };
+  const courier = id => ({ subject: "staff", id, shopId: 7, access: 6 });
+  const dispatch = buildDeliveryDispatch();
+  let next = 5000;
+  const mission = async ({ status = "unassigned", courierId = null, shopId = 7, created = "2026-01-01 00:00:00" } = {}) => {
+    const id = next++;
+    const deliveryId = String(800000 + id);
+    await db.pool.query(`INSERT INTO orders (id,shopid,ordernumber,customer,customerID,operator,subtotal,subtotal_before_discount,discount_amount,payment_status,status,created,finished,is_takeaway)
+      VALUES (?,?,?,'Review fixture',?,?,12.50,12.50,0,'paid',3,?,?,1)`, [id, shopId, `REVIEW-${id}`, shopId === 7 ? 10 : 12, shopId === 7 ? 10 : 12, created, created]);
+    await db.pool.query(`INSERT INTO deliveries (id,shopid,origin_order_id,order_reference,courier_id,delivery_status,address_snapshot,contact_snapshot,latitude,longitude,distance_meters,settings_revision,client_order_token,confirmation_secret_hash,tracking_token_hash,tracking_expires_at,created_at,closed_at)
+      SELECT ?,?,?,?,?,?,address_snapshot,contact_snapshot,latitude,longitude,distance_meters,1,?,SHA2(?,256),SHA2(?,256),tracking_expires_at,?,?
+      FROM deliveries WHERE id = 41`, [deliveryId, shopId, id, `REVIEW-${id}`, courierId, status, `review-${id}`, `review-confirm-${id}`, `review-track-${id}`, created, ["delivered", "failed", "canceled"].includes(status) ? created : null]);
+    await db.pool.query("UPDATE orders SET delivery_id = ?, fulfillment_type = 'delivery' WHERE id = ?", [deliveryId, id]);
+    await db.pool.query(`INSERT INTO delivery_charge_snapshots (shopid,delivery_id,revision,band_fee_cents,free_delivery_applied,fee_cents,total_excl_tax_cents,tax_cents,vat_rate,fiscal_policy)
+      VALUES (?,?,1,0,0,0,0,0,10,'{"mode":"configured_rate","vatRate":10}')`, [shopId, deliveryId]);
+    return { id, deliveryId };
+  };
+  const mutation = (item, actor, key, expectedVersion = 1, extra = {}) => ({ actor, deliveryId: item.deliveryId, expectedVersion, idempotencyKey: key, ...extra });
+  const failures = [];
+  const test = async (name, work) => {
+    if (filter && !filter.split("|").some(part => name.startsWith(part))) return;
+    try { await work(); console.log(`PASS SQL ${name}`); }
+    catch (error) { failures.push(name); console.log(`FAIL SQL ${name}: ${error.code || error.name} actual=${error.actual} expected=${error.expected}`); }
+  };
+  const app = express();
+  app.use(express.json());
+  app.use("/baseurl/api/v1", require("../src/helpers/middleware/auth").authenticationIfPresent);
+  app.use("/baseurl/api/v1", require("../src/routers/r_users"));
+  app.use("/baseurl/api/v1", require("../src/routers/r_courier"));
+  app.use("/baseurl/api/v1", require("../src/routers/r_delivery"));
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise(resolve => server.once("listening", resolve));
+  const url = `http://127.0.0.1:${server.address().port}/baseurl/api/v1`;
+  const http = async (path, { method = "GET", id = 14, body, claims = {} } = {}) => {
+    const token = jwt.sign({ id, shopid: 7, access: 0, ...claims }, process.env.JWTKEY);
+    const result = await fetch(url + path, { method, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+    return { status: result.status, body: await result.json() };
+  };
+  try {
+    await test("C1 current nonadmins cannot self-promote through encoded user IDs", async () => {
+      for (const [id, role, claims] of [[10,1,{}],[15,4,{}],[16,5,{}],[10,1,{ subject_type: "service_point", access: 3, service_point_id: 701 }]]) {
+        try {
+          const result = await http(`/user/${id}%2Fextra`, { method: "PATCH", id, claims, body: { access: 0 } });
+          assert.equal(result.status, 403);
+          assert.equal((await db.readRows("SELECT access FROM users WHERE id = ?", [id]))[0].access, role);
+        } finally { await db.pool.query("UPDATE users SET access = ? WHERE id = ?", [role, id]); }
+      }
+    });
+    await test("C1 admin rejects whole invalid IDs before update credential delete and read SQL", async () => {
+      for (const id of ["900%2Fextra", "900%5Cextra", "900.0", "900e0", "900%20", "0", "2147483648"]) {
+        for (const [method, suffix] of [["PATCH", ""], ["PATCH", "/staff-credentials"], ["DELETE", ""], ["GET", ""]]) {
+          assert.equal((await http(`/user/${id}${suffix}`, { method, body: method === "PATCH" ? { username: "Invalid prefix" } : undefined })).status, 400, `${method} ${id}${suffix}`);
+        }
+      }
+      assert.equal((await db.readRows("SELECT username FROM users WHERE id = 900"))[0].username, "Account target");
+      assert.equal((await http("/user/900", { method: "PATCH", body: { username: "Authorized admin update" } })).status, 200);
+      assert.equal((await db.readRows("SELECT username FROM users WHERE id = 900"))[0].username, "Authorized admin update");
+      assert.equal((await http("/user/900/staff-credentials", { method: "PATCH", body: {} })).status, 200);
+      assert.equal((await http("/user/900", { method: "DELETE" })).status, 200);
+      assert.equal((await db.readRows("SELECT id FROM users WHERE id = 900")).length, 0);
+    });
+    await test("I1 independent pickups survive a one-shot real missing-journal gap deadlock", async () => {
+      const first = await mission();
+      const second = await mission();
+      await dispatch.assign(mutation(first, operator, "review-assign-a", 1, { courierId: 11 }));
+      await dispatch.assign(mutation(second, operator, "review-assign-b", 1, { courierId: 13 }));
+      const stock = await db.readRows("SELECT stock FROM products WHERE id = 21");
+      const reached = new Set();
+      let release;
+      let rollbackCount = 0;
+      let sqlDeadlockCount = 0;
+      const barrier = new Promise(resolve => { release = resolve; });
+      const racing = buildDeliveryDispatch({ runInTransaction: createTransactionRunner({ getConnection: async () => {
+        const connection = await db.pool.getConnection();
+        return new Proxy(connection, { get(target, property) {
+          if (property === "query") return async (sql, values) => {
+            let result;
+            try { result = await target.query(sql, values); }
+            catch (error) { if (error.code === "ER_LOCK_DEADLOCK") sqlDeadlockCount++; throw error; }
+            if (/FROM delivery_events.*idempotency_key/.test(sql) && values[1].startsWith("zz-review-pickup-") && !reached.has(values[1])) {
+              assert.equal(result[0].length, 0);
+              reached.add(values[1]);
+              if (reached.size === 2) release();
+              await barrier;
+            }
+            return result;
+          };
+          if (property === "rollback") return async () => { await target.rollback(); rollbackCount++; };
+          const value = Reflect.get(target, property);
+          return typeof value === "function" ? value.bind(target) : value;
+        } });
+      } }) });
+      const results = await Promise.allSettled([
+        racing.pickup(mutation(first, courier(11), "zz-review-pickup-a", 2)),
+        racing.pickup(mutation(second, courier(13), "zz-review-pickup-b", 2)),
+      ]);
+      assert.equal(reached.size, 2);
+      for (const result of results) assert.equal(result.status, "fulfilled", result.reason && result.reason.code);
+      assert.ok(rollbackCount >= 1, "Actual deadlock victim must finish rollback before retry");
+      assert.ok(sqlDeadlockCount >= 1, "The barrier must produce the real SQL deadlock");
+      for (const item of [first, second]) {
+        const [row] = await db.readRows("SELECT version, delivery_status FROM deliveries WHERE id = ?", [item.deliveryId]);
+        assert.equal(row.version, 3);
+        assert.equal(row.delivery_status, "in_transit");
+        assert.equal((await db.readRows("SELECT id FROM delivery_events WHERE delivery_id = ? AND event_type = 'pickup'", [item.deliveryId])).length, 1);
+      }
+      assert.equal((await racing.pickup(mutation(first, courier(11), "zz-review-pickup-a", 2))).idempotentReplay, true);
+      await assert.rejects(racing.pickup(mutation(first, courier(11), "zz-review-pickup-a", 3)), { code: "DELIVERY_IDEMPOTENCY_CONFLICT" });
+      assert.deepEqual(await db.readRows("SELECT stock FROM products WHERE id = 21"), stock);
+    });
+    await test("I1 retry is bounded and excludes unconfirmed rollback begin commit and network errors", async () => {
+      for (const mode of ["work-deadlock", "rollback-failure", "after-work-deadlock", "network", "begin-deadlock"]) {
+        const item = await mission();
+        await dispatch.assign(mutation(item, operator, `policy-assign-${item.id}`, 1, { courierId: 11 }));
+        let attempts = 0;
+        const failure = code => Object.assign(new Error("Dispatch fault fixture"), { code });
+        const source = createTransactionRunner(db.pool);
+        const guarded = buildDeliveryDispatch({ runInTransaction: async work => {
+          attempts++;
+          if (mode === "begin-deadlock") throw failure("ER_LOCK_DEADLOCK");
+          return source(async connection => {
+            const proxy = new Proxy(connection, { get(target, property) {
+              if (property === "query") return async (sql, values) => {
+                const result = await target.query(sql, values);
+                if (["work-deadlock", "rollback-failure"].includes(mode) && /FROM delivery_events.*idempotency_key/.test(sql)) throw failure("ER_LOCK_DEADLOCK");
+                return result;
+              };
+              if (property === "rollback" && mode === "rollback-failure") return async () => { throw failure("ROLLBACK_UNCONFIRMED"); };
+              const value = Reflect.get(target, property);
+              return typeof value === "function" ? value.bind(target) : value;
+            } });
+            await work(proxy);
+            throw failure(mode === "network" ? "ECONNRESET" : "ER_LOCK_DEADLOCK");
+          });
+        } });
+        await assert.rejects(guarded.pickup(mutation(item, courier(11), `policy-pickup-${item.id}`, 2)), {
+          code: mode === "rollback-failure" ? "ROLLBACK_UNCONFIRMED" : mode === "network" ? "ECONNRESET" : "ER_LOCK_DEADLOCK",
+        });
+        assert.equal(attempts, mode === "work-deadlock" ? 3 : 1, mode);
+        assert.equal((await db.readRows("SELECT version FROM deliveries WHERE id = ?", [item.deliveryId]))[0].version, 2);
+        assert.equal((await db.readRows("SELECT id FROM delivery_events WHERE idempotency_key = ?", [`policy-pickup-${item.id}`])).length, 0);
+      }
+    });
+    await test("I2 all old operational work remains enumerable beyond 100 newer terminal missions", async () => {
+      const active = [];
+      for (const status of ["assigned", "in_transit", "issue"]) active.push(await mission({ status, courierId: 11 }));
+      const unassigned = await mission();
+      const foreignOwner = await mission({ status: "assigned", courierId: 13 });
+      const foreignShop = await mission({ status: "assigned", courierId: 12, shopId: 8 });
+      for (let index = 0; index < 103; index++) await mission({ status: ["delivered", "failed", "canceled"][index % 3], courierId: 11, created: "2026-10-17 12:00:00" });
+      const own = await http("/courier/deliveries", { id: 11 });
+      assert.equal(own.status, 200);
+      assert.ok(Array.isArray(own.body.data));
+      for (const item of active) assert.ok(own.body.data.some(view => view.id === item.deliveryId), `Missing own operational ${item.deliveryId}`);
+      assert.equal(own.body.data.some(view => [foreignOwner.deliveryId, foreignShop.deliveryId, unassigned.deliveryId].includes(view.id)), false);
+      const history = own.body.data.filter(view => ["delivered", "failed", "canceled"].includes(view.deliveryStatus));
+      assert.equal(history.length, 100);
+      for (const view of history) {
+        assert.equal(view.addressSnapshot, undefined);
+        assert.equal(view.contactSnapshot, undefined);
+        assert.equal(view.items, undefined);
+      }
+      const restaurant = await http("/deliveries", { id: 10 });
+      assert.equal(restaurant.status, 200);
+      for (const item of [...active, unassigned, foreignOwner]) assert.ok(restaurant.body.data.some(view => view.id === item.deliveryId));
+      assert.equal(restaurant.body.data.some(view => view.id === foreignShop.deliveryId), false);
+    });
+    await test("M1 known registration diagnostic is captured without stdout noise", async () => {
+      const originalWrite = process.stdout.write;
+      const output = [];
+      let created;
+      process.stdout.write = function (chunk, ...args) { output.push(String(chunk)); return originalWrite.call(this, chunk, ...args); };
+      try { created = await captureRegistrationDiagnostic(() => http("/register", { method: "POST", body: { username: "Review registration", access: 6 } })); }
+      finally { process.stdout.write = originalWrite; }
+      assert.equal(created.status, 200);
+      assert.equal(output.some(chunk => chunk.trim() === "GOOD"), false);
+    });
+    assert.deepEqual(failures, [], "Review regressions must pass");
+  } finally { await new Promise(resolve => server.close(resolve)); }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

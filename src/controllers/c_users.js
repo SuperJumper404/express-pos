@@ -46,6 +46,19 @@ const withModulePermissions = (user) => ({
 });
 const courierProfile = user => ({ id: user.id, shopid: user.shopid,
   username: user.username, access: Number(user.access), status: Number(user.status) });
+const validUserId = value => /^[1-9]\d{0,9}$/.test(String(value)) && Number(value) <= 2147483647;
+const requireCurrentAdmin = (req, res) => {
+  const account = req.currentUser;
+  if (req.sessionSubject === "staff" && account && [0, "0"].includes(account.access) && Number(account.status) === 1 &&
+    validUserId(req.id) && validUserId(req.shopid) && String(account.id) === String(req.id) && String(account.shopid) === String(req.shopid)) return true;
+  custom(res, 403, "Access denied", {}, null);
+  return false;
+};
+const requireUserId = (value, res) => {
+  if (validUserId(value)) return true;
+  failed(res, "Invalid user identifier", "USER_ID_INVALID", 400);
+  return false;
+};
 const normalizeStaffServicePointId = (value) => {
   const id = Number(value);
   return Number.isInteger(id) && id > 0 ? id : null;
@@ -147,6 +160,7 @@ const createInternalPassword = () =>
   `${createStaffLoginId()}${createStaffLoginId()}`;
 
 const registerWithStaffCredentials = async (req, res) => {
+  if (!requireCurrentAdmin(req, res)) return;
   try {
     const body = req.body || {};
     const access = Number(body.access);
@@ -215,8 +229,9 @@ const registerWithStaffCredentials = async (req, res) => {
 };
 
 const setStaffCredentials = async (req, res) => {
+  if (!requireCurrentAdmin(req, res) || !requireUserId(req.params.id, res)) return;
   try {
-    const users = await mFindUserByIdAndShop(req.params.id, req.shopid);
+    const users = await mFindUserByIdAndShop(Number(req.params.id), req.shopid);
     const user = users[0];
     if (
       !user ||
@@ -315,6 +330,7 @@ module.exports = {
   loginWithKioskCredentials,
   setStaffCredentials,
   register: (req, res) => {
+    if (!requireCurrentAdmin(req, res)) return;
     const body = req.body;
     mCheckEmail(body.email)
       .then(async (response) => {
@@ -367,9 +383,7 @@ module.exports = {
       });
   },
   activation: (req, res) => {
-    if (req.sessionSubject !== "staff" || !req.currentUser || Number(req.currentUser.access) !== 0 || Number(req.currentUser.status) !== 1) {
-      return custom(res, 403, "Access denied", {}, null);
-    }
+    if (!requireCurrentAdmin(req, res)) return;
     const token = req.params.token;
     const email = req.params.email;
     const position = req.params.position;
@@ -456,7 +470,8 @@ module.exports = {
       return success(res, "Déconnexion réussie !", {}, true);
     }
 
-    const id = Number(req.access) === 6 ? req.id : req.body.id;
+    if (!requireUserId(req.id, res)) return;
+    const id = Number(req.id);
     const data = {
       token: null,
       expired: null,
@@ -499,7 +514,8 @@ module.exports = {
       });
   },
   getDetailUser: (req, res) => {
-    const id = req.params.id;
+    if (!requireUserId(req.params.id, res)) return;
+    const id = Number(req.params.id);
     mDetailUser(id)
       .then((response) => {
         success(
@@ -514,9 +530,10 @@ module.exports = {
       });
   },
   updateUser: async (req, res) => {
+    if (!requireCurrentAdmin(req, res) || !requireUserId(req.params.id, res)) return;
     const body = req.body;
     body.updated = new Date();
-    const id = req.params.id;
+    const id = Number(req.params.id);
     const detail = await mDetailUser(id);
     if (!detail[0] || String(detail[0].shopid) !== String(req.shopid)) return custom(res, 404, "Utilisateur introuvable.", {}, null);
     const nextAccess = body.access === undefined ? Number(detail[0].access) : Number(body.access);
@@ -572,8 +589,9 @@ module.exports = {
     }
   },
   deleteUser: async (req, res) => {
+    if (!requireCurrentAdmin(req, res) || !requireUserId(req.params.id, res)) return;
     try {
-      const id = req.params.id;
+      const id = Number(req.params.id);
       const callDetail = await mDetailUser(id);
       if (!callDetail[0] || String(callDetail[0].shopid) !== String(req.shopid)) return custom(res, 404, "Utilisateur introuvable.", {}, null);
       if (Number(callDetail[0].access) === 6) return custom(res, 409, "Deactivate the courier account to preserve history.", {}, null);

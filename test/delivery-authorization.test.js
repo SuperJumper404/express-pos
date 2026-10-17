@@ -70,6 +70,8 @@ async function main() {
     assert.equal((await call("/courier/deliveries")).status, 403);
     users.get(11).status = 1;
     users.get(11).access = 1;
+    assert.equal((await call("/logout", "POST", { access: 0 }, { id: "14/extra" })).status, 200);
+    assert.equal(updates.at(-1).id, 11);
     assert.equal((await call("/user/11", "PATCH", { access: 0 }, { access: 0 })).status, 403);
     assert.equal((await call("/register", "POST", { access: 0 }, { access: 6 })).status, 403);
     assert.equal((await fetch(url.replace("/baseurl/api/v1", "/BASEURL/API/V1") + "/REGISTER/", { method: "POST", headers: { authorization: `Bearer ${token({ access: 0 })}`, "content-type": "application/json" }, body: JSON.stringify({ access: 6 }) })).status, 403);
@@ -90,6 +92,20 @@ async function main() {
     assert.equal(result.data[0].staff_pin_hash, undefined);
     for (const path of ["/table-access", "/shopInfo/click-and-collect/7/session"]) {
       assert.equal((await fetch(url + path, { method: "POST", headers: { authorization: "Bearer expired-session-fixture" } })).status, 200);
+    }
+    const controller = require("../src/controllers/c_users");
+    for (const action of ["registerWithStaffCredentials", "register", "setStaffCredentials", "updateUser", "deleteUser"]) {
+      for (const context of [{}, { currentUser: { id: 11, shopid: 7, access: 1, status: 1 } },
+        { sessionSubject: "service_point", currentUser: { id: 11, shopid: 7, access: 0, status: 1 } },
+        { currentUser: { id: 11, shopid: 7, access: 0, status: 0 } },
+        { currentUser: { id: 11, shopid: 8, access: 0, status: 1 } },
+        { currentUser: { id: 11, shopid: 7, access: null, status: 1 } },
+        { shopid: undefined, currentUser: { id: 11, access: 0, status: 1 } }]) {
+        const res = { status(code) { this.code = code; return this; }, json(body) { this.body = body; return this; } };
+        await controller[action]({ sessionSubject: "staff", id: 11, shopid: 7, access: 0, params: { id: "11" },
+          body: { username: "Forged", access: 6, currentUser: { id: 11, shopid: 7, access: 0, status: 1 } }, ...context }, res);
+        assert.equal(res.code, 403, `${action} independently requires trusted current active admin`);
+      }
     }
     console.log("PASS HTTP current-role isolation, exact surfaces, customer rejection, own profile/logout and personal PIN login");
   } finally { await new Promise(resolve => server.close(resolve)); }
