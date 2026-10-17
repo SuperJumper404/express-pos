@@ -285,7 +285,9 @@ async function main() {
       assert.equal((await http("/product/21", { method: "PATCH", body: { stock: 100 } })).status, 403);
       assert.equal((await http("/stocks", { method: "POST", body: { productid: 21 } })).status, 403);
       assert.equal((await http("/courier/cash-balance")).status, 404);
-      assert.equal((await http("/courier/deliveries/41/collect-payment", { method: "POST", body: {} })).status, 404);
+      const emptyCollection = await http("/courier/deliveries/41/collect-payment", { method: "POST", body: {} });
+      assert.equal(emptyCollection.status, 400);
+      assert.equal(JSON.parse(emptyCollection.body).error, "DELIVERY_REQUEST_INVALID");
       assert.equal((await http("/deliveries", { id: 10 })).status, 200);
       assert.equal((await http("/delivery/settings", { id: 10 })).status, 403);
       assert.equal((await http("/courier/deliveries/" + a.deliveryId)).status, 404);
