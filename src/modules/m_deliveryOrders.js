@@ -72,6 +72,9 @@ const toDeliveryView = ({ delivery, order, actor }) => {
     if (courier) {
       if (delivery.delivery_status === "assigned" && Number(preparation) === 3) actions.push("pickup");
       if (delivery.delivery_status === "in_transit" && due === 0) actions.push("deliver");
+      if (delivery.delivery_status === "in_transit" && Number(preparation) === 3 && due > 0 &&
+        order.payment_status === "unpaid" && order.payment_provider == null &&
+        order.stripe_payment_intent_id == null && order.stripe_terminal_payment_id == null) actions.push("collectPayment");
       if (["assigned", "in_transit"].includes(delivery.delivery_status)) actions.push("reportIssue");
     }
   }

@@ -15,6 +15,7 @@ const buildCourierRouter = ({
   router.post("/courier/deliveries/:id/pickup", controller.pickup);
   router.post("/courier/deliveries/:id/deliver", controller.deliver);
   router.post("/courier/deliveries/:id/report-issue", controller.reportIssue);
+  router.post("/courier/deliveries/:id/collect-payment", controller.collectPayment);
   return router;
 };
 module.exports = buildCourierRouter();
