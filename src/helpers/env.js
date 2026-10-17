@@ -76,6 +76,15 @@ module.exports = {
     whatsappTemplateLanguage: process.env.CUSTOMER_WHATSAPP_TEMPLATE_LANGUAGE,
     whatsappGraphVersion: process.env.CUSTOMER_WHATSAPP_GRAPH_VERSION,
   }),
+  getCustomerSessionConfig: () => ({
+    allowedOrigins: (process.env.CUSTOMER_ALLOWED_ORIGINS || "").split(",").map(value => value.trim()).filter(value => {
+      try {
+        const url = new URL(value);
+        return url.origin === value && (url.protocol === "https:" || (url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)));
+      } catch (_) { return false; }
+    }),
+    trustedProxies: (process.env.CUSTOMER_TRUSTED_PROXIES || "").split(",").map(value => value.trim()).filter(Boolean),
+  }),
 };
 
 console.log("Loaded env file:", envFile);

@@ -46,12 +46,17 @@ if (!fs.existsSync(customizationChoicesPath)) {
 }
 
 const app = express();
+const { buildCustomerCors, configureCustomerTrustProxy, isCustomerCorsRequest } = require("./src/helpers/customerCors");
+const { attachOptionalCustomerSession, requireCustomerCsrfIfPresent } = require("./src/helpers/middleware/customerAuth");
+configureCustomerTrustProxy(app);
+app.use(buildCustomerCors());
 const runScheduledStripePaymentMaintenance = buildNonOverlappingRunner(
   runStripePaymentMaintenance,
   console,
 );
 
 app.use((req, res, next) => {
+  if (isCustomerCorsRequest(req)) return next();
   res.header("Access-Control-Allow-Origin", "*");
   res.header(
     "Access-Control-Allow-Methods",
@@ -76,7 +81,10 @@ app.use((error, req, res, next) => {
   }
   return next(error);
 });
+// Personal API is independent of any stale staff bearer carried by this browser.
+app.use(`${prefix}`, routerCustomers);
 app.use(`${prefix}`, require("./src/helpers/middleware/auth").authenticationIfPresent);
+app.post(`${prefix}/orders/checkout`, attachOptionalCustomerSession, requireCustomerCsrfIfPresent);
 app.get(`${prefix}`, function (req, res) {
   res.json({ msg: "Hai" });
 });
@@ -93,7 +101,6 @@ app.use(`${prefix}`, routerCustomizations);
 app.use(`${prefix}`, routerServicePoints);
 app.use(`${prefix}`, routerDelivery);
 app.use(`${prefix}`, routerCourier);
-app.use(`${prefix}`, routerCustomers);
 app.get(`${prefix}/testapi`, (req, res) => {
   res.json({ success: true, message: "API redirigée correctement 👌" });
 });
