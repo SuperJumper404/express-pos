@@ -158,6 +158,91 @@ test("customer auth with actual SQL and crypto, only provider HTTP doubled", asy
         assert.equal(first.status, other.status);
         assert.equal((await db.readRows("SELECT id FROM customer_identities WHERE destination=?", [request.destination])).length, 2);
       });
+      await t.test("Shop-first archive and customer link reservation serialize without an FK lock cycle", async () => {
+        await reset();
+        if (Number(process.versions.node.split(".")[0]) < 22) require.cache[require.resolve("nanoid")] = { exports: await import("nanoid") };
+        const { buildOrderArchiveModule } = require("../src/modules/m_orders");
+        const { createTransactionRunner } = require("../src/helpers/withTransaction");
+        await db.pool.query("UPDATE orders SET customer_account_id='51',status=3 WHERE id=33");
+        const archiveConnection = await db.pool.getConnection();
+        await archiveConnection.query("SET SESSION innodb_lock_wait_timeout=5");
+        let releaseArchive, releaseLink, announceArchive;
+        const archiveGate = new Promise(resolve => { releaseArchive = resolve; });
+        const linkGate = new Promise(resolve => { releaseLink = resolve; });
+        const archiveLocked = new Promise(resolve => { announceArchive = resolve; });
+        const sqlFailures = [];
+        const gated = (connection, afterQuery) => new Proxy(connection, { get(target, key) {
+          if (key === "query") return async (...args) => {
+            let result;
+            try { result = await target.query(...args); }
+            catch (error) { sqlFailures.push(error.code); throw error; }
+            await afterQuery(args[0]);
+            return result;
+          };
+          const value = target[key];
+          return typeof value === "function" ? value.bind(target) : value;
+        } });
+        const archive = buildOrderArchiveModule({ withTransaction: createTransactionRunner({
+          getConnection: async () => gated(archiveConnection, async sql => {
+            if (/FROM shop\b/.test(sql) && /FOR UPDATE/.test(sql)) { announceArchive(); await archiveGate; }
+          }),
+        }) });
+        let linkConnection;
+        const linkRepository = buildSqlCustomerAuthRepository({ pool: { getConnection: async () => {
+          const connection = await db.pool.getConnection();
+          if (linkConnection) return connection;
+          linkConnection = connection;
+          await connection.query("SET SESSION innodb_lock_wait_timeout=5");
+          return gated(connection, async sql => {
+            if (/FROM customers\b/.test(sql) && /FOR UPDATE/.test(sql)) await linkGate;
+          });
+        } } });
+        const linking = buildCustomerAuth({ repository: linkRepository, transports, clock, randomCode: () => CODE, secret: config().secret });
+        const settle = promise => promise.then(result => ({ result }), error => ({ error }));
+        // Poll lock metadata only; each real producer executes once, on two connections.
+        const observe = async (connection, sql, params, description) => {
+          const deadline = Date.now() + 3000;
+          while (Date.now() < deadline) {
+            const [rows] = await connection.query(sql, params());
+            if (rows.length) return rows[0];
+            await new Promise(resolve => setTimeout(resolve, 10));
+          }
+          assert.fail(description);
+        };
+        const count = boundary.requests.length;
+        const archiving = settle(archive.mArchiveOrder(33, "Especes", 7));
+        let requesting;
+        try {
+          await Promise.race([archiveLocked, archiving.then(() => assert.fail("Archive must hold its actual Shop X lock"))]);
+          requesting = settle(linking.requestChallenge(input({ purpose: "link", customerId: "51" })));
+          const observed = await observe(archiveConnection, `SELECT l.OBJECT_NAME AS name FROM performance_schema.data_locks l
+            JOIN performance_schema.threads t ON t.THREAD_ID=l.THREAD_ID
+            WHERE l.OBJECT_SCHEMA=DATABASE() AND t.PROCESSLIST_ID=? AND l.LOCK_TYPE='RECORD'
+              AND ((l.OBJECT_NAME='shop' AND l.LOCK_STATUS='WAITING')
+                OR (l.OBJECT_NAME='customers' AND l.LOCK_STATUS='GRANTED' AND l.LOCK_MODE LIKE 'X%'))`,
+          () => [linkConnection ? linkConnection.threadId : 0], "Link must either wait for Shop or hold customer X");
+          assert.equal(boundary.requests.length, count);
+          releaseLink();
+          releaseArchive();
+          const completed = await Promise.all([archiving, requesting]);
+          t.diagnostic(`archive/link schedule: link ${observed.name === "shop" ? "waited for Shop" : "held customer first"}; SQL failures: ${sqlFailures.join(",") || "none"}`);
+          assert.equal(observed.name, "shop", "Link must wait for the archive's Shop X before locking its customer FK parent");
+          assert.deepEqual(sqlFailures, [], "Archive and link must commit without a deadlock/retry");
+          for (const outcome of completed) assert.equal(outcome.error, undefined);
+          assert.equal(completed[1].result.status, "sent");
+          assert.equal(boundary.requests.length, count + 1);
+          assert.equal((await db.readRows("SELECT CAST(customer_account_id AS CHAR) AS owner FROM archives WHERE shopid=7 AND ordernumber='FIXTURE-33'"))[0].owner, "51");
+          assert.equal((await db.readRows("SELECT id FROM orders WHERE id=33")).length, 0);
+          assert.equal((await service.linkIdentity({ customerSession: { shopId: 7, customerId: "51" },
+            challengeId: completed[1].result.challengeId, code: CODE, browserBinding: binding })).customerId, "51");
+        } finally {
+          releaseLink(); releaseArchive();
+          const settled = await Promise.all([archiving, requesting]);
+          for (const [index, outcome] of settled.entries()) if (outcome && outcome.error) {
+            t.diagnostic(`${index === 0 ? "archive" : "link"} failed: ${outcome.error.code || "Error"}: ${outcome.error.message}`);
+          }
+        }
+      });
       await t.test("SQL rollback leaves no partial challenge/counters and no send", async () => {
         await reset();
         const request = input();

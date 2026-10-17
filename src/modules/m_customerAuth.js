@@ -56,7 +56,8 @@ const buildSqlCustomerAuthRepository = ({ pool = require("../config/dbPool") } =
     }
   },
   async reserve({ connection, shopId, channel, destination, contactHash, ipHash, browserHash, purpose, customerId, now, expiresAt, makeCodeHash }) {
-    const [[shop]] = await connection.query("SELECT id FROM shop WHERE id=?", [shopId]);
+    // Match Shop-first archive/FK ordering before locking an existing customer.
+    const [[shop]] = await connection.query("SELECT id FROM shop WHERE id=? FOR SHARE", [shopId]);
     if (!shop) throw invalid();
     if (purpose === "link") {
       const [[customer]] = await connection.query("SELECT id FROM customers WHERE shopid=? AND id=? FOR UPDATE", [shopId, customerId]);
