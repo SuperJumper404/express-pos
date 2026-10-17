@@ -37,7 +37,7 @@ async function main() {
   app.post(["/baseurl/api/v1/table-access", "/baseurl/api/v1/shopInfo/click-and-collect/7/session"], (req, res) => res.json({ proofBoundary: true }));
   const operation = async ({ actor }) => { assert.equal(actor.id, 11); return { accepted: true }; };
   app.use("/baseurl/api/v1", require("../src/routers/r_courier").buildCourierRouter({ authentication,
-    controller: require("../src/controllers/c_courier").buildCourierController({ dispatch: {
+    controller: require("../src/controllers/c_courier").buildCourierController({ cash: { balance: operation }, dispatch: {
       list: operation, get: operation, pickup: operation, deliver: operation, reportIssue: operation, availability: operation,
     } }),
   }));
@@ -60,6 +60,14 @@ async function main() {
       }
     }
     for (const [method, path] of [["GET", "/courier/deliveries"], ["GET", "/courier/deliveries/41"], ["POST", "/courier/deliveries/41/pickup"], ["GET", "/courier/cash-balance"]]) assert.equal((await call(path, method)).status, 200);
+    for (const malformedAccess of [null, undefined]) {
+      users.get(11).access = malformedAccess;
+      for (const [method, path] of [["GET", "/reports/z/current"], ["POST", "/reports/z/close"], ["GET", "/reports/z"], ["GET", "/reports/z/1"],
+        ["GET", "/courier/cash-balance"], ["GET", "/delivery/couriers/11/cash-balance"], ["POST", "/delivery/couriers/11/remittances"], ["POST", "/delivery/couriers/11/adjustments"], ["POST", "/deliveries/41/refund"]]) {
+        assert.equal((await call(path, method, { access: 0 }, method === "POST" ? {} : undefined)).status, 403, `malformed DB role ${method} ${path}`);
+      }
+    }
+    users.get(11).access = 6;
     assert.equal((await call("/courier/deliveries", "GET", { subject_type: "customer" })).status, 403);
     const profile = await call("/user/me");
     assert.equal(profile.status, 200);

@@ -72,7 +72,7 @@ const buildAuthentication = ({ findUserByIdAndShop = defaultFindUserByIdAndShop 
   return (async () => {
     try {
       const user = await findUserByIdAndShop({ id: decoded.id, shopId: req.shopid });
-      if (!user || Number(user.status) !== 1) return custom(res, 403, "Access denied", {}, null);
+      if (!user || user.access == null || Number(user.status) !== 1) return custom(res, 403, "Access denied", {}, null);
       req.id = user.id;
       req.access = Number(user.access);
       req.email = decoded.email;

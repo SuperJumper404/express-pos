@@ -36,9 +36,10 @@ const repository = {
     if (closedAt) { where += " AND created_at<=?"; params.push(closedAt); }
     const result = {};
     for (const [key, table] of [["collections", "delivery_payment_collections"], ["remittances", "courier_cash_remittances"],
-      ["allocations", "courier_cash_remittance_allocations"], ["adjustments", "courier_cash_adjustments"]]) {
+      ["allocations", "courier_cash_remittance_allocations"], ["adjustments", "courier_cash_adjustments"], ["refunds", "courier_cash_refund_impacts"]]) {
       const ids = key === "allocations" ? ",CAST(collection_id AS CHAR) collection_id,CAST(remittance_id AS CHAR) remittance_id" :
-        key === "adjustments" ? ",CAST(collection_id AS CHAR) collection_id,CAST(remittance_id AS CHAR) remittance_id" : "";
+        key === "adjustments" ? ",CAST(collection_id AS CHAR) collection_id,CAST(remittance_id AS CHAR) remittance_id" :
+          key === "refunds" ? ",CAST(collection_id AS CHAR) collection_id,CAST(refund_id AS CHAR) refund_id" : "";
       result[key] = await query(connection, `SELECT *,CAST(id AS CHAR) id${ids},
         DATE_FORMAT(created_at,'%Y-%m-%d %H:%i:%s.%f') created_at FROM ${table}
         WHERE ${where}${key === "collections" ? " AND method='cash'" : ""} ORDER BY created_at,${table}.id`, params);
@@ -58,12 +59,23 @@ const repository = {
     await query(connection, "INSERT INTO courier_cash_adjustments SET ?", [row]);
     return insertedId(connection);
   },
+  confirmedRefund: async ({ shopId, refundId, connection }) => (await query(connection, `SELECT r.*,CAST(r.id AS CHAR) id,
+    CAST(r.collection_id AS CHAR) collection_id,CAST(r.delivery_id AS CHAR) delivery_id,DATE_FORMAT(r.created_at,'%Y-%m-%d %H:%i:%s.%f') created_at,
+    c.courier_id source_holder,c.method source_method,c.amount_cents source_amount,p.status payment_status,
+    p.amount_cents payment_amount,p.refund_status,p.currency,p.stripe_charge_id,p.stripe_refund_id,p.stripe_payment_intent_id
+    FROM delivery_manual_refunds r JOIN delivery_payment_collections c ON c.shopid=r.shopid AND c.id=r.collection_id AND c.payment_id=r.payment_id
+    JOIN payments p ON p.shop_id=r.shopid AND p.id=r.payment_id
+    JOIN deliveries d ON d.shopid=r.shopid AND d.id=r.delivery_id AND d.origin_order_id=p.order_id
+    WHERE r.shopid=? AND r.id=?`, [shopId, refundId]))[0],
+  refundImpact: async ({ shopId, refundId, connection }) => (await query(connection,
+    "SELECT due_reduction_cents FROM courier_cash_refund_impacts WHERE shopid=? AND refund_id=?", [shopId, refundId]))[0],
+  appendRefundImpact: ({ row, connection }) => query(connection, "INSERT INTO courier_cash_refund_impacts SET ?", [row]),
 };
 
 // Corrections carry their exact source applications; no mutable debt or refund
 // status is inferred from an order, assignment or the holder's current role.
 const cashState = journal => {
-  const collections = journal.collections.map(row => ({ ...row, due: cents(row.amount_cents), allocated: 0 }));
+  const collections = journal.collections.map(row => ({ ...row, due: cents(row.amount_cents), allocated: 0, refunded: 0 }));
   const byId = new Map(collections.map(row => [row.id, row]));
   for (const row of journal.allocations) {
     const source = byId.get(row.collection_id);
@@ -82,26 +94,40 @@ const cashState = journal => {
       source.due = cents(source.due + item.deltaDueCents);
     }
   }
+  for (const refund of journal.refunds) {
+    const reduction = cents(refund.due_reduction_cents);
+    if (!reduction) continue;
+    const source = byId.get(refund.collection_id);
+    if (!source) throw new Error("Missing confirmed cash return source");
+    source.refunded = cents(source.refunded + reduction);
+    source.due = cents(source.due - reduction);
+  }
   for (const row of collections) {
-    if (row.due < 0 || row.due > cents(row.amount_cents) - row.allocated) throw new Error("Invalid cash custody balance");
+    if (row.due < 0 || row.due > cents(row.amount_cents) - row.allocated - row.refunded) throw new Error("Invalid cash custody balance");
   }
   return { ...journal, collections };
 };
 const balanceView = (state, shopId, courierId) => ({
   shopId, courierId,
-  version: 1 + state.collections.length + state.remittances.length + state.adjustments.length,
+  version: 1 + state.collections.length + state.remittances.length + state.adjustments.length + state.refunds.length,
   collectedCents: sum(state.collections.map(row => row.amount_cents)),
   receivedCents: sum(state.remittances.map(row => row.received_cents)),
   remainingDueCents: sum(state.collections.map(row => row.due)),
   discrepancyCents: sum(state.remittances.map(row => row.discrepancy_cents)),
   surplusCents: sum(state.remittances.map(row => Math.max(0, cents(row.discrepancy_cents)))),
   adjustedDueCents: sum(state.adjustments.map(row => row.delta_due_cents)),
+  refundedCents: sum(state.refunds.map(row => row.amount_cents)),
+  courierRefundedCents: sum(state.refunds.filter(row => row.return_source === "courier").map(row => row.amount_cents)),
+  registerRefundedCents: sum(state.refunds.filter(row => row.return_source === "register").map(row => row.amount_cents)),
+  externalCardRefundedCents: sum(state.refunds.filter(row => row.return_source === "external_card").map(row => row.amount_cents)),
   collections: state.collections.map(row => ({ collectionId: row.id, paymentId: row.payment_id,
-    collectedCents: cents(row.amount_cents), allocatedCents: row.allocated, remainingDueCents: row.due, createdAt: row.created_at })),
+    collectedCents: cents(row.amount_cents), allocatedCents: row.allocated, refundedCents: row.refunded, remainingDueCents: row.due, createdAt: row.created_at })),
   remittances: state.remittances.map(row => ({ remittanceId: row.id, cashierId: row.cashier_id,
     expectedCents: cents(row.expected_cents), receivedCents: cents(row.received_cents), discrepancyCents: cents(row.discrepancy_cents), createdAt: row.created_at })),
   adjustments: state.adjustments.map(row => ({ adjustmentId: row.id, collectionId: row.collection_id,
     remittanceId: row.remittance_id, deltaDueCents: cents(row.delta_due_cents), actorId: row.actor_id, reason: row.reason, createdAt: row.created_at })),
+  refunds: state.refunds.map(row => ({ refundId: row.refund_id, collectionId: row.collection_id, method: row.method,
+    amountCents: cents(row.amount_cents), returnSource: row.return_source, dueReductionCents: cents(row.due_reduction_cents), createdAt: row.created_at })),
 });
 
 const buildCourierCash = ({ repository: supplied = {}, runInTransaction = withTransaction, clock } = {}) => {
@@ -192,7 +218,7 @@ const buildCourierCash = ({ repository: supplied = {}, runInTransaction = withTr
     let remaining = Math.abs(input.deltaDueCents);
     const applications = [];
     for (const row of candidates) {
-      const amount = Math.min(remaining, input.deltaDueCents < 0 ? row.due : cents(row.amount_cents) - row.allocated - row.due);
+      const amount = Math.min(remaining, input.deltaDueCents < 0 ? row.due : cents(row.amount_cents) - row.allocated - row.refunded - row.due);
       if (amount > 0) {
         const delta = input.deltaDueCents < 0 ? -amount : amount;
         applications.push({ collectionId: row.id, deltaDueCents: delta });
@@ -210,7 +236,35 @@ const buildCourierCash = ({ repository: supplied = {}, runInTransaction = withTr
     projected.adjustments[projected.adjustments.length - 1].adjustmentId = adjustmentId;
     return { adjustmentId, balance: projected };
   });
-  return { balance, remit, adjust };
+  const applyConfirmedRefund = async ({ shopId, refundId, connection }) => {
+    if (!connection || !shopId || !journalId(refundId)) throw invalid();
+    // Caller owns the transaction and normally already holds this barrier.
+    // No proof/snapshot read occurs before it, including for direct adapter replay.
+    if (!await repo.lockShop({ shopId, connection })) throw forbidden();
+    const refund = await repo.confirmedRefund({ shopId, refundId, connection });
+    if (!refund || refund.payment_status !== "refunded" || refund.refund_status !== "succeeded" || refund.currency !== "eur" ||
+      refund.stripe_charge_id || refund.stripe_refund_id || !new RegExp(`^manual_delivery:${refund.delivery_id}:\\d+$`).test(refund.stripe_payment_intent_id) ||
+      cents(refund.amount_cents) !== cents(refund.source_amount) || cents(refund.amount_cents) !== cents(refund.payment_amount) ||
+      refund.method !== refund.source_method || Number(refund.courier_id) !== Number(refund.source_holder) ||
+      (refund.return_source === "courier" ? refund.method !== "cash" || Number(refund.physical_holder_id) !== Number(refund.source_holder) ||
+        Number(refund.authorized_by_id) === Number(refund.source_holder) : refund.return_source === "register" ? refund.method !== "cash" ||
+          Number(refund.physical_holder_id) !== Number(refund.authorized_by_id) : refund.method !== "external_card" || refund.physical_holder_id !== null)) {
+      throw conflict("DELIVERY_REFUND_PROOF_INVALID");
+    }
+    const existing = await repo.refundImpact({ shopId, refundId, connection });
+    if (existing) return { refundId, dueReductionCents: cents(existing.due_reduction_cents) };
+    const reduction = refund.return_source === "courier" ? cents(refund.amount_cents) : 0;
+    if (reduction) {
+      const state = cashState(await repo.journal({ shopId, courierId: refund.courier_id, connection }));
+      const source = state.collections.find(row => row.id === refund.collection_id);
+      if (!source || source.due < reduction) throw conflict("DELIVERY_REFUND_CUSTODY_INSUFFICIENT");
+    }
+    await repo.appendRefundImpact({ connection, row: { shopid: shopId, refund_id: refundId, courier_id: refund.courier_id,
+      collection_id: refund.collection_id, method: refund.method, amount_cents: cents(refund.amount_cents), return_source: refund.return_source,
+      due_reduction_cents: reduction, created_at: refund.created_at } });
+    return { refundId, dueReductionCents: reduction };
+  };
+  return { balance, remit, adjust, applyConfirmedRefund };
 };
 
 const buildCourierCashSummary = async ({ shopId, openedAt, closedAt, archivedOrders, connection }) => {
@@ -219,6 +273,7 @@ const buildCourierCashSummary = async ({ shopId, openedAt, closedAt, archivedOrd
   const collections = state.collections.filter(inPeriod);
   const remittances = state.remittances.filter(inPeriod);
   const adjustments = state.adjustments.filter(inPeriod);
+  const refunds = state.refunds.filter(inPeriod);
   const archivedIds = archivedOrders.filter(row => row.delivery_id).map(row => String(row.delivery_id));
   const sales = archivedIds.length ? await query(connection, `SELECT c.amount_cents FROM delivery_payment_collections c
     JOIN payments p ON p.id=c.payment_id AND p.shop_id=c.shopid
@@ -234,7 +289,12 @@ const buildCourierCashSummary = async ({ shopId, openedAt, closedAt, archivedOrd
     adjusted_due_cents: sum(adjustments.map(row => row.delta_due_cents)), surplus_cents: sum(remittances.map(row => Math.max(0, cents(row.discrepancy_cents)))),
     courier_cash_sales_cents: courierSales, register_cash_sales_cents: cents(cashSales - courierSales),
     remittances_count: remittances.length, adjustments_count: adjustments.length,
-    first_event_at: [...collections, ...remittances, ...adjustments].map(row => row.created_at).sort()[0] || null,
+    manual_refunded_cents: sum(refunds.map(row => row.amount_cents)),
+    cash_refunded_by_courier_cents: sum(refunds.filter(row => row.return_source === "courier").map(row => row.amount_cents)),
+    cash_refunded_by_register_cents: sum(refunds.filter(row => row.return_source === "register").map(row => row.amount_cents)),
+    external_card_refunded_cents: sum(refunds.filter(row => row.return_source === "external_card").map(row => row.amount_cents)),
+    refunds_count: refunds.length,
+    first_event_at: [...collections, ...remittances, ...adjustments, ...refunds].map(row => row.created_at).sort()[0] || null,
   };
 };
 module.exports = { buildCourierCash, buildCourierCashSummary, cashPostingTime: explicitTime };

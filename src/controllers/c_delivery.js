@@ -15,6 +15,7 @@ const buildDeliveryController = ({
   settings = require("../modules/m_deliverySettings").buildDeliverySettings(),
   dispatch = require("../modules/m_deliveryDispatch").buildDeliveryDispatch(),
   cash = require("../modules/m_courierCash").buildCourierCash(),
+  refunds = require("../modules/m_deliveryRefunds").buildDeliveryRefunds(),
 } = {}) => {
   const endpoint = work => async (req, res) => {
     try { return custom(res, 200, "OK", null, await work(req)); }
@@ -29,6 +30,14 @@ const buildDeliveryController = ({
   return {
     list: deliveryEndpoint(req => dispatch.list({ actor: deliveryActor(req) })),
     detail: deliveryEndpoint(req => dispatch.get({ actor: deliveryActor(req), deliveryId: req.params.id })),
+    refund: deliveryEndpoint(req => {
+      const body = req.body || {};
+      if (Object.keys(body).some(key => !["returnSource", "reason", "idempotencyKey"].includes(key))) {
+        throw new DomainError(400, "DELIVERY_REQUEST_INVALID", "Invalid manual delivery refund");
+      }
+      return refunds.refund({ actor: deliveryActor(req), deliveryId: req.params.id, returnSource: body.returnSource,
+        reason: body.reason, idempotencyKey: body.idempotencyKey });
+    }),
     assign: deliveryEndpoint(req => dispatch.assign(deliveryMutation(req))),
     resolveIssue: deliveryEndpoint(req => dispatch.resolveIssue(deliveryMutation(req))),
     reportIssue: deliveryEndpoint(req => dispatch.reportIssue(deliveryMutation(req))),

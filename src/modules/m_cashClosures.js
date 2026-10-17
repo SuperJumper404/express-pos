@@ -159,7 +159,7 @@ const mCloseCurrentCashClosure = ({ shopId, userId }) =>
       connection,
     });
 
-    if (snapshot.orders_count <= 0 && snapshot.courier_cash.remittances_count <= 0 && snapshot.courier_cash.adjustments_count <= 0) {
+    if (snapshot.orders_count <= 0 && snapshot.courier_cash.remittances_count <= 0 && snapshot.courier_cash.adjustments_count <= 0 && snapshot.courier_cash.refunds_count <= 0) {
       const error = new Error("La periode ne contient aucune commande a cloturer.");
       error.statusCode = 400;
       throw error;
