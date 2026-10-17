@@ -10,6 +10,8 @@ const normalizeCustomerDestination = ({ channel, value, countryCode } = {}) => {
     const parts = input.split("@");
     if (parts.length !== 2) throw invalid();
     const [local, rawDomain] = parts;
+    // Reject URL host syntax before the converter can discard or decode it.
+    if (/[\\/?#:%]/.test(rawDomain)) throw invalid();
     const domain = domainToASCII(rawDomain).toLowerCase();
     if (!local || local.length > 64 || !/^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+$/.test(local)
       || local.startsWith(".") || local.endsWith(".") || local.includes("..") || !domain || domain.length > 253

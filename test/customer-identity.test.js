@@ -7,8 +7,20 @@ test("email normalization preserves mailbox distinctions and canonicalizes only 
     ["  Alice.Name+shop@EXAMPLE.COM  ", "Alice.Name+shop@example.com"],
     ["alice.name+shop@example.com", "alice.name+shop@example.com"],
     ["Alice@b\u00fccher.DE", "Alice@xn--bcher-kva.de"],
+    ["Alice.Name+shop@XN--BCHER-KVA.DE", "Alice.Name+shop@xn--bcher-kva.de"],
+    ["Alice%tag+shop@EXAMPLE.COM", "Alice%tag+shop@example.com"],
   ]) assert.equal(normalizeCustomerDestination({ channel: "email", value }), expected);
 });
+
+for (const value of [
+  "a@example.com/path", "a@example.com?x=1", "a@example.com#x", "a@example.com\\evil", "a@example.com:443",
+  "a@%65xample.com", "a@ex%61mple.com", "a@example%2ecom", "a@example.com%2fpath",
+  "a@example.com%3fx=1", "a@example.com%23x", "a@example.com%5cevil", "a@example.com/%65vil", "a@example.com%25evil",
+]) {
+  test(`email domain rejects URL syntax and escapes: ${value}`, () => {
+    assert.throws(() => normalizeCustomerDestination({ channel: "email", value }), { code: "CUSTOMER_DESTINATION_INVALID" });
+  });
+}
 
 test("phone normalization uses strict whole-input max metadata and E164", () => {
   for (const [value, countryCode, expected] of [
