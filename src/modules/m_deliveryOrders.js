@@ -67,7 +67,7 @@ const toDeliveryView = ({ delivery, order, actor }) => {
     if (staff) {
       if (["unassigned", "assigned"].includes(delivery.delivery_status)) actions.push("assign");
       if (delivery.delivery_status === "issue") actions.push("resolveIssue");
-      if (["assigned", "in_transit"].includes(delivery.delivery_status)) actions.push("reportIssue");
+      if (["unassigned", "assigned", "in_transit"].includes(delivery.delivery_status)) actions.push("reportIssue");
     }
     if (courier) {
       if (delivery.delivery_status === "assigned" && Number(preparation) === 3) actions.push("pickup");
@@ -88,6 +88,10 @@ const toDeliveryView = ({ delivery, order, actor }) => {
       contactSnapshot: json(delivery.contact_snapshot), ...(order.items ? { items: order.items } : {}) } : {}),
     financials: financialsFor(delivery, order),
     allowedActions: actions,
+    ...(staff && delivery.delivery_status === "issue" ? { allowedResolutions:
+      delivery.issue_origin === "unassigned" ? ["resume", "retry", "fail", "cancel"]
+        : delivery.issue_origin === "assigned" ? ["resume", "retry", "return", "fail", "cancel"]
+          : delivery.issue_origin === "in_transit" ? ["resume", "retry", "return", "fail", "cancel", ...(due > 0 ? ["confirm_unpaid_delivery"] : [])] : [] } : {}),
   };
 };
 

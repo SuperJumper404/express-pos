@@ -20,6 +20,7 @@ const { buildDeliveryOrders } = require("./m_deliveryOrders");
 const { hashTrackingToken } = require("../helpers/deliveryTrackingToken");
 const { calculateDiscount } = require("../helpers/discount");
 const { normalizePaymentMethod } = require("../helpers/paymentMethod");
+const { registerMethod, recordRegisterSettlement } = require("./m_deliveryRegisterPayments");
 
 const RESERVATION_TTL_MS = envSTRIPESTOCKRESERVATIONMINUTES * 60 * 1000;
 
@@ -352,7 +353,7 @@ const queryResult = async (connection, sql, params = []) => {
 const sqlRepository = {
   findUserById: ({ userId, shopId, connection }) => queryResult(
     connection,
-    `SELECT id, shopid, username, access
+    `SELECT id, shopid, username, access, status
      FROM users
      WHERE id = ? AND shopid = ?
      LIMIT 1`,
@@ -855,6 +856,14 @@ const buildCheckoutModule = ({
     });
     const transactionWork = async (connection) => {
       if (isDelivery) {
+        await queryResult(connection, "SELECT id FROM shop WHERE id=? FOR UPDATE", [checkout.shopId]);
+        if (checkout.paymentMode.toLowerCase().startsWith(COUNTER_PAY_BEFORE_PREFIX)) {
+          registerMethod(checkout.paymentMode.slice(COUNTER_PAY_BEFORE_PREFIX.length));
+          const operator = await repository.findUserById({ userId: checkout.actorId, shopId: checkout.shopId, connection });
+          if (checkout.sessionSubject !== "staff" || !operator || operator.access == null || Number(operator.status) !== 1 || !isOrderTakerAccess(operator.access)) {
+            throw new DomainError(403, "DELIVERY_FORBIDDEN", "Delivery checkout is not authorized");
+          }
+        }
         const replay = await deliveryReplay(connection);
         if (replay) return replay;
       }
@@ -1147,6 +1156,11 @@ const buildCheckoutModule = ({
             [checkout.verifiedCustomer.customerId, checkout.shopId, orderId]);
           await queryResult(connection, "UPDATE deliveries SET customer_account_id=? WHERE shopid=? AND id=?",
             [checkout.verifiedCustomer.customerId, checkout.shopId, delivery.delivery.id]);
+        }
+        if (paymentState.payment_status === "paid" && paymentState.payment_provider === "counter") {
+          const current = await deliveryOrders.resolveDeliveryOrder({ shopId: checkout.shopId, deliveryId: delivery.delivery.id, connection, forUpdate: true });
+          await recordRegisterSettlement({ current, operatorId: checkout.actorId,
+            paymentMethod: checkout.paymentMode.slice(COUNTER_PAY_BEFORE_PREFIX.length), connection });
         }
         return { ...result, ...delivery };
       }

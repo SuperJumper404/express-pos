@@ -428,7 +428,7 @@ async function main() {
             racing.push(dispatch.reportIssue(mutation(item, courier, 2, `racing-issue-${item.id}`, { reason: "Incident wins commercial lock" })));
             const incident = Promise.allSettled(racing);
             await waitForLocks(1);
-            racing.push(action === "collect" ? orders.collectDeliveryOrderPayment({ orderId: item.id, shopId: 7, paymentMethod: "cash" }) : orders.mArchiveOrder(item.id, "cash", 7));
+            racing.push(action === "collect" ? orders.collectDeliveryOrderPayment({ orderId: item.id, shopId: 7, paymentMethod: "cash", operatorId: 10 }) : orders.mArchiveOrder(item.id, "cash", 7, {}, 10));
             const outcomes = Promise.allSettled(racing);
             await waitForLocks(2);
             await gate.commit();

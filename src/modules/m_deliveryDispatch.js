@@ -3,7 +3,7 @@ const pool = require("../config/dbPool");
 const DomainError = require("../helpers/domainError");
 const { withTransaction } = require("../helpers/withTransaction");
 const { resolveDeliveryOrder, toDeliveryView } = require("./m_deliveryOrders");
-const { toCents } = require("../helpers/deliveryMoney");
+const { readManualSources, manualRefundEligible } = require("./m_deliveryRegisterPayments");
 const { assertDeliveryActor, assertDeliveryOwner, isCourier, isDeliveryOperator, forbidden } = require("../helpers/deliveryAuthorization");
 
 const json = value => typeof value === "string" ? JSON.parse(value) : value;
@@ -19,7 +19,8 @@ const journalTime = value => new Date(typeof value === "string" && /^\d{4}-\d{2}
 // terminal time in immutable evidence for the future tracking privacy cutoff.
 const terminalContext = (events, delivery) => {
   const refuse = () => { throw conflict("DELIVERY_TERMINAL_HISTORY_REQUIRED"); };
-  const operational = state => state && ["assigned", "in_transit"].includes(state.deliveryStatus) && Number.isSafeInteger(state.courierId) && state.courierId > 0 && !state.closedAt;
+  const operational = state => state && !state.closedAt && (state.deliveryStatus === "unassigned" ? state.courierId === null
+    : ["assigned", "in_transit"].includes(state.deliveryStatus) && Number.isSafeInteger(state.courierId) && state.courierId > 0);
   try {
     let source = events.find(event => event.version === delivery.version);
     // Only contiguous, state-preserving annotations may bridge to terminal proof.
@@ -113,11 +114,9 @@ const repository = {
   listFinancialHolders: ({ shopId, connection }) => query(connection,
     `SELECT u.id,u.username,u.status,(u.access=6) AS currentCourier FROM users u WHERE u.shopid=? AND
       (u.access=6 OR EXISTS (SELECT 1 FROM delivery_payment_collections c WHERE c.shopid=u.shopid AND c.courier_id=u.id)) ORDER BY u.id`, [shopId]),
-  refundSource: ({ shopId, deliveryId, connection }) => query(connection,
-    `SELECT CAST(c.id AS CHAR) collectionId,c.courier_id,c.method,c.amount_cents,c.payment_id,
-      p.order_id,p.status,p.amount_cents paymentAmount,p.currency,p.stripe_charge_id,p.stripe_refund_id,p.refund_status,p.stripe_payment_intent_id
-      FROM delivery_payment_collections c JOIN payments p ON p.shop_id=c.shopid AND p.id=c.payment_id
-      WHERE c.shopid=? AND c.delivery_id=? FOR UPDATE`, [shopId, deliveryId]),
+  refundSource: readManualSources,
+  payment: async ({ shopId, paymentId, connection }) => (await query(connection,
+    "SELECT * FROM payments WHERE shop_id=? AND id=? FOR UPDATE", [shopId, paymentId]))[0],
   setAvailability: ({ id, shopId, available, connection }) => query(connection,
     "UPDATE users SET courier_available = ? WHERE shopid = ? AND id = ?", [available ? 1 : 0, shopId, id]),
 };
@@ -162,6 +161,10 @@ const buildDeliveryDispatch = ({ repository: repo = repository, runInTransaction
   };
   const project = async (current, connection) => {
     if (!closed(current.delivery)) current.order.items = await repo.items({ ...current, connection });
+    if (current.delivery.delivery_status === "issue") {
+      const issue = await repo.findIssue({ shopId: current.delivery.shopid, deliveryId: current.delivery.id, connection });
+      current.delivery.issue_origin = issue && (issue.event_type === "correctTerminal" ? json(issue.result).issueOrigin.deliveryStatus : json(issue.previous_state).deliveryStatus);
+    }
     return toDeliveryView(current);
   };
   const target = async (actor, courierId, connection) => {
@@ -216,7 +219,8 @@ const buildDeliveryDispatch = ({ repository: repo = repository, runInTransaction
         delivery.delivery_status = "in_transit";
       } else if (name === "reportIssue") {
         if (!reason) throw invalid();
-        if (!["assigned", "in_transit"].includes(delivery.delivery_status)) throw conflict();
+        if (!["unassigned", "assigned", "in_transit"].includes(delivery.delivery_status) ||
+          (delivery.delivery_status === "unassigned" && (!operator || delivery.courier_id !== null))) throw conflict();
         delivery.delivery_status = "issue";
       } else if (name === "deliver") {
         if (delivery.delivery_status !== "in_transit") throw conflict();
@@ -227,7 +231,9 @@ const buildDeliveryDispatch = ({ repository: repo = repository, runInTransaction
         if (delivery.delivery_status !== "issue") throw conflict();
         const issue = await repo.findIssue({ shopId: actor.shopId, deliveryId, connection });
         const prior = issue && (issue.event_type === "correctTerminal" ? json(issue.result).issueOrigin.deliveryStatus : json(issue.previous_state).deliveryStatus);
-        if (!["assigned", "in_transit"].includes(prior)) throw conflict();
+        if (!["unassigned", "assigned", "in_transit"].includes(prior)) throw conflict();
+        if (prior === "unassigned" && (delivery.courier_id !== null || ["return", "confirm_unpaid_delivery"].includes(input.action) ||
+          (input.courierId !== undefined && input.action !== "retry") || input.physicalTransferConfirmed === true)) throw conflict();
         const physicalTransfer = ["retry", "return"].includes(input.action) || input.courierId !== undefined;
         if (prior === "in_transit" && physicalTransfer && input.physicalTransferConfirmed !== true) throw conflict("DELIVERY_PHYSICAL_CONFIRMATION_REQUIRED");
         if (input.action === "resume") {
@@ -286,16 +292,13 @@ const buildDeliveryDispatch = ({ repository: repo = repository, runInTransaction
       if (!isDeliveryOperator(current.actor)) throw forbidden();
       const sources = await repo.refundSource({ shopId: current.actor.shopId, deliveryId, connection });
       const source = sources.length === 1 && sources[0];
-      const { order, delivery } = current;
       const amount = source && Number(source.amount_cents);
-      const eligible = Boolean(source && ["cash", "external_card"].includes(source.method) && Number.isSafeInteger(amount) && amount > 0 &&
-        toCents(toDeliveryView(current).financials.grand_total) === amount && order.payment_status === "paid" &&
-        !order.payment_provider && !order.stripe_payment_intent_id && !order.stripe_terminal_payment_id &&
-        Number(source.order_id) === Number(delivery.origin_order_id) && source.status === "succeeded" && Number(source.paymentAmount) === amount &&
-        source.currency === "eur" && !source.stripe_charge_id && !source.stripe_refund_id && !source.refund_status &&
-        new RegExp(`^manual_delivery:${deliveryId}:\\d+$`).test(source.stripe_payment_intent_id));
+      const payment = source && await repo.payment({ shopId: current.actor.shopId, paymentId: source.payment_id, connection });
+      const eligible = manualRefundEligible({ current, source, payment });
       if (!eligible) return { eligible: false, reasonCode: "DELIVERY_REFUND_NOT_ALLOWED" };
-      return { eligible: true, collectionId: source.collectionId, method: source.method, amountCents: amount, originalCourierId: source.courier_id,
+      if (source.payment_origin === "register") return { eligible: true, paymentOrigin: "register", registerPaymentId: source.id,
+        method: source.method, amountCents: amount, returnSources: [source.method === "cash" ? "register" : source.method] };
+      return { eligible: true, collectionId: source.id, method: source.method, amountCents: amount, originalCourierId: source.courier_id,
         returnSources: source.method === "external_card" ? ["external_card"] : Number(current.actor.id) === Number(source.courier_id) ? ["register"] : ["register", "courier"] };
     }),
     readAvailability: ({ actor }) => runInTransaction(async connection => {

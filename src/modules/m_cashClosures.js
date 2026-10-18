@@ -86,8 +86,10 @@ const getDatabaseNow = async (shopId, connection) => {
          OR EXISTS(SELECT 1 FROM delivery_payment_collections WHERE shopid=?)
          OR EXISTS(SELECT 1 FROM courier_cash_remittances WHERE shopid=?)
          OR EXISTS(SELECT 1 FROM courier_cash_adjustments WHERE shopid=?)
-         OR EXISTS(SELECT 1 FROM delivery_manual_refunds WHERE shopid=?) AS requires_utc`,
-      [shopId, shopId, shopId, shopId, shopId],
+         OR EXISTS(SELECT 1 FROM delivery_manual_refunds WHERE shopid=?)
+         OR EXISTS(SELECT 1 FROM delivery_register_payments WHERE shopid=?)
+         OR EXISTS(SELECT 1 FROM delivery_register_refunds WHERE shopid=?) AS requires_utc`,
+      [shopId, shopId, shopId, shopId, shopId, shopId, shopId],
       connection
     );
     if (Number(delivery.requires_utc)) throw new Error("Delivery financial summaries require a UTC database session");

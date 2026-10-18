@@ -455,7 +455,7 @@ exports.collectOrderPayment = async (req, res) => {
     deliveryOrder = orders[0].delivery_id != null || orders[0].fulfillment_type === "delivery";
     if (deliveryOrder) requireDeliveryStaff(req, true);
     const result = deliveryOrder ? await collectDeliveryOrderPayment({
-      orderId: id, shopId: req.shopid, paymentMethod: req.body.payment_method,
+      orderId: id, shopId: req.shopid, paymentMethod: req.body.payment_method, operatorId: req.id,
       discount: { discountType: req.body.discount_type, discountValue: req.body.discount_value },
     }) : await mUpdateOrders(
       {
@@ -510,7 +510,7 @@ const buildArchiveOrderController = ({
     if (terminalOrder) buildCashRegisterArchiveFields({ order: orders[0] });
     else if (!deliveryOrder) await syncPendingStripe(orders[0]);
 
-    const response = await archiveOrder(id, payment_method, req.shopid, discount);
+    const response = await archiveOrder(id, payment_method, req.shopid, discount, req.id);
     if (response.affectedRows) {
       return success(res, "Commande archivée avec succès.", null, null);
     }

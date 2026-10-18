@@ -273,7 +273,10 @@ const buildCourierCashSummary = async ({ shopId, openedAt, closedAt, archivedOrd
   const collections = state.collections.filter(inPeriod);
   const remittances = state.remittances.filter(inPeriod);
   const adjustments = state.adjustments.filter(inPeriod);
-  const refunds = state.refunds.filter(inPeriod);
+  const registerRefunds = await query(connection, `SELECT method,return_source,amount_cents,
+    DATE_FORMAT(created_at,'%Y-%m-%d %H:%i:%s.%f') created_at FROM delivery_register_refunds
+    WHERE shopid=? AND created_at<=? ORDER BY created_at,id`, [shopId, closedAt]);
+  const refunds = [...state.refunds, ...registerRefunds].filter(inPeriod);
   const archivedIds = archivedOrders.filter(row => row.delivery_id).map(row => String(row.delivery_id));
   const sales = archivedIds.length ? await query(connection, `SELECT c.amount_cents FROM delivery_payment_collections c
     JOIN payments p ON p.id=c.payment_id AND p.shop_id=c.shopid

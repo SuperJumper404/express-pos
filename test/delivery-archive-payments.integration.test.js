@@ -236,7 +236,7 @@ async function main() {
       await assert.rejects(orders.mArchiveOrder(unpaid.id, undefined, 7), { code: "DELIVERY_PAYMENT_NOT_SETTLED" });
       await assert.rejects(orders.mArchiveOrder(unpaid.id, "Especes", 7, { discountType: "amount", discountValue: 1 }), { code: "DELIVERY_REQUOTE_REQUIRED" });
       const before = await originalDetail(unpaid.id);
-      await orders.mArchiveOrder(unpaid.id, "Especes", 7, { discountType: "none", discountValue: 0 });
+      await orders.mArchiveOrder(unpaid.id, "Especes", 7, { discountType: "none", discountValue: 0 }, 10);
       const after = await view(unpaid);
       assert.equal(after.paymentStatus, "paid");
       assert.equal(after.financials.items_discount, 2);

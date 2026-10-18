@@ -14,6 +14,7 @@ const { buildStripeTerminalModule } = require("./m_stripeTerminal");
 const DomainError = require("../helpers/domainError");
 const deliveryOrders = require("./m_deliveryOrders");
 const { toCents, assertCents } = require("../helpers/deliveryMoney");
+const { recordRegisterSettlement } = require("./m_deliveryRegisterPayments");
 
 const queryResult = async (connection, sql, params = []) => {
   const [result] = await (connection || pool).query(sql, params);
@@ -410,7 +411,7 @@ const buildOrderArchiveModule = ({
     });
   };
 
-  const mArchiveOrder = (id, paymentMethod, shopId, discount = {}) => runInTransaction(
+  const mArchiveOrder = (id, paymentMethod, shopId, discount = {}, operatorId) => runInTransaction(
     async (connection) => {
       if (shopId != null && repository.lockShopForArchive) {
         await repository.lockShopForArchive({ shopId, connection });
@@ -503,6 +504,9 @@ const buildOrderArchiveModule = ({
         ...buildHiddenArchiveVisibilityFields(discount),
         token: createToken(),
       };
+      if (deliveryContext && order.payment_status === "unpaid") {
+        await recordRegisterSettlement({ current: deliveryContext, operatorId, paymentMethod, connection });
+      }
       const archiveResult = await repository.insertArchive({ archive, connection });
       const archiveOrderId = archiveResult.insertId;
       if (deliveryContext) {
@@ -1328,7 +1332,8 @@ module.exports.findCommercialOrderById = async (orderId, shopId) => {
   const order = await deliveryOrders.resolveCommercialOrder({ orderId, shopId });
   return order ? [order] : [];
 };
-module.exports.collectDeliveryOrderPayment = ({ orderId, shopId, paymentMethod, discount }) => withTransaction(async connection => {
+module.exports.collectDeliveryOrderPayment = ({ orderId, shopId, paymentMethod, discount, operatorId }) => withTransaction(async connection => {
+  await queryResult(connection, "SELECT id FROM shop WHERE id=? FOR UPDATE", [shopId]);
   const order = await deliveryOrders.resolveCommercialOrder({ orderId, shopId, connection, forUpdate: true });
   if (!order || order.delivery_id == null || order.archive_id != null) throw new DomainError(404, "ORDER_NOT_FOUND", "Order unavailable");
   const context = await deliveryOrders.resolveDeliveryOrder({ shopId, deliveryId: order.delivery_id, connection, forUpdate: true });
@@ -1339,6 +1344,7 @@ module.exports.collectDeliveryOrderPayment = ({ orderId, shopId, paymentMethod, 
   assertDeliverySettlementDiscount(order, discount);
   assertDeliveryCollectionAllowed(order);
   await assertNoPendingDeliveryTerminal({ orderId, shopId, connection });
+  await recordRegisterSettlement({ current: context, operatorId, paymentMethod, connection });
   return queryResult(connection, "UPDATE orders SET ? WHERE shopid = ? AND id = ? AND payment_status = 'unpaid'", [buildCashRegisterCollectionFields(paymentMethod), shopId, orderId]);
 });
 module.exports.buildOrderArchiveModule = buildOrderArchiveModule;
