@@ -166,7 +166,7 @@ async function main() {
       items: attempt.items, expectedTotal: 20,
     };
     await assert.rejects(editing.amendOrder(editBase), { code: "DELIVERY_QUOTE_CHANGED" });
-    const editAttempt = await makeAttempt("delivery-edit-1", { items: [{ productId: 21, quantity: 2, selectedChoiceIds: [] }], address: { ...address, street: "9 rue Test" }, discount: { type: "amount", value: 1 } });
+    const editAttempt = await makeAttempt("delivery-edit-1", { items: [{ productId: 21, quantity: 2, selectedChoiceIds: [] }], address, discount: { type: "amount", value: 1 } });
     const edit = {
       ...editBase, items: editAttempt.items, expectedTotal: 43,
       deliveryQuoteToken: editAttempt.deliveryQuoteToken, addressResolutionToken: editAttempt.addressResolutionToken,
@@ -179,7 +179,7 @@ async function main() {
     assert.equal(current.delivery.charge_revision, 2);
     assert.equal(current.delivery.settings_revision, 1);
     const currentAddress = typeof current.delivery.address_snapshot === "string" ? JSON.parse(current.delivery.address_snapshot) : current.delivery.address_snapshot;
-    assert.equal(currentAddress.street, "9 rue Test");
+    assert.equal(currentAddress.street, "7 rue Test");
     assert.equal(Number(current.order.subtotal), 43);
     assert.equal(Number(current.order.discount_amount), 1);
     assert.equal((await db.readRows("SELECT * FROM delivery_charge_snapshots WHERE delivery_id = ?", [first.delivery.id])).length, 2);
