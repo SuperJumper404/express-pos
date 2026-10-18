@@ -590,7 +590,8 @@ module.exports = {
   mAllOrder: (shopid) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        `SELECT orders.*,
+        `SELECT orders.*, CAST(orders.delivery_id AS CHAR) AS delivery_id,
+                CAST(orders.customer_account_id AS CHAR) AS customer_account_id,
                 service_points.name AS service_point_name,
                 stock_reservations.stock_reservation_status,
                 CASE WHEN orders.payment_status = 'paid'
@@ -1298,6 +1299,7 @@ module.exports = {
 
 const legacyAllArchivedOrdersWithDetails = module.exports.mAllArchivedOrdersWithDetails;
 const legacyAllArchivedOrders = module.exports.mAllArchivedOrders;
+const legacyAllOrders = module.exports.mAllOrder;
 const withDeliveryFinancials = async (rows) => {
   const contexts = new Map();
   return Promise.all(rows.map(async row => {
@@ -1306,10 +1308,10 @@ const withDeliveryFinancials = async (rows) => {
     if (!contexts.has(key)) contexts.set(key, deliveryOrders.resolveDeliveryOrder({ shopId: row.shopid, deliveryId: row.delivery_id }));
     const resolved = await contexts.get(key);
     if (!resolved) throw new DomainError(409, "DELIVERY_ORDER_MISSING", "Delivery commercial order is unavailable");
-    const { financials } = deliveryOrders.toDeliveryView(resolved);
+    const { financials, deliveryStatus } = deliveryOrders.toDeliveryView(resolved);
     return { ...row, delivery_id: resolved.delivery.id, customer_account_id: resolved.delivery.customer_account_id,
       originalorderID: resolved.delivery.origin_order_id, payment_order_id: resolved.delivery.origin_order_id,
-      financials, ...financials };
+      delivery_status: deliveryStatus, financials, ...financials };
   }));
 };
 module.exports.findCommercialOrderById = async (orderId, shopId) => {
@@ -1336,6 +1338,7 @@ module.exports.mDetailArchivedOrder = async (...args) => withDeliveryFinancials(
 module.exports.mDetailArchivedOrderByToken = async (...args) => withDeliveryFinancials(await orderArchiveModule.mDetailArchivedOrderByToken(...args));
 module.exports.mDetailOrder = async (...args) => withDeliveryFinancials(await orderArchiveModule.mDetailOrder(...args));
 module.exports.mAllArchivedOrders = async (...args) => withDeliveryFinancials(await legacyAllArchivedOrders(...args));
+module.exports.mAllOrder = async (...args) => withDeliveryFinancials(await legacyAllOrders(...args));
 module.exports.mAllArchivedOrdersWithDetails = async (...args) => {
   const orders = await legacyAllArchivedOrdersWithDetails(...args);
   return withDeliveryFinancials(await Promise.all(orders.map(async (order) => ({

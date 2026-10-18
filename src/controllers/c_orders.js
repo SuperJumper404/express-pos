@@ -44,6 +44,7 @@ const {
 } = require("../modules/m_orderTransitions");
 const {
   buildRevenueByDayAndPayment,
+  buildDeliverySalesSummary,
 } = require("../helpers/orderMetrics");
 
 const jwt = require("jsonwebtoken");
@@ -557,23 +558,27 @@ exports.detailArchivedOrder = (req, res) => {
       failed(res, "Erreur serveur.", error.message);
     });
 };
-exports.orderByToken = (req, res) => {
+exports.orderByToken = async (req, res) => {
   const token = req.params.id;
-  console.log(req.params);
-  mDetailArchivedOrderByToken(token).then(async (response) => {
+  try {
+    const response = await mDetailArchivedOrderByToken(token);
     if (response.length > 0) {
-      const shopInfo = await mGetShopInfo(response[0].shopid).then();
-      console.log(shopInfo);
+      const [shopInfo] = await require('../config/dbPool').query(
+        `SELECT id, shop_name, shop_mail, shop_phone, shop_adress, shop_description,
+          shop_profile_image, shop_siret, shop_naf, shop_vat_number, activate_tva,
+          receipt_review_qr_url, receipt_review_qr_label, cash_register_number
+         FROM shop WHERE id = ?`, [response[0].shopid]);
       const data = { orderDetail: response, shopInfo };
       success(res, "Détail de la commande récupéré.", null, data);
     } else {
       failed(res, "Ticket introuvable.", "Aucun Ticket Dispo", 404);
     }
-  });
+  } catch (error) {
+    failed(res, "Ticket indisponible.");
+  }
 };
 
 exports.metrics = async (req, res) => {
-  console.log("Metrics Params", req.query);
 
   const shopId = req.shopid || req.query.shopid; // Sécurité
   let { from, to } = req.query;
@@ -588,7 +593,6 @@ exports.metrics = async (req, res) => {
     to = from; // tu peux modifier selon la logique métier
   }
 
-  console.log(`Fetching metrics for shop ${shopId} from ${from} to ${to}`);
   const allOrders = await mAllArchivedOrdersWithDetails(shopId, from, to);
   let metrics = {
     totalRevenue: Number(
@@ -616,9 +620,8 @@ exports.metrics = async (req, res) => {
     to,
   );
   metrics.topProducts = getTopProducts(allOrders);
+  Object.assign(metrics, buildDeliverySalesSummary(allOrders));
   // TODO: ta logique de récupération des métriques ici
-  console.log("All Orderss", JSON.stringify(allOrders, null, 2));
-  console.log("Metrics:", metrics);
   res.json({
     message: "Métriques récupérées avec succès",
     shopId,

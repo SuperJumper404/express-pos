@@ -120,10 +120,19 @@ const getArchivedOrdersForPeriod = ({ shopId, openedAt, closedAt, connection = p
 const getArchiveDetailsForOrders = ({ orderIds, connection = pool }) => {
   if (!orderIds.length) return Promise.resolve([]);
   return queryResult(
-    `SELECT archivesdetail.*
+    `SELECT vat_rate, total_ht, total_vat, total
      FROM archivesdetail
-     WHERE archivesdetail.orderId IN (?)`,
-    [orderIds],
+     WHERE archivesdetail.orderId IN (?)
+     UNION ALL
+     SELECT charge.vat_rate, charge.total_excl_tax_cents / 100,
+            charge.tax_cents / 100, charge.fee_cents / 100
+     FROM archives
+     JOIN deliveries ON deliveries.id = archives.delivery_id AND deliveries.shopid = archives.shopid
+     JOIN delivery_charge_snapshots charge
+       ON charge.delivery_id = deliveries.id AND charge.shopid = deliveries.shopid
+       AND charge.revision = deliveries.charge_revision
+     WHERE archives.id IN (?) AND charge.fee_cents > 0`,
+    [orderIds, orderIds],
     connection
   );
 };
