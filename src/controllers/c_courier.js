@@ -24,6 +24,7 @@ const buildCourierController = ({ dispatch = require("../modules/m_deliveryDispa
   collections = require("../modules/m_deliveryCollections").buildDeliveryCollections(),
   cash = require("../modules/m_courierCash").buildCourierCash() } = {}) => ({
   cashBalance: deliveryEndpoint(req => cash.balance({ actor: deliveryActor(req), courierId: req.id })),
+  readAvailability: deliveryEndpoint(req => dispatch.readAvailability({ actor: deliveryActor(req) })),
   list: deliveryEndpoint(req => dispatch.list({ actor: deliveryActor(req) })),
   detail: deliveryEndpoint(req => dispatch.get({ actor: deliveryActor(req), deliveryId: req.params.id })),
   pickup: deliveryEndpoint(req => dispatch.pickup(deliveryMutation(req))),

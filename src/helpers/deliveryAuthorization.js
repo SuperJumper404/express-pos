@@ -12,7 +12,7 @@ const assertStaffSurface = ({ access, method, path }) => {
   const verb = String(method || "").toUpperCase();
   const pathname = String(path || "").split("?")[0].replace(/\/$/, "");
   const permitted = (verb === "GET" && (/^\/courier\/deliveries(?:\/[1-9]\d{0,19})?$/.test(pathname) ||
-    ["/user/me", "/courier/cash-balance"].includes(pathname))) ||
+    ["/user/me", "/courier/cash-balance", "/courier/availability"].includes(pathname))) ||
     (verb === "POST" && (pathname === "/logout" || /^\/courier\/deliveries\/[1-9]\d{0,19}\/(pickup|deliver|report-issue|collect-payment)$/.test(pathname))) ||
     (verb === "PATCH" && pathname === "/courier/availability");
   if (!permitted) throw forbidden();

@@ -289,6 +289,12 @@ const buildDeliveryDispatch = ({ repository: repo = repository, runInTransaction
       return { eligible: true, collectionId: source.collectionId, method: source.method, amountCents: amount, originalCourierId: source.courier_id,
         returnSources: source.method === "external_card" ? ["external_card"] : Number(current.actor.id) === Number(source.courier_id) ? ["register"] : ["register", "courier"] };
     }),
+    readAvailability: ({ actor }) => runInTransaction(async connection => {
+      const current = await reload(actor, connection);
+      if (!isCourier(current)) throw forbidden();
+      const account = await repo.findAccount({ id: current.id, shopId: current.shopId, connection });
+      return { courierId: current.id, available: Number(account.courier_available) === 1 };
+    }),
     availability: ({ actor, courierId, available }) => runInTransaction(async connection => {
       if (typeof available !== "boolean") throw invalid();
       const current = await reload(actor, connection);
