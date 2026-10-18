@@ -116,6 +116,16 @@ async function reviewRegressions() {
 }
 
 async function unitTests() {
+  for (const secret of ["", "too-short"]) {
+    let geocoderCalls = 0;
+    const unconfigured = buildDeliveryQuotes({
+      repository: {}, quoteOrderItems: async () => ({}),
+      tokenCodec: buildDeliveryTokenCodec({ secret }),
+      geocoder: { resolve: async () => { geocoderCalls++; return { ...address, latitude: 48.82, longitude: 2.36 }; } },
+    });
+    await assert.rejects(unconfigured.resolveAddress({ shopId: 7, address }), { code: "DELIVERY_UNAVAILABLE" });
+    assert.equal(geocoderCalls, 0, "missing signing configuration must refuse before any geocoder request");
+  }
   await reviewRegressions();
   for (const failure of ["release-null", "release-throw", "rollback-throw"]) {
     let destroyed = false;
@@ -289,9 +299,9 @@ async function unitTests() {
   const disabledQuotes = buildDeliveryQuotes({ repository: { getSettings: async ({ shopId }) => defaultSettings(shopId) } });
   await assert.rejects(disabledQuotes.createQuote(input), { code: "DELIVERY_DISABLED" });
   const { execFileSync } = require("child_process");
-  const childEnv = { ...process.env, ENV_FILE: ".env.delivery-test-does-not-exist" };
+  const childEnv = { ...process.env, ENV_FILE: "NUL" };
   delete childEnv.DELIVERY_TOKEN_SECRET;
-  execFileSync(process.execPath, ["-e", "require('./src/routers/r_delivery').buildDeliveryRouter(); console.log('lazy delivery boot passed')"], { cwd: require("path").join(__dirname, ".."), env: childEnv });
+  execFileSync(process.execPath, ["-e", "require('./src/routers/r_delivery').buildDeliveryRouter(); const q=require('./src/modules/m_deliveryQuotes').buildDeliveryQuotes({repository:{},quoteOrderItems:async()=>({}),geocoder:{resolve:async()=>{throw Error('unexpected geocoder')}}}); q.resolveAddress({shopId:7,address:{}}).then(()=>process.exitCode=1,e=>{require('assert').equal(e.code,'DELIVERY_UNAVAILABLE'); console.log('lazy boot and missing signer preflight passed')})"], { cwd: require("path").join(__dirname, ".."), env: childEnv });
   console.log("delivery quotes tests passed (server prices/discounts, IGN privacy/cache/errors, HTTP scope/roles, expiry, timeout)");
 }
 

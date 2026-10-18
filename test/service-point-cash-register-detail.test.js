@@ -13,7 +13,7 @@ const moduleSource = fs.readFileSync(
 );
 
 assert.match(controller, /req\.query\.servicePointId \|\| req\.query\.userId/);
-assert.match(controller, /mOrdersbyUserId\(servicePointId, req\.shopid\)/);
+assert.match(controller, /mOrdersbyUserId\(servicePointId, req\.shopid, \{ omitNewDeliveries: !trustedDeliveryStaff\(req\) \}\)/);
 assert.match(moduleSource, /orders\.service_point_id = \?/);
 assert.match(moduleSource, /orders\.service_point_id IS NULL AND orders\.customerID = \?/);
 assert.match(moduleSource, /WHERE orders\.shopid = \?/);

@@ -29,6 +29,8 @@ const buildDeliveryQuotes = ({
 } = {}) => ({
   async resolveAddress({ shopId, address, candidateId }) {
     if (!positiveId(shopId)) throw invalidRequest();
+    // Validate lazy signer configuration before consuming supplier quota.
+    tokenCodec.sign({ kind: "preflight" });
     const addressSnapshot = await geocoder.resolve({ shopId, address, candidateId });
     const now = clock();
     return {
