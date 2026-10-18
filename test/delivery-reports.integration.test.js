@@ -28,6 +28,8 @@ async function fixture(work, largeIdentity = false) {
     const originalLog = console.log;
     console.log = (...values) => logs.push(values);
     let server;
+    const priorDeliverySecret = process.env.DELIVERY_TOKEN_SECRET;
+    process.env.DELIVERY_TOKEN_SECRET = 'task15-round1-disposable-signing-fixture-only';
     try {
       await db.pool.query('DELETE FROM archives WHERE id=32');
       // Change the seed identity before inserting the immutable fiscal snapshot.
@@ -70,12 +72,105 @@ async function fixture(work, largeIdentity = false) {
       const closure = time => require('../src/modules/m_cashClosures').buildCashClosures({ clock: () => time });
       await work({ db, call, collect, archive, logs, closure });
     } finally {
+      if (priorDeliverySecret === undefined) delete process.env.DELIVERY_TOKEN_SECRET;
+      else process.env.DELIVERY_TOKEN_SECRET = priorDeliverySecret;
       console.log = originalLog;
       if (server) await new Promise(resolve => server.close(resolve));
       await appPool.end();
     }
   });
 }
+
+const preparePrivateAmendment = async ({ db, call }) => {
+  const address = { street: '7 rue Test', postalCode: '75001', city: 'Paris', country: 'FR',
+    providerId: 'fixture-address-7', providerLabel: '7 rue Test 75001 Paris', precision: 'housenumber', cityCode: '75056',
+    latitude: 48.857, longitude: 2.353 };
+  const privateFields = { complement: 'Appartement B', building: 'Batiment C', floor: '2',
+    intercom: 'PRIVATE_INTERCOM_FIXTURE', instructions: 'PRIVATE_INSTRUCTIONS_FIXTURE' };
+  await db.pool.query(`UPDATE orders SET status=1 WHERE id=31`);
+  await db.pool.query(`UPDATE deliveries SET delivery_status='assigned',address_snapshot=?,latitude=?,longitude=? WHERE id=41`,
+    [JSON.stringify({ ...address, ...privateFields }), address.latitude, address.longitude]);
+  await db.pool.query('UPDATE products SET price=20,vat_rate_takeaway=10 WHERE id=21');
+  await db.pool.query(`UPDATE shop_delivery_settings SET enabled=1,revision=1,origin_latitude=48.8566,
+    origin_longitude=2.3522,max_distance_meters=5000,minimum_items_cents=0,free_delivery_enabled=0,
+    fiscal_mode='configured_rate',vat_rate=20 WHERE shopid=7`);
+  await db.pool.query('INSERT INTO shop_delivery_fee_bands (shopid,up_to_meters,fee_cents) VALUES (7,5000,400)');
+  const { buildDeliveryTokenCodec, signAddressResolution } = require('../src/helpers/deliveryAddress');
+  const tokenCodec = buildDeliveryTokenCodec({ secret: 'task15-round1-disposable-signing-fixture-only' });
+  const quotes = require('../src/modules/m_deliveryQuotes').buildDeliveryQuotes({ tokenCodec,
+    geocoder: { resolve() { throw new Error('Forbidden geocoding provider call'); } } });
+  const editable = await call('/orders/31/edit');
+  assert.equal(editable.status, 200);
+  const makeBody = async (destination = address, items = [{ productId: 21, quantity: 1, selectedChoiceIds: [] }]) => {
+    const resolution = signAddressResolution({ shopId: 7, addressSnapshot: destination, tokenCodec });
+    const quote = await quotes.createQuote({ shopId: 7, items, discount: { type: 'amount', value: 2 }, addressResolutionToken: resolution });
+    return { content_revision: editable.body.data.content_revision, expected_total: quote.grandTotalCents / 100,
+      items: items.map(item => ({ product_id: item.productId, quantity: item.quantity, selected_product_step_choice_ids: item.selectedChoiceIds })),
+      delivery_quote_token: quote.quoteToken, address_resolution_token: resolution,
+      delivery_expected_version: editable.body.data.order.delivery_version, delivery_idempotency_key: 'task15-round1-edit',
+      discount_type: 'amount', discount_value: 2 };
+  };
+  const readSnapshot = async () => {
+    const row = (await db.readRows('SELECT address_snapshot FROM deliveries WHERE id=41'))[0];
+    return typeof row.address_snapshot === 'string' ? JSON.parse(row.address_snapshot) : row.address_snapshot;
+  };
+  return { address, privateFields, makeBody, readSnapshot };
+};
+
+test('Round1 authorized price revision retains locked private address fields, fiscal revision, audit and exact replay', async ({ db, call, logs }) => {
+  const { address, privateFields, makeBody, readSnapshot } = await preparePrivateAmendment({ db, call });
+  const stock = await db.readRows('SELECT stock FROM products WHERE id=21');
+  const body = await makeBody({ ...address, providerLabel: 'Equivalent canonical label' });
+  const result = await call('/orders/31/items', 'PATCH', body);
+  assert.equal(result.status, 200, result.body.message);
+  assert.equal(result.body.data.total, 22);
+  assert.deepStrictEqual(await readSnapshot(), { ...address, providerLabel: 'Equivalent canonical label', ...privateFields });
+  const state = (await db.readRows('SELECT version,charge_revision FROM deliveries WHERE id=41'))[0];
+  assert.deepStrictEqual({ ...state }, { version: 2, charge_revision: 2 });
+  assert.deepStrictEqual(result.body.data.delivery.financials, {
+    items_total: 20, items_discount: 2, delivery_fee: 4, grand_total: 22, delivery_charge: fee,
+  });
+  const detail = (await db.readRows('SELECT total,total_ht,total_vat FROM orderdetail WHERE orderid=31'))[0];
+  assert.equal(Number(detail.total), 18);
+  assert.equal(Number(detail.total_ht), 16.36);
+  assert.equal(Number(detail.total_vat), 1.64);
+  assert.deepStrictEqual(await db.readRows('SELECT stock FROM products WHERE id=21'), stock);
+  const events = await db.readRows("SELECT previous_state,next_state FROM delivery_events WHERE delivery_id=41 AND event_type='checkout_revised'");
+  assert.equal(events.length, 1);
+  for (const field of ['previous_state', 'next_state']) {
+    const event = typeof events[0][field] === 'string' ? JSON.parse(events[0][field]) : events[0][field];
+    assert.deepStrictEqual(event.delivery.addressSnapshot.instructions, privateFields.instructions);
+    assert.equal(event.delivery.addressSnapshot.complement, privateFields.complement);
+  }
+  await db.pool.query('UPDATE shop_delivery_settings SET enabled=0,revision=2 WHERE shopid=7');
+  const replay = await call('/orders/31/items', 'PATCH', body);
+  assert.equal(replay.status, 200);
+  assert.equal(replay.body.data.idempotent_replay, true);
+  assert.deepStrictEqual(replay.body.data.delivery, result.body.data.delivery);
+  const expanded = await call('/orders/31/items', 'PATCH', { ...body,
+    delivery_address_details: { instructions: 'UNTRUSTED_NEW_DETAIL' } });
+  assert.equal(expanded.status, 400);
+  assert.equal((await db.readRows('SELECT COUNT(*) n FROM delivery_charge_snapshots WHERE delivery_id=41'))[0].n, 2);
+  assert.equal((await db.readRows("SELECT COUNT(*) n FROM delivery_events WHERE delivery_id=41 AND event_type='checkout_revised'"))[0].n, 1);
+  assert.deepStrictEqual(await readSnapshot(), { ...address, providerLabel: 'Equivalent canonical label', ...privateFields });
+  assert.doesNotMatch(JSON.stringify(logs), /PRIVATE_|UNTRUSTED_NEW_DETAIL/);
+});
+
+test('Round1 changed canonical destination refuses and rolls back price items stock charge and audit', async ({ db, call }) => {
+  const { address, makeBody } = await preparePrivateAmendment({ db, call });
+  const tables = ['orders', 'orderdetail', 'deliveries', 'delivery_charge_snapshots', 'delivery_events',
+    'products', 'order_stock_reservations', 'stocks'];
+  const snapshot = () => Promise.all(tables.map(table => db.readRows(`SELECT * FROM ${table} ORDER BY id`)));
+  const before = await snapshot();
+  for (const destination of [{ ...address, street: '9 rue Test' }, { ...address, latitude: 48.858 },
+    { ...address, providerId: 'another-verified-destination' }, { ...address, country: '' }]) {
+    const body = await makeBody(destination, [{ productId: 21, quantity: 2, selectedChoiceIds: [] }]);
+    const result = await call('/orders/31/items', 'PATCH', body);
+    assert.equal(result.status, 409);
+    assert.equal(result.body.data.code, 'DELIVERY_ADDRESS_CHANGE_NOT_ALLOWED');
+    assert.deepStrictEqual(await snapshot(), before);
+  }
+});
 
 test('actual HTTP active list and detail project exact delivery identity and accepted fee', async ({ db, call }) => {
   const identity = '9007199254740993';

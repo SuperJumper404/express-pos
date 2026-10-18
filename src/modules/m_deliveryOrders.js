@@ -202,12 +202,36 @@ const buildDeliveryOrders = ({ clock = () => new Date(), randomToken = createTra
     requireConnection(connection);
     assertEditable(previous);
     const { delivery } = previous;
+    const { normalizeAddress } = require("../helpers/deliveryAddress");
+    const { validCoordinates } = require("../helpers/deliveryPricing");
+    const acceptedAddress = json(delivery.address_snapshot);
+    const addressSnapshot = { ...quote.addressSnapshot };
+    const privateFields = ["complement", "building", "floor", "intercom", "instructions"];
+    const postalFields = ["street", "postalCode", "city", "country"];
+    let sameDestination = false;
+    try {
+      const acceptedPostal = normalizeAddress(acceptedAddress);
+      const quotedPostal = normalizeAddress(addressSnapshot);
+      sameDestination = postalFields.every(key => typeof acceptedAddress[key] === "string" && acceptedAddress[key].trim() &&
+        typeof addressSnapshot[key] === "string" && addressSnapshot[key].trim() && acceptedPostal[key] === quotedPostal[key]) &&
+        validCoordinates(acceptedAddress) && validCoordinates(addressSnapshot) &&
+        acceptedAddress.latitude === addressSnapshot.latitude && acceptedAddress.longitude === addressSnapshot.longitude &&
+        ["providerId", "cityCode", "precision"].every(key => acceptedAddress[key] === undefined || acceptedAddress[key] === addressSnapshot[key]);
+    } catch (_) { /* An incomplete accepted destination cannot authorize copying access details. */ }
+    if (!sameDestination && privateFields.some(key => acceptedAddress && acceptedAddress[key])) {
+      throw new DomainError(409, "DELIVERY_ADDRESS_CHANGE_NOT_ALLOWED", "Existing access details require the same verified delivery address");
+    }
+    // Postal proofs cannot replace private details from the caller's locked accepted snapshot.
+    for (const key of privateFields) {
+      delete addressSnapshot[key];
+      if (sameDestination && Object.prototype.hasOwnProperty.call(acceptedAddress, key)) addressSnapshot[key] = acceptedAddress[key];
+    }
     const revision = delivery.charge_revision + 1;
     await insertCharge({ deliveryId: delivery.id, shopId: checkout.shopId, revision, quote, connection });
     const update = await query(connection, `UPDATE deliveries SET address_snapshot = ?, latitude = ?, longitude = ?, distance_meters = ?,
       settings_revision = ?, charge_revision = ?, version = version + 1, updated_at = ?
       WHERE shopid = ? AND id = ? AND version = ?`,
-    [JSON.stringify(quote.addressSnapshot), quote.addressSnapshot.latitude, quote.addressSnapshot.longitude,
+    [JSON.stringify(addressSnapshot), quote.addressSnapshot.latitude, quote.addressSnapshot.longitude,
       quote.distanceMeters, quote.settingsRevision, revision, date(clock()), checkout.shopId, delivery.id, checkout.deliveryExpectedVersion]);
     if (!update.affectedRows) throw new DomainError(409, "DELIVERY_VERSION_CONFLICT", "Delivery changed");
     const next = await resolveDeliveryOrder({ shopId: checkout.shopId, deliveryId: delivery.id, connection });
