@@ -2668,7 +2668,7 @@ const runCheckoutApiSurfaceContracts = async () => {
   const orderModuleSource = fs.readFileSync(require.resolve("../src/modules/m_orders"), "utf8");
   const checkoutModuleSource = fs.readFileSync(require.resolve("../src/modules/m_checkout"), "utf8");
   const serverSource = fs.readFileSync(require.resolve("../index"), "utf8");
-  assert.match(orderRouterSource, /\.post\("\/orders\/checkout", authentication, orders\.checkout\)/);
+  assert.match(orderRouterSource, /\.post\("\/orders\/checkout", authentication, attachOptionalCustomerSession, requireCustomerCsrfIfPresent, orders\.checkout\)/);
   assert.match(orderRouterSource, /legacy/i);
   assert.ok(orderControllerSource.includes("buildCheckoutController"));
   assert.match(
