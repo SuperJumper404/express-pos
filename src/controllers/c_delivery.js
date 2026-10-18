@@ -82,6 +82,11 @@ const buildDeliveryController = ({
       return quotes.createQuote({ shopId: req.shopid, items, discount, addressResolutionToken: body.address_resolution_token });
     }),
     getSettings: endpoint(req => { requireAdmin(req); return settings.getSettings({ shopId: req.shopid }); }),
+    availability: endpoint(async req => {
+      requireQuoteActor(req);
+      const current = await settings.getSettings({ shopId: req.shopid });
+      return { enabled: current.enabled === true };
+    }),
     updateSettings: endpoint(req => {
       requireAdmin(req);
       const body = req.body || {};

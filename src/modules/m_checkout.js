@@ -72,6 +72,7 @@ const canonicalPayload = (input) => {
     payment_mode: typeof input.paymentMode === "string"
       ? input.paymentMode.trim().toLowerCase()
       : input.paymentMode,
+    ...(input.verifiedCustomer && { customer_account_id: input.verifiedCustomer.customerId }),
     ...(input.fulfillmentType === "delivery" && {
       fulfillment_type: "delivery",
       actor_id: input.actorId,
@@ -79,6 +80,7 @@ const canonicalPayload = (input) => {
       delivery_quote_hash: hashTrackingToken(input.deliveryQuoteToken),
       address_resolution_hash: hashTrackingToken(input.addressResolutionToken),
       confirmation_secret_hash: hashTrackingToken(input.deliveryConfirmationSecret),
+      ...(input.deliveryDetails && Object.keys(input.deliveryDetails).length && { delivery_address_details: input.deliveryDetails }),
     }),
   });
 };
@@ -134,6 +136,25 @@ const invalidRequest = (field) => new DomainError(
   "Invalid checkout request",
   { field },
 );
+
+const checkoutCustomerContext = req => {
+  const session = req.customerSession;
+  return session && session.subject === "customer" && session.shopId === req.shopid
+    ? { shopId: session.shopId, customerId: session.customerId } : undefined;
+};
+
+const normalizeDeliveryDetails = value => {
+  if (value === undefined) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Object.keys(value).some(key => !["complement", "instructions"].includes(key))) throw invalidRequest("delivery_address_details");
+  const result = {};
+  for (const key of Object.keys(value)) {
+    if (typeof value[key] !== "string" || value[key].length > (key === "instructions" ? 500 : 200)
+      || /[\x00-\x1f]/.test(value[key])) throw invalidRequest(`delivery_address_details.${key}`);
+    result[key] = value[key];
+  }
+  return result;
+};
 
 const normalizeBoolean = (value, field, fallback = false) => {
   if (value === undefined || value === null || value === "") return fallback;
@@ -202,6 +223,7 @@ const normalizeCheckoutRequestBody = (body = {}, { paymentModeOverride } = {}) =
     ...(body.delivery_quote_token !== undefined && { deliveryQuoteToken: body.delivery_quote_token }),
     ...(body.address_resolution_token !== undefined && { addressResolutionToken: body.address_resolution_token }),
     ...(body.delivery_confirmation_secret !== undefined && { deliveryConfirmationSecret: body.delivery_confirmation_secret }),
+    ...(body.delivery_address_details !== undefined && { deliveryDetails: normalizeDeliveryDetails(body.delivery_address_details) }),
     paymentMode: paymentModeOverride !== undefined
       ? paymentModeOverride
       : body.payment_mode !== undefined ? body.payment_mode : body.payment,
@@ -280,6 +302,10 @@ const validateCheckoutInput = (input = {}) => {
   }
   const isTakeaway = normalizeBoolean(input.isTakeaway, "is_takeaway");
   const delivery = input.fulfillmentType === "delivery";
+  const verifiedCustomer = input.verifiedCustomer;
+  if (verifiedCustomer && (verifiedCustomer.shopId !== Number(input.shopId)
+    || typeof verifiedCustomer.customerId !== "string" || !/^[1-9]\d{0,19}$/.test(verifiedCustomer.customerId)
+    || BigInt(verifiedCustomer.customerId) > 18446744073709551615n)) throw invalidRequest("customer_session");
   if (input.fulfillmentType !== undefined && !["dine_in", "takeaway", "delivery"].includes(input.fulfillmentType)) throw invalidRequest("fulfillment_type");
   if (delivery) {
     for (const key of ["deliveryQuoteToken", "addressResolutionToken"]) {
@@ -313,6 +339,8 @@ const validateCheckoutInput = (input = {}) => {
     }),
     clientOrderToken: input.clientOrderToken.trim(),
     paymentMode: input.paymentMode.trim().toLowerCase(),
+    ...(verifiedCustomer && { verifiedCustomer: { shopId: verifiedCustomer.shopId, customerId: verifiedCustomer.customerId } }),
+    ...(delivery && input.deliveryDetails !== undefined && { deliveryDetails: normalizeDeliveryDetails(input.deliveryDetails) }),
   };
 };
 
@@ -545,10 +573,12 @@ const buildCheckoutController = ({ checkout, logger = console }) => async (req, 
 
   try {
     const normalized = normalizeCheckoutRequestBody(body);
+    const verifiedCustomer = checkoutCustomerContext(req);
     const checkoutInput = {
       shopId: req.shopid,
       actorId: req.id,
       ...normalized,
+      ...(verifiedCustomer && { verifiedCustomer }),
     };
     if (req.sessionSubject === "service_point") {
       checkoutInput.sessionSubject = "service_point";
@@ -845,6 +875,14 @@ const buildCheckoutModule = ({
         return replayResult(existing);
       }
 
+      if (checkout.verifiedCustomer) {
+        // Follow personal address/session producers' Shop -> customer lock order.
+        await queryResult(connection, "SELECT id FROM shop WHERE id=? FOR SHARE", [checkout.shopId]);
+        const [owner] = await queryResult(connection, "SELECT CAST(id AS CHAR) AS id FROM customers WHERE shopid=? AND id=? FOR SHARE",
+          [checkout.shopId, checkout.verifiedCustomer.customerId]);
+        if (!owner) throw invalidRequest("customer_session");
+      }
+
       let deliveryPricing;
       let deliveryActor;
       if (isDelivery) {
@@ -974,6 +1012,7 @@ const buildCheckoutModule = ({
           is_takeaway: checkout.isTakeaway ? 1 : 0,
           client_order_token: checkout.clientOrderToken,
           client_order_payload_hash: payloadHash,
+          ...(checkout.verifiedCustomer && { customer_account_id: checkout.verifiedCustomer.customerId }),
         },
         connection,
       });
@@ -1101,8 +1140,14 @@ const buildCheckoutModule = ({
             ...checkout, orderId, orderReference: String(timestampDate.valueOf()).slice(-4).padStart(4, "0"),
             requestHash: payloadHash, actor: deliveryActor, result,
           },
-          quote: deliveryPricing.deliveryQuote, connection,
+          quote: { ...deliveryPricing.deliveryQuote, addressSnapshot: { ...deliveryPricing.deliveryQuote.addressSnapshot, ...checkout.deliveryDetails } }, connection,
         });
+        if (checkout.verifiedCustomer) {
+          await queryResult(connection, "UPDATE orders SET customer_account_id=? WHERE shopid=? AND id=?",
+            [checkout.verifiedCustomer.customerId, checkout.shopId, orderId]);
+          await queryResult(connection, "UPDATE deliveries SET customer_account_id=? WHERE shopid=? AND id=?",
+            [checkout.verifiedCustomer.customerId, checkout.shopId, delivery.delivery.id]);
+        }
         return { ...result, ...delivery };
       }
       return result;
@@ -1145,6 +1190,7 @@ module.exports = {
   buildCheckoutController,
   buildCheckoutModule,
   canonicalPayloadHash,
+  checkoutCustomerContext,
   createCheckout: checkoutModule.createCheckout,
   finalizeReservations: checkoutModule.finalizeReservations,
   normalizeCheckoutRequestBody,

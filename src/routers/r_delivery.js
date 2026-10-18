@@ -7,6 +7,7 @@ const buildDeliveryRouter = ({
   router.post("/delivery/address-resolutions", authentication, controller.resolveAddress);
   router.post("/delivery/quotes", authentication, controller.createQuote);
   router.get("/delivery/settings", authentication, controller.getSettings);
+  router.get("/delivery/availability", authentication, controller.availability);
   router.put("/delivery/settings", authentication, controller.updateSettings);
   const operator = require("../helpers/middleware/auth").buildModuleAuthorization({ moduleKey: "delivery" });
   const restaurant = (req, res, next) => {

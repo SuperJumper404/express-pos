@@ -2,6 +2,7 @@ const express = require("express");
 const stripe = require("../controllers/c_stripe");
 const stripeTerminal = require("../controllers/c_stripeTerminal");
 const orderEditing = require("../controllers/c_orderEditing");
+const { attachOptionalCustomerSession, requireCustomerCsrfIfPresent } = require("../helpers/middleware/customerAuth");
 const {
   authentication,
   authAdmin,
@@ -37,6 +38,8 @@ routers
   .post(
     "/stripe/payment-intents/qr-table",
     authentication,
+    attachOptionalCustomerSession,
+    requireCustomerCsrfIfPresent,
     stripe.createQrTablePaymentIntent,
   )
   .post(

@@ -208,10 +208,12 @@ const buildQrTablePaymentIntentController = ({
       );
     }
 
+    const verifiedCustomer = require("../modules/m_checkout").checkoutCustomerContext(req);
     const checkoutInput = {
       shopId: req.shopid,
       actorId: req.id,
       ...normalizeCheckoutRequestBody(body, { paymentModeOverride: "stripe" }),
+      ...(verifiedCustomer && { verifiedCustomer }),
     };
     if (req.sessionSubject === "service_point") {
       checkoutInput.sessionSubject = "service_point";
@@ -226,7 +228,10 @@ const buildQrTablePaymentIntentController = ({
       const current = checkoutResult.delivery && await resolveDeliveryOrder({ shopId: req.shopid, deliveryId: checkoutResult.delivery.id });
       if (!current || current.orderKind !== "active" || current.order.id !== checkoutResult.orderId
         || current.order.payment_status !== "requires_payment" || current.order.payment_provider !== "stripe") {
-        return custom(res, 409, "Cette commande a deja ete traitee.", null, { orderId: checkoutResult.orderId, code: "DELIVERY_PAYMENT_NOT_SETTLED" });
+        const settled = current && Number(current.delivery.origin_order_id) === Number(checkoutResult.orderId)
+          && ["paid", "refunded"].includes(current.order.payment_status);
+        return custom(res, 409, "Cette commande a deja ete traitee.", null, { orderId: checkoutResult.orderId, code: "DELIVERY_PAYMENT_NOT_SETTLED",
+          ...(settled ? { checkout_resolved: true, payment_status: current.order.payment_status } : {}) });
       }
       payableTotal = deliveryOrders.toDeliveryView(current).financials.grand_total;
       if (current.order.stripe_payment_intent_id) {
@@ -235,7 +240,8 @@ const buildQrTablePaymentIntentController = ({
           || existing.amount !== toStripeAmount(payableTotal) || existing.currency !== "eur") {
           return custom(res, 409, "Le paiement doit etre reconcilie.", null, { code: "DELIVERY_PAYMENT_NOT_SETTLED" });
         }
-        return success(res, "Paiement Stripe cree.", null, { orderId: current.order.id, paymentIntentId: existing.id, clientSecret: existing.client_secret, publishableKey });
+        return success(res, "Paiement Stripe cree.", null, { orderId: current.order.id, paymentIntentId: existing.id, clientSecret: existing.client_secret, publishableKey,
+          delivery: checkoutResult.delivery });
       }
     }
     provisionalOrderId = checkoutResult.orderId;
@@ -309,6 +315,7 @@ const buildQrTablePaymentIntentController = ({
       paymentIntentId: paymentIntent.id,
       clientSecret: paymentIntent.client_secret,
       publishableKey,
+      ...(deliveryOrder ? { delivery: checkoutResult.delivery, ...(checkoutResult.tracking_url ? { tracking_url: checkoutResult.tracking_url } : {}) } : {}),
     });
   } catch (error) {
     if (provisionalOrderId && !deliveryOrder) {

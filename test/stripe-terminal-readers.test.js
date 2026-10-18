@@ -593,6 +593,7 @@ test("router binds all six reader endpoints with auth and preserves web/connect 
     const { routers, webhookRouter } = require(routerPath);
     const controller = require("../src/controllers/c_stripeTerminal");
     const { authentication, authAdmin, authorizeCashRegister } = require("../src/helpers/middleware/auth");
+    const customerMiddleware = require("../src/helpers/middleware/customerAuth");
     for (const [verb, path, handler, admin] of [
       ["get", "/stripe/terminal/readers", "listReaders", true],
       ["post", "/stripe/terminal/readers", "registerReader", true],
@@ -607,7 +608,7 @@ test("router binds all six reader endpoints with auth and preserves web/connect 
     const connect = routers.stack.find((layer) => layer.route.path === "/stripe/connect/status").route;
     assert.deepStrictEqual(connect.stack.map((layer) => layer.handle), [authentication, authAdmin, legacy.getConnectStatus]);
     const web = routers.stack.find((layer) => layer.route.path === "/stripe/payment-intents/qr-table").route;
-    assert.deepStrictEqual(web.stack.map((layer) => layer.handle), [authentication, legacy.createQrTablePaymentIntent]);
+    assert.deepStrictEqual(web.stack.map((layer) => layer.handle), [authentication, customerMiddleware.attachOptionalCustomerSession, customerMiddleware.requireCustomerCsrfIfPresent, legacy.createQrTablePaymentIntent]);
     assert.strictEqual(webhookRouter.stack[0].route.stack[0].handle, legacy.handleWebhook);
   } finally {
     [stripePath, editingPath, routerPath].forEach((path, index) => {
