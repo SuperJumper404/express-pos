@@ -17,6 +17,8 @@ const buildDeliveryRouter = ({
   router.get("/deliveries", authentication, restaurant, controller.list);
   router.get("/deliveries/:id", authentication, restaurant, controller.detail);
   router.post("/deliveries/:id/refund", authentication, restaurant, controller.refund);
+  router.get("/deliveries/:id/refund-eligibility", authentication, restaurant, controller.refundEligibility);
+  router.post("/deliveries/:id/correct-terminal", authentication, restaurant, controller.correctTerminal);
   router.post("/deliveries/:id/assign", authentication, restaurant, controller.assign);
   router.post("/deliveries/:id/resolve-issue", authentication, restaurant, controller.resolveIssue);
   router.post("/deliveries/:id/report-issue", authentication, restaurant, controller.reportIssue);

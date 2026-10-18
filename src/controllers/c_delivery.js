@@ -41,7 +41,14 @@ const buildDeliveryController = ({
     assign: deliveryEndpoint(req => dispatch.assign(deliveryMutation(req))),
     resolveIssue: deliveryEndpoint(req => dispatch.resolveIssue(deliveryMutation(req))),
     reportIssue: deliveryEndpoint(req => dispatch.reportIssue(deliveryMutation(req))),
-    couriers: deliveryEndpoint(req => dispatch.couriers({ actor: deliveryActor(req) })),
+    correctTerminal: deliveryEndpoint(req => {
+      const body = req.body || {};
+      if (Object.keys(body).some(key => !["reason", "expectedVersion", "idempotencyKey"].includes(key))) throw new DomainError(400, "DELIVERY_REQUEST_INVALID", "Invalid terminal correction");
+      return dispatch.correctTerminal({ actor: deliveryActor(req), deliveryId: req.params.id, reason: body.reason,
+        expectedVersion: body.expectedVersion, idempotencyKey: body.idempotencyKey });
+    }),
+    refundEligibility: deliveryEndpoint(req => dispatch.refundEligibility({ actor: deliveryActor(req), deliveryId: req.params.id })),
+    couriers: deliveryEndpoint(req => dispatch.couriers({ actor: deliveryActor(req), financialHolders: req.query.financialHolders === "true" })),
     courierCashBalance: deliveryEndpoint(req => cash.balance({ actor: deliveryActor(req), courierId: req.params.id })),
     remitCourierCash: deliveryEndpoint(req => {
       const body = req.body || {};
