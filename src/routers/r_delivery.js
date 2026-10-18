@@ -2,8 +2,33 @@ const express = require("express");
 const buildDeliveryRouter = ({
   controller = require("../controllers/c_delivery").buildDeliveryController(),
   authentication = require("../helpers/middleware/auth").authentication,
+  readLimit = 30,
+  readClock = () => Date.now(),
+  customerMiddleware = require("../helpers/middleware/customerAuth"),
 } = {}) => {
   const router = express.Router();
+  const reads = new Map();
+  const privateHeaders = (req, res, next) => { res.set("Cache-Control", "no-store"); res.set("Referrer-Policy", "no-referrer"); next(); };
+  const limitReads = (req, res, next) => {
+    const now = readClock();
+    for (const [ip, entry] of reads) if (entry.until <= now) reads.delete(ip);
+    const ip = req.ip;
+    const entry = reads.get(ip) || { count: 0, until: now + 60000 };
+    if (entry.count >= readLimit || (!reads.has(ip) && reads.size >= 10000)) {
+      res.set("Retry-After", "60");
+      return require("../helpers/response").failed(res, "Tracking temporarily unavailable", "DELIVERY_READ_LIMIT", 429);
+    }
+    entry.count++; reads.set(ip, entry); next();
+  };
+  const rotationContext = (req, res, next) => {
+    if (req.headers.authorization) return authentication(req, res, next);
+    if ((req.body || {}).privateCheckoutContext) return next();
+    const customer = require("../helpers/middleware/customerAuth");
+    if (!customer.rawCustomerToken(req)) return next();
+    return customerMiddleware.requireCustomerSession(req, res, () => customerMiddleware.requireCustomerCsrf(req, res, next));
+  };
+  router.post("/delivery/tracking/read", privateHeaders, limitReads, controller.trackingRead);
+  router.post("/deliveries/:id/tracking-token", privateHeaders, rotationContext, controller.trackingRotate);
   router.post("/delivery/address-resolutions", authentication, controller.resolveAddress);
   router.post("/delivery/quotes", authentication, controller.createQuote);
   router.get("/delivery/settings", authentication, controller.getSettings);

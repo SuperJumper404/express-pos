@@ -16,6 +16,7 @@ const buildDeliveryController = ({
   dispatch = require("../modules/m_deliveryDispatch").buildDeliveryDispatch(),
   cash = require("../modules/m_courierCash").buildCourierCash(),
   refunds = require("../modules/m_deliveryRefunds").buildDeliveryRefunds(),
+  tracking = require("../modules/m_deliveryTracking").buildDeliveryTracking(),
 } = {}) => {
   const endpoint = work => async (req, res) => {
     try { return custom(res, 200, "OK", null, await work(req)); }
@@ -28,6 +29,18 @@ const buildDeliveryController = ({
     }
   };
   return {
+    trackingRead: endpoint(req => {
+      if (Object.keys(req.query || {}).length || Object.keys(req.body || {}).some(key => key !== "token")) throw new DomainError(404, "DELIVERY_NOT_FOUND", "Delivery not found");
+      return tracking.read({ token: (req.body || {}).token });
+    }),
+    trackingRotate: endpoint(req => {
+      const body = req.body || {};
+      if (Object.keys(body).some(key => !["idempotencyKey", "privateCheckoutContext"].includes(key))) throw new DomainError(404, "DELIVERY_NOT_FOUND", "Delivery not found");
+      const session = req.customerSession;
+      const actor = session ? { subject: "customer", id: session.customerId, shopId: session.shopId, verifiedSession: true }
+        : req.sessionSubject ? deliveryActor(req) : null;
+      return tracking.rotate({ actor, privateCheckoutContext: body.privateCheckoutContext, deliveryId: req.params.id, idempotencyKey: body.idempotencyKey });
+    }),
     list: deliveryEndpoint(req => dispatch.list({ actor: deliveryActor(req) })),
     detail: deliveryEndpoint(req => dispatch.get({ actor: deliveryActor(req), deliveryId: req.params.id })),
     refund: deliveryEndpoint(req => {

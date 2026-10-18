@@ -21,7 +21,16 @@ const terminalContext = (events, delivery) => {
   const refuse = () => { throw conflict("DELIVERY_TERMINAL_HISTORY_REQUIRED"); };
   const operational = state => state && ["assigned", "in_transit"].includes(state.deliveryStatus) && Number.isSafeInteger(state.courierId) && state.courierId > 0 && !state.closedAt;
   try {
-    const source = events.find(event => event.version === delivery.version);
+    let source = events.find(event => event.version === delivery.version);
+    // Only contiguous, state-preserving annotations may bridge to terminal proof.
+    while (source && source.event_type === "tracking_rotated") {
+      for (const state of [json(source.previous_state), json(source.next_state)]) {
+        if (!state || state.deliveryStatus !== delivery.delivery_status ||
+          String(state.courierId) !== String(delivery.courier_id) || !state.closedAt ||
+          journalTime(state.closedAt) !== journalTime(delivery.closed_at)) return refuse();
+      }
+      source = events.find(event => event.version === source.version - 1);
+    }
     if (!source) return refuse();
     const previous = json(source.previous_state);
     const next = json(source.next_state);

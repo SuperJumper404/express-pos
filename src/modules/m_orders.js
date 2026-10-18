@@ -101,7 +101,7 @@ const archiveSqlRepository = {
   ),
   findActiveOrderDetails: ({ orderId, shopId, connection }) => queryResult(
     connection,
-    `SELECT *, orders.id AS id, orderdetail.id AS orderDetailsId,
+    `SELECT *, orders.id AS id, orders.shopid AS shopid, orderdetail.id AS orderDetailsId,
             orderdetail.vat_rate AS vat_rate,
             orderdetail.unit_price_ht AS unit_price_ht,
             orderdetail.unit_vat AS unit_vat,
@@ -111,7 +111,7 @@ const archiveSqlRepository = {
             CAST(orders.customer_account_id AS CHAR) AS customer_account_id
      FROM orders
      LEFT JOIN orderdetail ON orders.id = orderdetail.orderid
-     LEFT JOIN products ON orderdetail.productid = products.id
+     LEFT JOIN products ON orderdetail.productid = products.id AND products.shopid = orders.shopid
      WHERE orders.id = ? AND orders.shopid = ?
      ORDER BY orders.created DESC`,
     [orderId, shopId],
@@ -134,9 +134,9 @@ const archiveSqlRepository = {
       [orderId, detailIds],
     )
   ),
-  findArchivedOrderDetailsById: ({ archiveId, connection }) => queryResult(
+  findArchivedOrderDetailsById: ({ archiveId, shopId, connection }) => queryResult(
     connection,
-    `SELECT *, archives.id AS id, archivesdetail.id AS archiveDetailsId,
+    `SELECT *, archives.id AS id, archives.shopid AS shopid, archivesdetail.id AS archiveDetailsId,
             archivesdetail.vat_rate AS vat_rate,
             archivesdetail.unit_price_ht AS unit_price_ht,
             archivesdetail.unit_vat AS unit_vat,
@@ -146,11 +146,12 @@ const archiveSqlRepository = {
             CAST(archives.customer_account_id AS CHAR) AS customer_account_id
      FROM archives
      LEFT JOIN archivesdetail ON archives.id = archivesdetail.orderId
-     LEFT JOIN products ON archivesdetail.productid = products.id
+     LEFT JOIN products ON archivesdetail.productid = products.id AND products.shopid = archives.shopid
      WHERE archives.id = ?
+       ${shopId == null ? "" : "AND (archives.delivery_id IS NULL AND COALESCE(archives.fulfillment_type,'') <> 'delivery' OR archives.shopid = ?)"}
        AND COALESCE(archives.hidden_from_history, 0) = 0
      ORDER BY archives.created DESC`,
-    [archiveId],
+    shopId == null ? [archiveId] : [archiveId, shopId],
   ),
   findArchivedOrderDetailsByToken: ({ token, connection }) => queryResult(
     connection,
@@ -565,8 +566,8 @@ const buildOrderArchiveModule = ({
     return hydrateActiveDetails(rows, Number(id));
   };
 
-  const mDetailArchivedOrder = async (id) => {
-    const rows = await repository.findArchivedOrderDetailsById({ archiveId: id });
+  const mDetailArchivedOrder = async (id, shopId) => {
+    const rows = await repository.findArchivedOrderDetailsById({ archiveId: id, shopId });
     return hydrateArchivedDetails(rows);
   };
 
@@ -587,7 +588,7 @@ const buildOrderArchiveModule = ({
 const orderArchiveModule = buildOrderArchiveModule();
 
 module.exports = {
-  mAllOrder: (shopid) => {
+  mAllOrder: (shopid, { omitNewDeliveries = false } = {}) => {
     return new Promise((resolve, reject) => {
       conn.query(
         `SELECT orders.*, CAST(orders.delivery_id AS CHAR) AS delivery_id,
@@ -613,6 +614,7 @@ module.exports = {
            GROUP BY order_id
          ) stock_reservations ON stock_reservations.order_id = orders.id
          WHERE orders.shopid = ? AND orders.status <> 0
+           ${omitNewDeliveries ? "AND orders.delivery_id IS NULL AND COALESCE(orders.fulfillment_type,'') <> 'delivery'" : ""}
          ORDER BY orders.created DESC`,
         [shopid],
         (err, result) => {
@@ -641,12 +643,13 @@ module.exports = {
       });
     });
   },
-  mOrdersbyUserId: (servicePointId, shopid) => {
+  mOrdersbyUserId: (servicePointId, shopid, { omitNewDeliveries = false } = {}) => {
     return new Promise((resolve, reject) => {
       const query = `SELECT orders.*, users.username
         FROM orders
         LEFT JOIN users ON orders.customerID = users.id
         WHERE orders.shopid = ?
+          ${omitNewDeliveries ? "AND orders.delivery_id IS NULL AND COALESCE(orders.fulfillment_type,'') <> 'delivery'" : ""}
           AND (
             orders.service_point_id = ?
             OR (orders.service_point_id IS NULL AND orders.customerID = ?)
@@ -1104,7 +1107,7 @@ module.exports = {
       });
     });
   },
-  mAllArchivedOrders: (shopid) => {
+  mAllArchivedOrders: (shopid, { omitNewDeliveries = false } = {}) => {
     return new Promise((resolve, reject) => {
       conn.query(
         `SELECT archives.*, CAST(archives.delivery_id AS CHAR) AS delivery_id,
@@ -1125,6 +1128,7 @@ module.exports = {
            ON terminal_payment.id = archives.stripe_terminal_payment_id
            AND terminal_payment.shopid = archives.shopid
          WHERE archives.shopid = ?
+           ${omitNewDeliveries ? "AND archives.delivery_id IS NULL AND COALESCE(archives.fulfillment_type,'') <> 'delivery'" : ""}
            AND COALESCE(archives.hidden_from_history, 0) = 0
          ORDER BY archives.archived_at DESC, archives.id DESC`,
         [shopid],
@@ -1300,6 +1304,12 @@ module.exports = {
 const legacyAllArchivedOrdersWithDetails = module.exports.mAllArchivedOrdersWithDetails;
 const legacyAllArchivedOrders = module.exports.mAllArchivedOrders;
 const legacyAllOrders = module.exports.mAllOrder;
+// Preflight reads contain no address/details and never use a caller-less shop fallback.
+module.exports.findLegacyReadIdentity = async ({ id, shopId, archived = false }) => {
+  const rows = await queryResult(null, `SELECT shopid,CAST(delivery_id AS CHAR) delivery_id,fulfillment_type
+    FROM ${archived ? "archives" : "orders"} WHERE id=?${archived ? "" : " AND shopid=?"} LIMIT 1`, archived ? [id] : [id, shopId]);
+  return rows[0] || null;
+};
 const withDeliveryFinancials = async (rows) => {
   const contexts = new Map();
   return Promise.all(rows.map(async row => {

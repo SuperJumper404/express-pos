@@ -14,7 +14,9 @@ const {
   mDetailArchivedOrderByToken,
   mAllArchivedOrdersWithDetails,
   collectDeliveryOrderPayment,
+  findLegacyReadIdentity,
 } = require("../modules/m_orders");
+const { trustedDeliveryStaff, isNewDelivery } = require("../modules/m_deliveryTracking");
 
 const { custom, success, failed } = require("../helpers/response");
 const DomainError = require("../helpers/domainError");
@@ -176,7 +178,7 @@ const syncPendingStripeBeforeCashRegisterArchive = buildPendingStripeArchiveSync
 exports.buildPendingStripeArchiveSync = buildPendingStripeArchiveSync;
 
 exports.allOrder = async (req, res) => {
-  mAllOrder(req.shopid)
+  mAllOrder(req.shopid, { omitNewDeliveries: !trustedDeliveryStaff(req) })
     .then((response) => {
       success(res, "Commandes récupérées.", null, response);
     })
@@ -186,7 +188,7 @@ exports.allOrder = async (req, res) => {
 };
 exports.ordersbyUserId = async (req, res) => {
   const servicePointId = req.query.servicePointId || req.query.userId;
-  mOrdersbyUserId(servicePointId, req.shopid)
+  mOrdersbyUserId(servicePointId, req.shopid, { omitNewDeliveries: !trustedDeliveryStaff(req) })
     .then((response) => {
       success(res, "Commandes récupérées.", null, response);
     })
@@ -194,8 +196,13 @@ exports.ordersbyUserId = async (req, res) => {
       failed(res, "Erreur serveur.", error.message);
     });
 };
-exports.detailOrder = (req, res) => {
+exports.detailOrder = async (req, res) => {
   const id = req.params.id;
+  try {
+    const identity = await findLegacyReadIdentity({ id, shopId: req.shopid });
+    if (!identity) return custom(res, 404, "Commande introuvable.", null, null);
+    if (isNewDelivery(identity) && !trustedDeliveryStaff(req)) return custom(res, 404, "Commande introuvable.", null, null);
+  } catch (_) { return failed(res, "Erreur serveur."); }
   mDetailOrder(id, req.shopid)
     .then((response) => {
       if (response.length > 0) {
@@ -534,7 +541,7 @@ exports.archiveOrder = buildArchiveOrderController();
 
 exports.allArchivedOrders = async (req, res) => {
   console.log("Controler History");
-  mAllArchivedOrders(req.shopid)
+  mAllArchivedOrders(req.shopid, { omitNewDeliveries: !trustedDeliveryStaff(req) })
     .then((response) => {
       success(res, "Commandes récupérées.", null, response);
     })
@@ -543,9 +550,16 @@ exports.allArchivedOrders = async (req, res) => {
     });
 };
 
-exports.detailArchivedOrder = (req, res) => {
+exports.detailArchivedOrder = async (req, res) => {
   const id = req.params.id;
-  mDetailArchivedOrder(id)
+  try {
+    const identity = await findLegacyReadIdentity({ id, shopId: req.shopid, archived: true });
+    if (!identity) return custom(res, 404, "Commande archivee introuvable.", null, null);
+    if (isNewDelivery(identity) && (!trustedDeliveryStaff(req) || String(identity.shopid) !== String(req.shopid))) {
+      return custom(res, 404, "Commande archivee introuvable.", null, null);
+    }
+  } catch (_) { return failed(res, "Erreur serveur."); }
+  mDetailArchivedOrder(id, req.shopid)
     .then((response) => {
       if (response.length > 0) {
         success(res, "Détail de la commande récupéré.", null, response);

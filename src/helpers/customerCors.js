@@ -16,7 +16,8 @@ const relativePath = (req, prefix) => {
 const isPersonalPath = path => /^\/(customer-auth|customer)(\/|$)/i.test(path);
 const isCustomerCorsRequest = (req, prefix = require("../config/prefix")) => {
   const path = relativePath(req, prefix);
-  return isPersonalPath(path) || (/^\/(?:orders\/checkout|stripe\/payment-intents\/qr-table)\/?$/i.test(path) &&
+  return isPersonalPath(path) || ((/^\/(?:orders\/checkout|stripe\/payment-intents\/qr-table)\/?$/i.test(path) ||
+    /^\/deliveries\/[1-9]\d{0,19}\/tracking-token\/?$/i.test(path)) &&
     (hasCustomerCookie(req) || /(?:^|,)\s*x-csrf-token\s*(?:,|$)/i.test(req.headers["access-control-request-headers"] || "")));
 };
 const buildCustomerCors = ({ prefix = require("../config/prefix"), allowedOrigins } = {}) => (req, res, next) => {

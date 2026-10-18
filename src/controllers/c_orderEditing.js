@@ -1,6 +1,7 @@
 const DomainError = require("../helpers/domainError");
 const { getStripe } = require("../config/stripe");
 const { custom } = require("../helpers/response");
+const { trustedDeliveryStaff, isNewDelivery } = require("../modules/m_deliveryTracking");
 const {
   amendOrder,
   getEditableOrder,
@@ -98,6 +99,11 @@ const buildOrderEditingController = ({
   logger = console,
 } = {}) => async (req, res) => {
   try {
+    if (req.sessionSubject) {
+      const identity = await require("../modules/m_orders").findLegacyReadIdentity({ id: req.params.id, shopId: req.shopid });
+      if (!identity) return custom(res, 404, "Commande introuvable.", null, null);
+      if (isNewDelivery(identity) && !trustedDeliveryStaff(req)) return custom(res, 404, "Commande introuvable.", null, null);
+    }
     const order = await getOrder({
       orderId: req.params.id,
       shopId: req.shopid,
@@ -105,6 +111,7 @@ const buildOrderEditingController = ({
     if (!order) {
       return custom(res, 404, "Commande introuvable.", null, null);
     }
+    if (isNewDelivery(order.order) && !trustedDeliveryStaff(req)) return custom(res, 404, "Commande introuvable.", null, null);
     return custom(res, 200, "Commande editable recuperee.", null, order);
   } catch (error) {
     if (error instanceof DomainError) return domainResponse(res, error);
