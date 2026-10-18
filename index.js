@@ -47,7 +47,6 @@ if (!fs.existsSync(customizationChoicesPath)) {
 
 const app = express();
 const { buildCustomerCors, configureCustomerTrustProxy, isCustomerCorsRequest } = require("./src/helpers/customerCors");
-const { attachOptionalCustomerSession, requireCustomerCsrfIfPresent } = require("./src/helpers/middleware/customerAuth");
 configureCustomerTrustProxy(app);
 app.use(buildCustomerCors());
 const runScheduledStripePaymentMaintenance = buildNonOverlappingRunner(
@@ -84,7 +83,6 @@ app.use((error, req, res, next) => {
 // Personal API is independent of any stale staff bearer carried by this browser.
 app.use(`${prefix}`, routerCustomers);
 app.use(`${prefix}`, require("./src/helpers/middleware/auth").authenticationIfPresent);
-app.post(`${prefix}/orders/checkout`, attachOptionalCustomerSession, requireCustomerCsrfIfPresent);
 app.get(`${prefix}`, function (req, res) {
   res.json({ msg: "Hai" });
 });

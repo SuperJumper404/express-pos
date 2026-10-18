@@ -17,7 +17,8 @@ async function withHttp(app, work) {
       headers: { ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...headers } }, res => {
       let raw = "";
       res.on("data", chunk => { raw += chunk; });
-      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, raw, data: raw ? JSON.parse(raw) : null }));
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, raw,
+        data: raw && (res.headers["content-type"] || "").startsWith("application/json") ? JSON.parse(raw) : null }));
     });
     req.on("error", reject);
     req.end(body === undefined ? undefined : JSON.stringify(body));
@@ -125,6 +126,203 @@ if (require.main === module) {
       assert.equal(stripe.status, 200, stripe.raw);
       assert.equal(stripe.data.raw, true);
       assert.equal(stripe.data.hash, crypto.createHash("sha256").update(JSON.stringify(raw)).digest("hex"));
+    });
+  });
+
+  async function routingWitness(work, { cors = true } = {}) {
+    process.env.JWTKEY = "task10-index-jwt-fixture";
+    process.env.PUBLICIMAGEPATH = "http://127.0.0.1/task10-fixture/";
+    process.env.CUSTOMER_ALLOWED_ORIGINS = "https://shop.smarteat.test";
+    const noDatabase = { query: async () => { throw new Error("Routing witnesses must not access SQL"); } };
+    require.cache[require.resolve("../src/config/dbPool")] = { exports: noDatabase };
+    require.cache[require.resolve("../src/config/db")] = { exports: noDatabase };
+    if (Number(process.versions.node.split(".")[0]) < 22) require.cache[require.resolve("nanoid")] = { exports: await import("nanoid") };
+    const { buildAuthentication } = require("../src/helpers/middleware/auth");
+    const { buildCustomerSession } = require("../src/helpers/customerSession");
+    const { buildCustomerMiddleware } = require("../src/helpers/middleware/customerAuth");
+    const origin = "https://shop.smarteat.test";
+    const rawToken = "A".repeat(43);
+    const session = { id: "81", shopId: 7, customerId: "51", tokenHash: crypto.createHash("sha256").update(rawToken).digest("hex"),
+      csrfSecretHash: "b".repeat(64), expiresAt: "2026-11-17T12:00:00Z", subject: "customer" };
+    const sessions = buildCustomerSession({ secret: "task10-routing-session-secret-fixture", allowedOrigins: [origin],
+      clock: () => new Date("2026-10-18T12:00:00Z"), repository: {
+        read: async ({ tokenHash, shopId }) => tokenHash === session.tokenHash && shopId === 7 ? session : null,
+      } });
+    const guards = [];
+    const mutations = [];
+    const actualAuth = buildAuthentication({ findUserByIdAndShop: async ({ id, shopId }) =>
+      id === 10 && shopId === 7 ? { id: 10, shopid: 7, access: 1, status: 1, module_permissions: '[]' } : null });
+    const authentication = (req, res, next) => { guards.push("authentication"); return actualAuth(req, res, next); };
+    const actualMiddleware = buildCustomerMiddleware({ sessions });
+    const middleware = { ...actualMiddleware,
+      attachOptionalCustomerSession: (req, res, next) => { guards.push("attach"); return actualMiddleware.attachOptionalCustomerSession(req, res, next); },
+      requireCustomerCsrfIfPresent: (req, res, next) => { guards.push("csrf"); return actualMiddleware.requireCustomerCsrfIfPresent(req, res, next); },
+    };
+    const witness = name => (req, res) => {
+      mutations.push(name);
+      res.json({ name, target: req.originalUrl, subject: req.sessionSubject, access: req.access, servicePointId: req.servicePointId,
+        customerId: req.customerSession && req.customerSession.customerId, guards: [...guards] });
+    };
+    const controllers = new Proxy({}, { get: (_target, name) => witness(name) });
+    const ordersFile = path.resolve(__dirname, "../src/routers/r_orders.js");
+    const orderRequire = createRequire(ordersFile);
+    const orderModule = { exports: {} };
+    vm.runInNewContext(fs.readFileSync(ordersFile, "utf8"), { module: orderModule, require: name => {
+      if (["../controllers/c_orders", "../controllers/c_orderEditing", "../controllers/c_cashClosures"].includes(name)) return controllers;
+      if (name === "../helpers/middleware/auth") return { authentication, authorizeCashRegister: (_req, _res, next) => next() };
+      if (name === "../helpers/middleware/customerAuth") return middleware;
+      return orderRequire(name);
+    } }, { filename: ordersFile });
+    const { buildCustomersRouter } = require("../src/routers/r_customers");
+    const customerRouter = buildCustomersRouter({ controller: controllers, customerAuthController: controllers,
+      personalController: controllers, customerMiddleware: middleware, authentication });
+    const prefix = require("../src/config/prefix");
+    const app = express();
+    if (cors) {
+      const filename = path.resolve(__dirname, "../index.js");
+      const realRequire = createRequire(filename);
+      const controlledRequire = name => {
+        if (name === "express") return Object.assign(() => app, express);
+        if (name === "fs") return { existsSync: () => true };
+        if (name === "./src/helpers/waitForDatabase") return { waitForDatabase: () => new Promise(() => {}) };
+        if (name === "./src/routers/r_orders") return orderModule.exports;
+        if (name === "./src/routers/r_customers") return customerRouter;
+        if (name === "./src/helpers/middleware/customerAuth") return middleware;
+        if (name === "./src/helpers/middleware/auth") return { authenticationIfPresent: (req, res, next) => req.headers.authorization ? actualAuth(req, res, next) : next() };
+        return realRequire(name);
+      };
+      vm.runInNewContext(fs.readFileSync(filename, "utf8"), { require: controlledRequire, console: { log() {}, error() {} }, process, setInterval }, { filename });
+    } else {
+      // Isolate the route guard from CORS so I1 cannot mask an I2 regression.
+      app.use(prefix, orderModule.exports);
+    }
+    const jwt = require("jsonwebtoken");
+    const bearer = jwt.sign({ id: 10, shopid: 7, access: 1 }, process.env.JWTKEY);
+    const servicePointBearer = jwt.sign({ subject_type: "service_point", service_point_id: 9, shopid: 7, access: 2 }, process.env.JWTKEY);
+    await withHttp(app, request => work({ request, prefix, origin, mutations, guards,
+      headers: { Origin: origin, Cookie: `smarteat_customer=${rawToken}`, Authorization: `Bearer ${bearer}` },
+      servicePointBearer, csrfToken: sessions.csrfToken(session) }));
+  }
+
+  const spellings = (prefix, route) => [
+    `${prefix}/${route}`, `${prefix}//${route}`, `http://api.example.test${prefix}/${route}`,
+    `http://api.example.test${prefix}//${route}`, `${prefix.toUpperCase()}//${route.toUpperCase()}/?routing=1`,
+  ];
+
+  test("I1 actual index enforces public customer origin policy for every accepted request target", async t => {
+    await routingWitness(async ({ request, prefix, origin, mutations }) => {
+      for (const route of ["customer-auth/challenges", "customer-auth/verify"]) {
+        for (const target of spellings(prefix, route)) {
+          await t.test(`forbidden POST ${target}`, async () => {
+            const before = mutations.length;
+            const result = await request(target, { method: "POST", headers: { Origin: "https://evil.test" } });
+            assert.equal(result.status, 403, result.raw);
+            assert.equal(result.headers["access-control-allow-origin"], undefined);
+            assert.equal(result.headers["access-control-allow-credentials"], undefined);
+            assert.equal(mutations.length, before);
+          });
+          await t.test(`allowed POST ${target}`, async () => {
+            const result = await request(target, { method: "POST", headers: { Origin: origin } });
+            assert.equal(result.status, 200, result.raw);
+            assert.equal(result.data.target, target);
+            assert.equal(result.headers["access-control-allow-origin"], origin);
+            assert.equal(result.headers["access-control-allow-credentials"], "true");
+          });
+          await t.test(`preflight ${target}`, async () => {
+            const before = mutations.length;
+            for (const Origin of [origin, "https://evil.test"]) {
+              const result = await request(target, { method: "OPTIONS", headers: { Origin,
+                "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type" } });
+              assert.equal(result.status, Origin === origin ? 204 : 403, result.raw);
+            }
+            assert.equal(mutations.length, before);
+          });
+        }
+      }
+    });
+  });
+
+  test("I2 actual checkout route authenticates then attaches customer and checks CSRF independently of index", async t => {
+    await routingWitness(async ({ request, prefix, headers, csrfToken, mutations, guards, servicePointBearer }) => {
+      for (const target of spellings(prefix, "orders/checkout")) {
+        for (const Authorization of [headers.Authorization, `Bearer ${servicePointBearer}`]) {
+          await t.test(`missing CSRF ${target} ${Authorization === headers.Authorization ? "staff" : "service-point"}`, async () => {
+            guards.length = 0;
+            const before = mutations.length;
+            const result = await request(target, { method: "POST", headers: { ...headers, Authorization } });
+            assert.equal(result.status, 403, result.raw);
+            assert.deepEqual(guards, ["authentication", "attach", "csrf"]);
+            assert.equal(mutations.length, before);
+          });
+          await t.test(`valid CSRF ${target} ${Authorization === headers.Authorization ? "staff" : "service-point"}`, async () => {
+            guards.length = 0;
+            const result = await request(target, { method: "POST", headers: { ...headers, Authorization, "X-CSRF-Token": csrfToken } });
+            assert.equal(result.status, 200, result.raw);
+            assert.equal(result.data.customerId, "51");
+            assert.equal(result.data.target, target);
+            assert.equal(result.data.subject, Authorization === headers.Authorization ? "staff" : "service_point");
+            assert.deepEqual(result.data.guards, ["authentication", "attach", "csrf"]);
+          });
+          await t.test(`bearer without customer cookie ${target} ${Authorization === headers.Authorization ? "staff" : "service-point"}`, async () => {
+            const result = await request(target, { method: "POST", headers: { Authorization } });
+            assert.equal(result.status, 200, result.raw);
+            assert.equal(result.data.customerId, null);
+          });
+        }
+        await t.test(`cookie without existing bearer ${target}`, async () => {
+          const before = mutations.length;
+          const result = await request(target, { method: "POST", headers: { Cookie: headers.Cookie, "X-CSRF-Token": csrfToken } });
+          assert.equal(result.status, 401, result.raw);
+          assert.equal(mutations.length, before);
+        });
+      }
+    }, { cors: false });
+  });
+
+  test("I1/I2 actual index scopes checkout CORS and preflight without letting accepted spellings skip CSRF", async t => {
+    await routingWitness(async ({ request, prefix, headers, csrfToken, mutations, guards, origin }) => {
+      for (const target of spellings(prefix, "orders/checkout")) {
+        await t.test(target, async () => {
+          let before = mutations.length;
+          const forbidden = await request(target, { method: "POST", headers: { ...headers, Origin: "https://evil.test", "X-CSRF-Token": csrfToken } });
+          assert.equal(forbidden.status, 403, forbidden.raw);
+          assert.equal(forbidden.headers["access-control-allow-origin"], undefined);
+          assert.equal(forbidden.headers["access-control-allow-credentials"], undefined);
+          assert.equal(mutations.length, before);
+          const missing = await request(target, { method: "POST", headers });
+          assert.equal(missing.status, 403, missing.raw);
+          assert.equal(mutations.length, before);
+          assert.equal(missing.headers["access-control-allow-origin"], origin);
+          guards.length = 0;
+          for (const Origin of [origin, "https://evil.test"]) {
+            const preflight = await request(target, { method: "OPTIONS", headers: { Origin,
+              "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type,authorization,x-csrf-token" } });
+            assert.equal(preflight.status, Origin === origin ? 204 : 403, preflight.raw);
+          }
+          assert.equal(guards.length, 0);
+          assert.equal(mutations.length, before);
+          const accepted = await request(target, { method: "POST", headers: { ...headers, "X-CSRF-Token": csrfToken } });
+          assert.equal(accepted.status, 200, accepted.raw);
+          assert.equal(accepted.data.customerId, "51");
+          assert.equal(accepted.data.access, 1);
+          assert.equal(accepted.headers["access-control-allow-origin"], origin);
+          const legacy = await request(target, { method: "POST", headers: { Authorization: headers.Authorization, Origin: "https://legacy.test" } });
+          assert.equal(legacy.status, 200, legacy.raw);
+          assert.equal(legacy.data.customerId, null);
+          assert.equal(legacy.headers["access-control-allow-origin"], "*");
+          assert.equal(legacy.headers["access-control-allow-credentials"], undefined);
+        });
+      }
+      for (const target of [`${prefix}///orders/checkout`, `${prefix}/orders//checkout`, `${prefix}/orders/checkout//`, `${prefix}/%6frders/checkout`]) {
+        const before = mutations.length;
+        const rejected = await request(target, { method: "POST", headers });
+        assert.equal(rejected.status, 404, rejected.raw);
+        assert.equal(mutations.length, before);
+      }
+      guards.length = 0;
+      const legacyRead = await request(`${prefix}/orders`, { headers });
+      assert.equal(legacyRead.status, 200, legacyRead.raw);
+      assert.deepEqual(guards, ["authentication"]);
     });
   });
 }

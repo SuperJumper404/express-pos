@@ -8,8 +8,10 @@ const hasCustomerCookie = req => {
   return Object.prototype.hasOwnProperty.call(parsed, "__Host-smarteat_customer") || Object.prototype.hasOwnProperty.call(parsed, "smarteat_customer");
 };
 const relativePath = (req, prefix) => {
-  const path = (req.originalUrl || req.url || "/").split("?")[0];
-  return path.toLowerCase().startsWith(prefix.toLowerCase() + "/") ? path.slice(prefix.length) : path;
+  // Use Express's parsed pathname, including absolute-form request targets.
+  const path = req.path || "/";
+  // A prefix mount can also consume one optional slash at its boundary.
+  return path.toLowerCase().startsWith(prefix.toLowerCase() + "/") ? path.slice(prefix.length).replace(/^\/\//, "/") : path;
 };
 const isPersonalPath = path => /^\/(customer-auth|customer)(\/|$)/i.test(path);
 const isCustomerCorsRequest = (req, prefix = require("../config/prefix")) => {
