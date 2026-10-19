@@ -4,6 +4,7 @@ const { toCents, fromCents, assertCents } = require("../helpers/deliveryMoney");
 const { createTrackingToken, hashTrackingToken } = require("../helpers/deliveryTrackingToken");
 const { isOrderTakerAccess } = require("../helpers/staffAccess");
 const { isCourier, isDeliveryOperator, assertDeliveryOwner } = require("../helpers/deliveryAuthorization");
+const { isGoogleReference, toStoredAddress, sameDeliveryDestination, sanitizeGoogleDeliveryPayload } = require("../helpers/deliveryAddressStorage");
 
 const json = value => typeof value === "string" ? JSON.parse(value) : value;
 const date = value => new Date(value).toISOString().slice(0, 19).replace("T", " ");
@@ -159,9 +160,9 @@ const buildDeliveryOrders = ({ clock = () => new Date(), randomToken = createTra
     await query(connection, "INSERT INTO delivery_events SET ?", [{
       shopid: checkout.shopId, delivery_id: deliveryId, version, event_type: type,
       actor_subject: checkout.sessionSubject || "staff", actor_id: String(checkout.actorId || checkout.servicePointId),
-      previous_state: JSON.stringify(previous), next_state: JSON.stringify(next),
+      previous_state: JSON.stringify(sanitizeGoogleDeliveryPayload(previous)), next_state: JSON.stringify(sanitizeGoogleDeliveryPayload(next)),
       idempotency_key: `${type}:${checkout.clientOrderToken}`, request_hash: checkout.requestHash,
-      result: JSON.stringify(result), created_at: date(clock()),
+      result: JSON.stringify(sanitizeGoogleDeliveryPayload(result)), created_at: date(clock()),
     }]);
   };
   const createDeliveryForOrder = async ({ checkout, quote, connection }) => {
@@ -170,9 +171,11 @@ const buildDeliveryOrders = ({ clock = () => new Date(), randomToken = createTra
     const timestamp = date(clock());
     await query(connection, "INSERT INTO deliveries SET ?", [{
       shopid: checkout.shopId, origin_order_id: checkout.orderId, order_reference: checkout.orderReference,
-      customer_account_id: null, address_snapshot: JSON.stringify(quote.addressSnapshot),
+      customer_account_id: null, address_snapshot: JSON.stringify(toStoredAddress(quote.addressSnapshot)),
       contact_snapshot: JSON.stringify({ name: checkout.customer.name, phone: checkout.customer.phone }),
-      latitude: quote.addressSnapshot.latitude, longitude: quote.addressSnapshot.longitude,
+      latitude: isGoogleReference(quote.addressSnapshot) ? null : quote.addressSnapshot.latitude,
+      longitude: isGoogleReference(quote.addressSnapshot) ? null : quote.addressSnapshot.longitude,
+      google_place_id: isGoogleReference(quote.addressSnapshot) ? quote.addressSnapshot.placeId : null,
       distance_meters: quote.distanceMeters, settings_revision: quote.settingsRevision,
       client_order_token: checkout.clientOrderToken,
       confirmation_secret_hash: hashTrackingToken(checkout.deliveryConfirmationSecret),
@@ -222,6 +225,7 @@ const buildDeliveryOrders = ({ clock = () => new Date(), randomToken = createTra
         acceptedAddress.latitude === addressSnapshot.latitude && acceptedAddress.longitude === addressSnapshot.longitude &&
         ["providerId", "cityCode", "precision"].every(key => acceptedAddress[key] === undefined || acceptedAddress[key] === addressSnapshot[key]);
     } catch (_) { /* An incomplete accepted destination cannot authorize copying access details. */ }
+    if (isGoogleReference(acceptedAddress) || isGoogleReference(addressSnapshot)) sameDestination = sameDeliveryDestination(acceptedAddress, addressSnapshot);
     if (!sameDestination && privateFields.some(key => acceptedAddress && acceptedAddress[key])) {
       throw new DomainError(409, "DELIVERY_ADDRESS_CHANGE_NOT_ALLOWED", "Existing access details require the same verified delivery address");
     }
@@ -232,10 +236,11 @@ const buildDeliveryOrders = ({ clock = () => new Date(), randomToken = createTra
     }
     const revision = delivery.charge_revision + 1;
     await insertCharge({ deliveryId: delivery.id, shopId: checkout.shopId, revision, quote, connection });
-    const update = await query(connection, `UPDATE deliveries SET address_snapshot = ?, latitude = ?, longitude = ?, distance_meters = ?,
+    const update = await query(connection, `UPDATE deliveries SET address_snapshot = ?, latitude = ?, longitude = ?, google_place_id = ?, distance_meters = ?,
       settings_revision = ?, charge_revision = ?, version = version + 1, updated_at = ?
       WHERE shopid = ? AND id = ? AND version = ?`,
-    [JSON.stringify(addressSnapshot), quote.addressSnapshot.latitude, quote.addressSnapshot.longitude,
+    [JSON.stringify(toStoredAddress(addressSnapshot)), isGoogleReference(addressSnapshot) ? null : quote.addressSnapshot.latitude,
+      isGoogleReference(addressSnapshot) ? null : quote.addressSnapshot.longitude, isGoogleReference(addressSnapshot) ? addressSnapshot.placeId : null,
       quote.distanceMeters, quote.settingsRevision, revision, date(clock()), checkout.shopId, delivery.id, checkout.deliveryExpectedVersion]);
     if (!update.affectedRows) throw new DomainError(409, "DELIVERY_VERSION_CONFLICT", "Delivery changed");
     const next = await resolveDeliveryOrder({ shopId: checkout.shopId, deliveryId: delivery.id, connection });

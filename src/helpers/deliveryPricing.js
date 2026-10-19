@@ -1,5 +1,6 @@
 const DomainError = require("./domainError");
 const { assertCents } = require("./deliveryMoney");
+const { isGoogleReference } = require("./deliveryAddressStorage");
 
 const validCoordinates = (point) => !!point && typeof point.latitude === "number" && Number.isFinite(point.latitude)
   && Math.abs(point.latitude) <= 90 && typeof point.longitude === "number" && Number.isFinite(point.longitude) && Math.abs(point.longitude) <= 180;
@@ -13,7 +14,7 @@ const distanceMeters = (origin, destination) => {
 const validateDeliverySettings = (settings) => {
   const invalid = () => { throw new DomainError(422, "DELIVERY_SETTINGS_INVALID", "Invalid delivery settings"); };
   if (!settings || typeof settings.enabled !== "boolean" || typeof settings.freeDeliveryEnabled !== "boolean") invalid();
-  if (settings.origin !== null && !validCoordinates(settings.origin)) invalid();
+  if (settings.origin !== null && !validCoordinates(settings.origin) && !isGoogleReference(settings.origin)) invalid();
   if (!Number.isInteger(settings.maxDistanceMeters) || settings.maxDistanceMeters < 0 || settings.maxDistanceMeters > 4294967295) invalid();
   try {
     assertCents(settings.minimumItemsCents);
@@ -31,7 +32,7 @@ const validateDeliverySettings = (settings) => {
     previous = band.upToMeters;
   }
   if (settings.bands.length && previous !== settings.maxDistanceMeters) invalid();
-  if (settings.enabled && (!validCoordinates(settings.origin) || !settings.maxDistanceMeters || !settings.bands.length || settings.fiscalPolicy.vatRate === null)) invalid();
+  if (settings.enabled && ((!validCoordinates(settings.origin) && !isGoogleReference(settings.origin)) || !settings.maxDistanceMeters || !settings.bands.length || settings.fiscalPolicy.vatRate === null)) invalid();
   return settings;
 };
 const priceDelivery = ({ settings, distanceMeters: distance, itemsNetCents }) => {

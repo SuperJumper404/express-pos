@@ -1,5 +1,6 @@
 const DomainError = require("../helpers/domainError");
 const { normalizeAddress, buildDeliveryTokenCodec, validateAddressResolution, signAddressResolution } = require("../helpers/deliveryAddress");
+const { isGoogleReference, toStoredAddress } = require("../helpers/deliveryAddressStorage");
 
 const invalid = () => new DomainError(400, "CUSTOMER_REQUEST_INVALID", "Invalid customer request");
 const missing = () => new DomainError(404, "CUSTOMER_NOT_FOUND", "Customer not found");
@@ -59,7 +60,7 @@ const buildSqlCustomersRepository = ({ pool = require("../config/dbPool") } = {}
 });
 
 const buildCustomers = ({ repository = buildSqlCustomersRepository(), runInTransaction = require("../helpers/withTransaction").withTransaction,
-  clock = () => new Date(), tokenCodec = buildDeliveryTokenCodec() } = {}) => {
+  clock = () => new Date(), tokenCodec = buildDeliveryTokenCodec(), places = require("../services/googleDeliveryPlaces").googleDeliveryPlaces } = {}) => {
   const owned = async ({ shopId, customerId, connection }) => {
     validateShop(shopId);
     validateId(customerId);
@@ -106,7 +107,8 @@ const buildCustomers = ({ repository = buildSqlCustomersRepository(), runInTrans
       snapshot = { ...snapshot };
       if (complement !== undefined) snapshot.complement = text(complement, 255);
       if (instructions !== undefined) snapshot.instructions = text(instructions, 1000);
-      normalizeAddress(snapshot);
+      if (snapshot.provider === "google_places") snapshot = toStoredAddress(snapshot, { purpose: "book" });
+      else normalizeAddress(snapshot);
       if (current) await repository.updateAddress({ ...scope, addressId, addressSnapshot: snapshot });
       else {
         if (customer.next_address_number >= 4294967295) throw invalid();
@@ -128,15 +130,22 @@ const buildCustomers = ({ repository = buildSqlCustomersRepository(), runInTrans
       await repository.deleteAddress({ ...scope, addressId });
       return { id: addressId };
     }),
-    resolveStoredAddress: ({ shopId, customerId, addressId }) => runInTransaction(async connection => {
+    async resolveStoredAddress({ shopId, customerId, addressId }) {
+      tokenCodec.sign({ kind: "preflight" });
+      let addressSnapshot = await runInTransaction(async connection => {
       const scope = { shopId, customerId, connection };
       const customer = await owned(scope);
-      const addressSnapshot = addressView(await address({ ...scope, addressId }), customer).addressSnapshot;
+      return addressView(await address({ ...scope, addressId }), customer).addressSnapshot;
+      });
+      if (isGoogleReference(addressSnapshot)) {
+        const resolved = await places.resolve({ shopId, placeId: addressSnapshot.placeId });
+        addressSnapshot = { ...resolved, ...toStoredAddress(addressSnapshot, { purpose: "book" }) };
+      }
       const now = clock();
       return { addressSnapshot,
         addressResolutionToken: signAddressResolution({ shopId, addressSnapshot, now, tokenCodec }),
         expiresAt: new Date(new Date(now).getTime() + 900000).toISOString() };
-    }),
+    },
   };
 };
 

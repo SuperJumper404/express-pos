@@ -25,6 +25,7 @@ const buildDeliveryQuotes = ({
   repository = require("./m_deliverySettings").buildSqlDeliverySettingsRepository(),
   quoteOrderItems = require("./m_orderQuote").quoteOrderItems,
   geocoder = require("../services/deliveryGeocoding").buildDeliveryGeocoding(),
+  places = require("../services/googleDeliveryPlaces").googleDeliveryPlaces,
   clock = () => new Date(), tokenCodec = buildDeliveryTokenCodec(),
 } = {}) => ({
   async resolveAddress({ shopId, address, candidateId }) {
@@ -51,7 +52,9 @@ const buildDeliveryQuotes = ({
     const itemQuote = await quoteOrderItems({ shopId, items: normalizedItems, isTakeaway: true, connection });
     const itemsTotalCents = toCents(itemQuote.total);
     const { itemsDiscountCents } = calculateDeliveryDiscount({ itemsTotalCents, ...intent });
-    const distance = distanceMeters(settings.origin, addressSnapshot);
+    const origin = require("../helpers/deliveryAddressStorage").isGoogleReference(settings.origin)
+      ? await places.position({ shopId, placeId: settings.origin.placeId }) : settings.origin;
+    const distance = distanceMeters(origin, addressSnapshot);
     const { deliveryFeeCents } = priceDelivery({ settings, distanceMeters: distance, itemsNetCents: itemsTotalCents - itemsDiscountCents });
     const financials = buildDeliveryFinancials({ itemsTotalCents, itemsDiscountCents, deliveryFeeCents, vatRate: settings.fiscalPolicy.vatRate });
     financials.chargeSnapshot.bandFeeCents = settings.bands.find(band => distance <= band.upToMeters).feeCents;

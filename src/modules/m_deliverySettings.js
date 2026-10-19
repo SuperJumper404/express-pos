@@ -1,6 +1,7 @@
 const DomainError = require("../helpers/domainError");
 const { validateDeliverySettings } = require("../helpers/deliveryPricing");
 const { validateAddressResolution } = require("../helpers/deliveryAddress");
+const { isGoogleReference, toStoredAddress } = require("../helpers/deliveryAddressStorage");
 
 const parseSettingsCents = value => {
   if (typeof value !== "string" || !/^(0|[1-9]\d*)$/.test(value) || value.length > 16
@@ -16,7 +17,7 @@ const buildSqlDeliverySettingsRepository = ({ pool = require("../config/dbPool")
   const getSettings = async ({ shopId, connection = pool }) => {
     // Explicit projections keep new BIGINT identifiers out of the legacy pool's number parser.
     const [rows] = await connection.query(
-      `SELECT s.revision, s.enabled, s.origin_latitude, s.origin_longitude, s.max_distance_meters,
+      `SELECT s.revision, s.enabled, s.origin_latitude, s.origin_longitude, s.origin_google_place_id, s.max_distance_meters,
        CAST(s.minimum_items_cents AS CHAR) AS minimum_items_cents, s.free_delivery_enabled,
        CAST(s.free_delivery_threshold_cents AS CHAR) AS free_delivery_threshold_cents,
        s.fiscal_mode, s.vat_rate, b.up_to_meters, CAST(b.fee_cents AS CHAR) AS fee_cents
@@ -27,7 +28,8 @@ const buildSqlDeliverySettingsRepository = ({ pool = require("../config/dbPool")
     const row = rows[0];
     return validateDeliverySettings({
       shopId, revision: row.revision, enabled: row.enabled === 1,
-      origin: row.origin_latitude === null ? null : { latitude: Number(row.origin_latitude), longitude: Number(row.origin_longitude) },
+      origin: row.origin_google_place_id ? { provider: "google_places", placeId: row.origin_google_place_id }
+        : row.origin_latitude === null ? null : { latitude: Number(row.origin_latitude), longitude: Number(row.origin_longitude) },
       maxDistanceMeters: row.max_distance_meters, minimumItemsCents: parseSettingsCents(row.minimum_items_cents),
       freeDeliveryEnabled: row.free_delivery_enabled === 1,
       freeDeliveryThresholdCents: row.free_delivery_threshold_cents === null ? null : parseSettingsCents(row.free_delivery_threshold_cents),
@@ -52,9 +54,10 @@ const buildSqlDeliverySettingsRepository = ({ pool = require("../config/dbPool")
         }
         if (!current) await connection.query("INSERT INTO shop_delivery_settings (shopid) VALUES (?)", [shopId]);
         await connection.query(
-          `UPDATE shop_delivery_settings SET revision = ?, enabled = ?, origin_latitude = ?, origin_longitude = ?,
+          `UPDATE shop_delivery_settings SET revision = ?, enabled = ?, origin_latitude = ?, origin_longitude = ?, origin_google_place_id = ?,
            max_distance_meters = ?, minimum_items_cents = ?, free_delivery_enabled = ?, free_delivery_threshold_cents = ?, fiscal_mode = ?, vat_rate = ? WHERE shopid = ?`,
-          [expectedRevision + 1, settings.enabled ? 1 : 0, settings.origin && settings.origin.latitude, settings.origin && settings.origin.longitude,
+          [expectedRevision + 1, settings.enabled ? 1 : 0, settings.origin && !isGoogleReference(settings.origin) ? settings.origin.latitude : null,
+            settings.origin && !isGoogleReference(settings.origin) ? settings.origin.longitude : null, isGoogleReference(settings.origin) ? settings.origin.placeId : null,
             settings.maxDistanceMeters, String(settings.minimumItemsCents), settings.freeDeliveryEnabled ? 1 : 0,
             settings.freeDeliveryThresholdCents === null ? null : String(settings.freeDeliveryThresholdCents), settings.fiscalPolicy.mode, settings.fiscalPolicy.vatRate, shopId],
         );
@@ -77,10 +80,13 @@ const buildDeliverySettings = ({ repository = buildSqlDeliverySettingsRepository
     let origin = settings.origin;
     if (settings.originResolutionToken) {
       const resolved = validateAddressResolution(settings.originResolutionToken, clock(), { tokenCodec, shopId });
-      origin = { latitude: resolved.latitude, longitude: resolved.longitude };
-    } else if (origin !== null && (!current.origin || !origin || origin.latitude !== current.origin.latitude || origin.longitude !== current.origin.longitude)) {
+      origin = isGoogleReference(resolved) ? toStoredAddress(resolved, { purpose: "origin" }) : { latitude: resolved.latitude, longitude: resolved.longitude };
+    } else if (origin !== null && (!current.origin || !origin || (isGoogleReference(current.origin) || isGoogleReference(origin)
+      ? !isGoogleReference(current.origin) || !isGoogleReference(origin) || origin.placeId !== current.origin.placeId
+      : origin.latitude !== current.origin.latitude || origin.longitude !== current.origin.longitude))) {
       throw new DomainError(422, "DELIVERY_ADDRESS_INVALID", "Resolve restaurant address before changing its position");
     }
+    if (isGoogleReference(origin)) origin = toStoredAddress(origin, { purpose: "origin" });
     const normalized = validateDeliverySettings({
       shopId, revision: expectedRevision, enabled: settings.enabled, origin,
       maxDistanceMeters: settings.maxDistanceMeters, minimumItemsCents: settings.minimumItemsCents,
