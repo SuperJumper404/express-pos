@@ -47,5 +47,8 @@ test("SQL permits Google references without GPS but refuses mixed or missing ide
     assert.equal(quote.deliveryFeeCents, 200);
     const [settings] = await db.readRows("SELECT enabled,origin_latitude,origin_longitude,revision FROM shop_delivery_settings WHERE shopid=7");
     assert.deepEqual([settings.enabled, settings.origin_latitude, settings.origin_longitude, settings.revision], [1, null, null, 1]);
+    await assert.rejects(db.migrateDelivery("down"), /Google references require a compatible application; rollback refused/);
+    assert.deepEqual(await db.readRows("SELECT latitude,longitude,google_place_id FROM deliveries WHERE id='41'"), [stored]);
+    assert.equal((await db.readRows("SELECT origin_google_place_id FROM shop_delivery_settings WHERE shopid=7"))[0].origin_google_place_id, "fixture-place");
   });
 });
