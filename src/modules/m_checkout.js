@@ -33,6 +33,8 @@ const isPositiveId = (value) => {
   return Number.isSafeInteger(number) && number > 0;
 };
 const uniqueSortedIds = (values) => [...new Set(values.map(Number))].sort((a, b) => a - b);
+const recoveryProof = value => typeof value === "string" && /^sha256:[a-f0-9]{64}$/.test(value);
+const proofHash = value => recoveryProof(value) ? value.slice(7) : hashTrackingToken(value);
 
 const stableValue = (value) => {
   if (Array.isArray(value)) return value.map(stableValue);
@@ -78,8 +80,8 @@ const canonicalPayload = (input) => {
       fulfillment_type: "delivery",
       actor_id: input.actorId,
       session_subject: input.sessionSubject,
-      delivery_quote_hash: hashTrackingToken(input.deliveryQuoteToken),
-      address_resolution_hash: hashTrackingToken(input.addressResolutionToken),
+      delivery_quote_hash: proofHash(input.deliveryQuoteToken),
+      address_resolution_hash: proofHash(input.addressResolutionToken),
       confirmation_secret_hash: hashTrackingToken(input.deliveryConfirmationSecret),
       ...(input.deliveryDetails && Object.keys(input.deliveryDetails).length && { delivery_address_details: input.deliveryDetails }),
     }),
@@ -312,6 +314,8 @@ const validateCheckoutInput = (input = {}) => {
     for (const key of ["deliveryQuoteToken", "addressResolutionToken"]) {
       if (typeof input[key] !== "string" || !input[key] || input[key].length > 20000) throw invalidRequest(key);
     }
+    if ([input.deliveryQuoteToken, input.addressResolutionToken].some(value => value.startsWith("sha256:"))
+      && ![input.deliveryQuoteToken, input.addressResolutionToken].every(recoveryProof)) throw invalidRequest("delivery_recovery_proofs");
     if (typeof input.deliveryConfirmationSecret !== "string" || !/^[A-Za-z0-9_-]{43,128}$/.test(input.deliveryConfirmationSecret)) throw invalidRequest("delivery_confirmation_secret");
   }
 
@@ -337,6 +341,7 @@ const validateCheckoutInput = (input = {}) => {
     ...(delivery && {
       fulfillmentType: "delivery", deliveryQuoteToken: input.deliveryQuoteToken,
       addressResolutionToken: input.addressResolutionToken, deliveryConfirmationSecret: input.deliveryConfirmationSecret,
+      deliveryRecoveryOnly: recoveryProof(input.addressResolutionToken),
     }),
     clientOrderToken: input.clientOrderToken.trim(),
     paymentMode: input.paymentMode.trim().toLowerCase(),
@@ -866,6 +871,8 @@ const buildCheckoutModule = ({
         }
         const replay = await deliveryReplay(connection);
         if (replay) return replay;
+        // Persisted Google proofs retain only digests: recovery can never create a new order.
+        if (checkout.deliveryRecoveryOnly) throw new DomainError(409, "DELIVERY_CHECKOUT_RECOVERY_REQUIRED", "No accepted checkout found; reconcile this attempt before retrying");
       }
       const existing = await repository.findOrderByToken({
         shopId: checkout.shopId,

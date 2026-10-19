@@ -234,9 +234,9 @@ test("personal sessions, actual SQL and HTTP with provider boundary doubles", as
             res.end(JSON.stringify({ type: "FeatureCollection", features, privateSupplierField: "not-for-browser" })); });
           await new Promise(resolve => provider.listen(0, "127.0.0.1", resolve));
           const original = https.get;
-          https.get = (url, options, callback) => {
-            assert.equal(url.hostname, "data.geopf.fr");
-            return http.get({ hostname: "127.0.0.1", port: provider.address().port, path: url.pathname + url.search, headers: options.headers }, callback);
+          https.get = (options, callback) => {
+            assert.equal(options.hostname, "data.geopf.fr");
+            return http.get({ hostname: "127.0.0.1", port: provider.address().port, path: options.path, headers: options.headers }, callback);
           };
           try {
             // New adapter uses the existing geocoder/quota/signer. Boundary only is doubled.

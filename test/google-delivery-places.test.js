@@ -79,3 +79,54 @@ test("provider errors are redacted and malformed or imprecise addresses never be
   await assert.rejects(service.resolve({ shopId: 7, placeId: "fixture-place" }), error => error.code === "DELIVERY_GEOCODING_UNAVAILABLE" && !error.message.includes("private-key"));
   service.dispose();
 });
+
+test("position reads coalesce, evict the oldest of 1000 entries and delete on the scheduled deadline", async () => {
+  let calls = 0; let release;
+  const jobs = new Set();
+  const service = buildGoogleDeliveryPlaces({ apiKey: "fixture-key", reserveQuota: async () => {},
+    timers: { setTimeout: fn => { const timer = { fn, unref() {} }; jobs.add(timer); return timer; }, clearTimeout: timer => jobs.delete(timer) },
+    transport: async url => { calls++; if (calls === 1) await new Promise(resolve => { release = resolve; }); return { id: decodeURIComponent(url.pathname.split("/").pop()), location: { latitude: 48.8, longitude: 2.3 } }; } });
+  try {
+    const first = service.position({ shopId: 7, placeId: "p0" });
+    const duplicate = service.position({ shopId: 7, placeId: "p0" });
+    await Promise.resolve(); release();
+    assert.deepEqual(await first, await duplicate);
+    assert.equal(calls, 1);
+    for (let index = 1; index <= 1000; index++) await service.position({ shopId: 7, placeId: `p${index}` });
+    assert.equal(jobs.size, 1000);
+    await service.position({ shopId: 7, placeId: "p0" });
+    assert.equal(calls, 1002, "The oldest position must have been evicted");
+    for (const job of [...jobs]) job.fn();
+    assert.equal(jobs.size, 0);
+    await service.position({ shopId: 7, placeId: "p0" });
+    assert.equal(calls, 1003);
+  } finally { service.dispose(); }
+});
+
+test("real Google transport after Mailjet bootstrap bounds timeout and body bytes without retries", async () => {
+  const http = require("http"); const https = require("https");
+  require("node-mailjet");
+  const { requestGoogleJson } = require("../src/services/googleDeliveryPlaces");
+  let requests = 0;
+  const server = http.createServer((req, res) => {
+    requests++;
+    if (req.url === "/slow") return;
+    if (req.url === "/denied") { res.writeHead(403); res.end("private provider body"); return; }
+    if (req.url === "/large") { res.end("x".repeat(1048577)); return; }
+    if (req.url === "/malformed") { res.end("{invalid"); return; }
+    let body = ""; req.on("data", chunk => { body += chunk; });
+    req.on("end", () => res.end(JSON.stringify({ method: req.method, mask: req.headers["x-goog-fieldmask"], body: body ? JSON.parse(body) : null })));
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const original = https.request;
+  https.request = (options, callback) => http.request({ ...options, protocol: "http:" }, callback);
+  const url = suffix => new URL(`https://127.0.0.1:${server.address().port}${suffix}`);
+  try {
+    assert.deepEqual(await requestGoogleJson(url("/ok"), { method: "POST", body: { input: "60 rue Test" }, headers: { "X-Goog-FieldMask": "id" } }), { method: "POST", mask: "id", body: { input: "60 rue Test" } });
+    for (const route of ["/denied", "/malformed", "/large", "/slow"]) await assert.rejects(requestGoogleJson(url(route), { timeoutMs: 50 }), { code: "DELIVERY_GEOCODING_UNAVAILABLE" });
+    assert.equal(requests, 5);
+  } finally {
+    https.request = original; server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+});

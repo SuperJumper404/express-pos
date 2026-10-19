@@ -495,6 +495,13 @@ const buildOrderEditingModule = ({
         connection,
       });
       if (!order) {
+        if (typeof amendment.deliveryIdempotencyKey === "string") {
+          const actor = await repository.findDeliveryEditor({ userId: amendment.operatorId, shopId: amendment.shopId, connection });
+          if (!actor || !isOrderTakerAccess(actor.access)) throw new DomainError(403, "DELIVERY_FORBIDDEN", "Delivery edit is not authorized");
+          const requestHash = crypto.createHash("sha256").update(JSON.stringify(amendment)).digest("hex");
+          const replay = await deliveryOrders.findEditReplay({ shopId: amendment.shopId, idempotencyKey: amendment.deliveryIdempotencyKey, requestHash, connection });
+          if (replay) return replay;
+        }
         throw new DomainError(404, "ORDER_NOT_FOUND", "Commande introuvable.");
       }
       let deliveryContext;
