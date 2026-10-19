@@ -119,6 +119,26 @@ if (require.main === module) {
       const legacy = await request(`${prefix}/orders`, { headers: { Cookie: "smarteat_customer=opaque" } });
       assert.equal(legacy.status, 401); assert.equal(legacy.headers["access-control-allow-origin"], "*");
       assert.equal(legacy.headers["access-control-allow-credentials"], undefined);
+      for (const [route, method] of [["deliveries", "GET"], ["availability", "GET"], ["cash-balance", "GET"],
+        ["availability", "PATCH"], ["deliveries/41/pickup", "POST"]]) {
+        const target = `${prefix}/courier/${route}`;
+        const preflight = await request(target, { method: "OPTIONS", headers: {
+          Origin: "https://staging.smarteat.fr", "Access-Control-Request-Method": method,
+          "Access-Control-Request-Headers": "authorization,content-type",
+        } });
+        assert.equal(preflight.status, 204, `${method} ${target}: ${preflight.raw}`);
+        assert.equal(preflight.raw, "");
+        assert.equal(preflight.headers["access-control-allow-origin"], "*");
+        assert.equal(preflight.headers["access-control-allow-credentials"], undefined);
+        assert.ok(preflight.headers["access-control-allow-methods"].split(/,\s*/).includes(method));
+        assert.match(preflight.headers["access-control-allow-headers"], /authorization/i);
+        assert.match(preflight.headers["access-control-allow-headers"], /content-type/i);
+        const unauthorized = await request(target, { method, headers: { Origin: "https://staging.smarteat.fr" } });
+        assert.equal(unauthorized.status, 401, 'Preflight must not bypass actual courier authentication');
+        assert.equal(unauthorized.headers["access-control-allow-origin"], "*");
+        const stale = await request(target, { method, headers: { Origin: "https://staging.smarteat.fr", Authorization: "Bearer stale" } });
+        assert.equal(stale.status, 401);
+      }
       const foreign = await request(`${prefix}/customer-auth/challenges`, { method: "POST", headers: { Origin: "https://evil.test" }, body: {} });
       assert.equal(foreign.status, 403); assert.equal(foreign.headers["access-control-allow-origin"], undefined);
       const raw = { fixture: "raw Stripe body" };
