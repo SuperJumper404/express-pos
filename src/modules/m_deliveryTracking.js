@@ -63,10 +63,12 @@ const stage = (delivery, order) => {
   return Number(order.status) === 3 ? "ready" : Number(order.status) === 2 ? "preparing" : "received";
 };
 
-const buildDeliveryTracking = ({ repository: repo = repository, clock = () => new Date(), tokenCodec = { create: createTrackingToken, hash: hashTrackingToken } } = {}) => ({
+const buildDeliveryTracking = ({ repository: repo = repository, clock = () => new Date(), tokenCodec = { create: createTrackingToken, hash: hashTrackingToken },
+  addressViews = require("../services/deliveryAddressViews").buildDeliveryAddressViews() } = {}) => ({
   read: async ({ token }) => {
     if (typeof token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw notFound();
-    return repo.transaction(async connection => {
+    let postalContext;
+    const view = await repo.transaction(async connection => {
       const identity = await repo.byHash(tokenCodec.hash(token), connection);
       if (!identity) throw notFound();
       const resolved = await repo.resolve({ shopId: identity.shopid, deliveryId: identity.id, connection });
@@ -76,6 +78,7 @@ const buildDeliveryTracking = ({ repository: repo = repository, clock = () => ne
       const shop = await repo.restaurant(delivery.shopid, connection);
       if (!shop) throw notFound();
       const address = json(delivery.address_snapshot);
+      if (address.provider === "google_places") postalContext = { shopId: delivery.shopid, addressSnapshot: address };
       const total = toCents(order.subtotal);
       return {
         reference: delivery.order_reference, stage: stage(delivery, order),
@@ -84,6 +87,13 @@ const buildDeliveryTracking = ({ repository: repo = repository, clock = () => ne
         payment: { status: order.payment_status, totalCents: total, remainingDueCents: ["paid", "refunded"].includes(order.payment_status) ? 0 : total },
       };
     });
+    if (postalContext) {
+      const display = await addressViews.hydrate(postalContext);
+      view.addressSnapshot = Object.fromEntries(["street", "postalCode", "city", "country"].map(key => [key, display.addressSnapshot[key] || ""]));
+      view.addressProvider = "google_places";
+      view.addressDisplayStatus = display.displayStatus;
+    }
+    return view;
   },
   rotate: async ({ actor, privateCheckoutContext, deliveryId, idempotencyKey }) => {
     if (typeof deliveryId !== "string" || !/^[1-9]\d{0,19}$/.test(deliveryId) ||

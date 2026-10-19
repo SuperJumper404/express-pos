@@ -59,6 +59,7 @@ async function main() {
         assert.equal((await call(path, method, { access, module_permissions: ["orders", "stocks", "delivery"] })).status, 403, `${access} ${method} ${path}`);
       }
     }
+    for (const path of ["/delivery/address-suggestions", "/customer/address-suggestions"]) assert.equal((await call(path, "POST", { access: 0 }, { input: "60 rue Test", sessionToken: "fixture" })).status, 403);
     for (const [method, path] of [["GET", "/courier/deliveries"], ["GET", "/courier/deliveries/41"], ["POST", "/courier/deliveries/41/pickup"], ["GET", "/courier/cash-balance"]]) assert.equal((await call(path, method)).status, 200);
     for (const malformedAccess of [null, undefined]) {
       users.get(11).access = malformedAccess;

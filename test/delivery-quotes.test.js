@@ -18,7 +18,7 @@ const address = { street: "12 rue de l'\u00c9glise", postalCode: "75013", city: 
 const feature = (id = "address-12", coords = [2.41, 48.82]) => ({ type: "Feature", geometry: { type: "Point", coordinates: coords }, properties: {
   id, label: "12 Rue de l'\u00c9glise 75013 Paris", housenumber: "12", street: "Rue de l'\u00c9glise", postcode: "75013", city: "Paris", type: "housenumber", _type: "address", score: 0.95,
 } });
-const response = () => ({ status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return body; } });
+const response = () => ({ set() { return this; }, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return body; } });
 
 const reviewQuoteFixture = async (overrides = {}) => {
   const tokenCodec = buildDeliveryTokenCodec({ secret: "test-only-delivery-token-secret-32-bytes" });

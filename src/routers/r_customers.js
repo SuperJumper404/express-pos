@@ -19,6 +19,7 @@ const buildCustomersRouter = ({ controller = require("../controllers/c_customers
   router.patch("/customer/addresses/:addressId", requireCustomerSession, requireCustomerCsrf, personalController.saveAddress);
   router.delete("/customer/addresses/:addressId", requireCustomerSession, requireCustomerCsrf, personalController.deleteAddress);
   router.post("/customer/address-resolutions", requireCustomerSession, requireCustomerCsrf, personalController.resolveAddress);
+  router.post("/customer/address-suggestions", requireCustomerSession, requireCustomerCsrf, personalController.suggestAddresses);
   router.get("/delivery/customers", authentication, controller.searchProfiles);
   router.post("/delivery/customers", authentication, controller.createProfile);
   router.get("/delivery/customers/:customerId/addresses", authentication, controller.listAddresses);

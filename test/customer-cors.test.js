@@ -229,6 +229,21 @@ if (require.main === module) {
     `http://api.example.test${prefix}//${route}`, `${prefix.toUpperCase()}//${route.toUpperCase()}/?routing=1`,
   ];
 
+  test("Google personal suggestions enforce cookie CSRF and strict origin preflight", async () => {
+    await routingWitness(async ({ request, prefix, origin, headers, csrfToken, mutations }) => {
+      const target = `${prefix}/customer/address-suggestions?shopId=7`;
+      const before = mutations.length;
+      assert.equal((await request(target, { method: "POST", headers })).status, 403);
+      assert.equal(mutations.length, before);
+      const valid = await request(target, { method: "POST", headers: { ...headers, "X-CSRF-Token": csrfToken } });
+      assert.equal(valid.status, 200);
+      assert.equal(valid.data.name, "suggestAddresses");
+      assert.equal(valid.data.customerId, "51");
+      for (const Origin of [origin, "https://evil.test"]) assert.equal((await request(target, { method: "OPTIONS", headers: {
+        Origin, "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type,x-csrf-token" } })).status, Origin === origin ? 204 : 403);
+    });
+  });
+
   test("I1 actual index enforces public customer origin policy for every accepted request target", async t => {
     await routingWitness(async ({ request, prefix, origin, mutations }) => {
       for (const route of ["customer-auth/challenges", "customer-auth/verify"]) {

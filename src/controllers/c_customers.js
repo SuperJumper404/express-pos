@@ -110,11 +110,20 @@ const buildPersonalCustomersController = ({ customers, quotes,
     saveAddress: endpoint(req => service(req).saveAddress({ ...scope(req), addressId: req.params.addressId || null,
       ...bodyFields(req, ["addressResolutionToken", "complement", "instructions", "makeDefault"]) })),
     deleteAddress: endpoint(req => { bodyFields(req, []); return service(req).deleteAddress({ ...scope(req), addressId: req.params.addressId }); }),
+    suggestAddresses: endpoint(req => {
+      const body = bodyFields(req, ["input", "sessionToken"]);
+      return (quotes || require("../modules/m_deliveryQuotes").buildDeliveryQuotes()).suggestAddresses({
+        shopId: req.customerSession.shopId, input: body.input, sessionToken: body.sessionToken });
+    }),
     resolveAddress: endpoint(req => {
-      const body = bodyFields(req, ["addressId", "address", "candidateId"]);
+      const body = bodyFields(req, ["addressId", "address", "candidateId", "selectionToken"]);
       if (Object.prototype.hasOwnProperty.call(body, "addressId")) {
         if (Object.keys(body).length !== 1) throw new DomainError(400, "CUSTOMER_REQUEST_INVALID", "Choose a stored or new address");
         return service(req).resolveStoredAddress({ ...scope(req), addressId: body.addressId });
+      }
+      if (Object.prototype.hasOwnProperty.call(body, "selectionToken")) {
+        if (Object.keys(body).length !== 1) throw new DomainError(400, "CUSTOMER_REQUEST_INVALID", "Choose a stored or suggested address");
+        return (quotes || require("../modules/m_deliveryQuotes").buildDeliveryQuotes()).resolveAddress({ shopId: req.customerSession.shopId, selectionToken: body.selectionToken });
       }
       if (!body.address || typeof body.address !== "object" || Array.isArray(body.address)
         || Object.keys(body.address).some(key => !["street", "postalCode", "city", "country", "complement", "instructions"].includes(key))) {

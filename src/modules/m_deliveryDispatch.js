@@ -121,7 +121,8 @@ const repository = {
     "UPDATE users SET courier_available = ? WHERE shopid = ? AND id = ?", [available ? 1 : 0, shopId, id]),
 };
 
-const buildDeliveryDispatch = ({ repository: repo = repository, runInTransaction = withTransaction, clock = () => new Date() } = {}) => {
+const buildDeliveryDispatch = ({ repository: repo = repository, runInTransaction = withTransaction, clock = () => new Date(),
+  addressViews = require("../services/deliveryAddressViews").buildDeliveryAddressViews() } = {}) => {
   const runMutation = async work => {
     for (let attempt = 0; ; attempt++) {
       let rolledBackDeadlock;
@@ -270,7 +271,12 @@ const buildDeliveryDispatch = ({ repository: repo = repository, runInTransaction
   };
   return {
     assign: mutate("assign"), pickup: mutate("pickup"), reportIssue: mutate("reportIssue"), resolveIssue: mutate("resolveIssue"), deliver: mutate("deliver"), correctTerminal: mutate("correctTerminal"),
-    get: ({ actor, deliveryId }) => runInTransaction(async connection => project(await resolve(actor, deliveryId, connection), connection)),
+    get: async ({ actor, deliveryId }) => {
+      const view = await runInTransaction(async connection => project(await resolve(actor, deliveryId, connection), connection));
+      if (!view.addressSnapshot) return view;
+      const display = await addressViews.hydrate({ shopId: actor.shopId, addressSnapshot: view.addressSnapshot });
+      return { ...view, addressSnapshot: display.addressSnapshot, addressDisplayStatus: display.displayStatus };
+    },
     list: async ({ actor }) => {
       const currentActor = await runInTransaction(connection => reload(actor, connection));
       const ids = await repo.listIds({ actor: currentActor });

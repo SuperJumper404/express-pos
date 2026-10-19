@@ -53,4 +53,23 @@ const validateAddressResolution = (token, now = new Date(), { tokenCodec = build
     || (shopId !== undefined && String(payload.shopId) !== String(shopId)) || !validCoordinates(payload.addressSnapshot)) throw addressInvalid();
   return payload.addressSnapshot;
 };
-module.exports = { normalizeAddress, buildDeliveryTokenCodec, validTokenTime, signAddressResolution, validateAddressResolution };
+const validatePlaceClaims = (payload, shopId) => {
+  const { isGoogleReference } = require("./deliveryAddressStorage");
+  const { validSessionToken } = require("../services/googleDeliveryPlaces");
+  if (!payload || payload.kind !== "place_selection" || !isGoogleReference({ provider: "google_places", placeId: payload.placeId })
+    || String(payload.shopId) !== String(shopId) || !validSessionToken(payload.sessionToken)
+    || typeof payload.label !== "string" || !payload.label.trim() || payload.label.length > 1024 || /[\x00-\x1f\x7f]/.test(payload.label)) throw addressInvalid();
+};
+const signPlaceSelection = ({ shopId, placeId, label, sessionToken, now = new Date(), tokenCodec = buildDeliveryTokenCodec() }) => {
+  const payload = { kind: "place_selection", shopId, placeId, label, sessionToken,
+    issuedAt: new Date(now).toISOString(), expiresAt: new Date(new Date(now).getTime() + 900000).toISOString() };
+  validatePlaceClaims(payload, shopId);
+  return tokenCodec.sign(payload);
+};
+const validatePlaceSelection = (token, now = new Date(), { tokenCodec = buildDeliveryTokenCodec(), shopId } = {}) => {
+  const payload = tokenCodec.verify(token);
+  validatePlaceClaims(payload, shopId);
+  if (!validTokenTime(payload, now, 900000)) throw addressInvalid();
+  return payload;
+};
+module.exports = { normalizeAddress, buildDeliveryTokenCodec, validTokenTime, signAddressResolution, validateAddressResolution, signPlaceSelection, validatePlaceSelection };

@@ -28,11 +28,24 @@ const buildDeliveryQuotes = ({
   places = require("../services/googleDeliveryPlaces").googleDeliveryPlaces,
   clock = () => new Date(), tokenCodec = buildDeliveryTokenCodec(),
 } = {}) => ({
-  async resolveAddress({ shopId, address, candidateId }) {
+  async suggestAddresses({ shopId, input, sessionToken }) {
+    if (!positiveId(shopId) || typeof input !== "string" || input.trim().length < 3 || input.length > 255 || /[\x00-\x1f\x7f]/.test(input)
+      || !require("../services/googleDeliveryPlaces").validSessionToken(sessionToken)) throw invalidRequest();
+    tokenCodec.sign({ kind: "preflight" });
+    const suggestions = await places.suggest({ shopId: Number(shopId), input: input.trim().normalize("NFC"), sessionToken });
+    return { suggestions: suggestions.slice(0, 5).map(row => ({ ...row, selectionToken: require("../helpers/deliveryAddress").signPlaceSelection({
+      shopId, placeId: row.placeId, label: row.label, sessionToken, now: clock(), tokenCodec }) })) };
+  },
+  async resolveAddress({ shopId, address, candidateId, selectionToken }) {
     if (!positiveId(shopId)) throw invalidRequest();
     // Validate lazy signer configuration before consuming supplier quota.
     tokenCodec.sign({ kind: "preflight" });
-    const addressSnapshot = await geocoder.resolve({ shopId, address, candidateId });
+    let addressSnapshot;
+    if (selectionToken !== undefined) {
+      if (address !== undefined || candidateId !== undefined) throw invalidRequest();
+      const selected = require("../helpers/deliveryAddress").validatePlaceSelection(selectionToken, clock(), { shopId, tokenCodec });
+      addressSnapshot = { ...await places.resolve({ shopId: Number(shopId), placeId: selected.placeId, sessionToken: selected.sessionToken }), selectedLabel: selected.label };
+    } else addressSnapshot = await geocoder.resolve({ shopId, address, candidateId });
     const now = clock();
     return {
       addressSnapshot,

@@ -19,6 +19,7 @@ const buildDeliveryController = ({
   tracking = require("../modules/m_deliveryTracking").buildDeliveryTracking(),
 } = {}) => {
   const endpoint = work => async (req, res) => {
+    res.set("Cache-Control", "no-store");
     try { return custom(res, 200, "OK", null, await work(req)); }
     catch (error) {
       if (error instanceof DomainError) {
@@ -80,10 +81,18 @@ const buildDeliveryController = ({
         remittanceId: body.remittanceId, deltaDueCents: body.deltaDueCents, reason: body.reason, idempotencyKey: body.idempotencyKey });
     }),
     courierAvailability: deliveryEndpoint(req => dispatch.availability({ actor: deliveryActor(req), courierId: Number(req.params.id), available: (req.body || {}).available })),
+    suggestAddresses: endpoint(req => {
+      requireQuoteActor(req);
+      const body = req.body || {};
+      if (Object.keys(body).some(key => !["input", "sessionToken"].includes(key))) throw new DomainError(400, "DELIVERY_REQUEST_INVALID", "Invalid address search");
+      return quotes.suggestAddresses({ shopId: req.shopid, input: body.input, sessionToken: body.sessionToken });
+    }),
     resolveAddress: endpoint(req => {
       requireQuoteActor(req);
       const body = req.body || {};
-      return quotes.resolveAddress({ shopId: req.shopid, address: body.address, candidateId: body.candidate_id });
+      if (Object.keys(body).some(key => !["address", "candidate_id", "selectionToken"].includes(key))
+        || (Object.prototype.hasOwnProperty.call(body, "selectionToken") && Object.keys(body).length !== 1)) throw new DomainError(400, "DELIVERY_REQUEST_INVALID", "Choose a stored or suggested address");
+      return quotes.resolveAddress({ shopId: req.shopid, address: body.address, candidateId: body.candidate_id, selectionToken: body.selectionToken });
     }),
     createQuote: endpoint(req => {
       requireQuoteActor(req);
