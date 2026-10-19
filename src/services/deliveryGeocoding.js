@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const http = require("http");
 const https = require("https");
+const { urlToHttpOptions } = require("url");
 const DomainError = require("../helpers/domainError");
 const { normalizeAddress } = require("../helpers/deliveryAddress");
 const { validCoordinates } = require("../helpers/deliveryPricing");
@@ -36,7 +37,8 @@ const postalCandidate = (feature, address) => {
 };
 const requestJson = (url, { timeoutMs = 5000 } = {}) => new Promise((resolve, reject) => {
   const transport = url.protocol === "https:" ? https : http;
-  const request = transport.get(url, { headers: { Accept: "application/json" } }, response => {
+  // Mailjet's proxy dependency patches get() and does not support the URL overload.
+  const request = transport.get({ ...urlToHttpOptions(url), headers: { Accept: "application/json" } }, response => {
     if (response.statusCode !== 200) {
       response.resume();
       request.destroy(unavailable());

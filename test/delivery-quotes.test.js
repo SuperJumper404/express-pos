@@ -115,7 +115,44 @@ async function reviewRegressions() {
   assert.equal(failures.length, 0, "Task2 review regressions must all pass");
 }
 
+function mailjetTransportRegression() {
+  require("child_process").execFileSync(process.execPath, ["-e", `
+    const assert = require('assert/strict');
+    const http = require('http');
+    const https = require('https');
+    require('node-mailjet');
+    const { requestJson } = require('./src/services/deliveryGeocoding');
+    (async () => {
+      let requests = 0;
+      const server = http.createServer((req, res) => {
+        requests++;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ method: req.method, path: req.url, accept: req.headers.accept }));
+      });
+      await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+      const original = https.request;
+      // Redirect only the TLS boundary; keep Mailjet's real patched get overload.
+      https.request = (options, callback) => http.request({ ...options, protocol: 'http:' }, callback);
+      try {
+        for (const protocol of ['http', 'https']) {
+          const url = new URL(protocol + '://127.0.0.1:' + server.address().port + '/geocodage/search?q=60+rue+Fran%C3%A7ois+Ier&postcode=75008');
+          assert.deepEqual(await requestJson(url, { timeoutMs: 1000 }), {
+            method: 'GET', path: '/geocodage/search?q=60+rue+Fran%C3%A7ois+Ier&postcode=75008', accept: 'application/json'
+          });
+        }
+        assert.equal(requests, 2, 'one request per lookup, without automatic retries');
+        console.log('PASS geocoding transport after real Mailjet bootstrap (HTTP and HTTPS)');
+      } finally {
+        https.request = original;
+        server.closeAllConnections();
+        await new Promise(resolve => server.close(resolve));
+      }
+    })().catch(error => { console.error(error); process.exitCode = 1; });
+  `], { cwd: require("path").join(__dirname, ".."), env: { ...process.env, ENV_FILE: "NUL" }, timeout: 10000, stdio: "inherit" });
+}
+
 async function unitTests() {
+  mailjetTransportRegression();
   for (const secret of ["", "too-short"]) {
     let geocoderCalls = 0;
     const unconfigured = buildDeliveryQuotes({
