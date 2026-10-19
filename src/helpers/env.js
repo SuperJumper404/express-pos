@@ -61,6 +61,7 @@ module.exports = {
   parsePositiveIntegerEnv,
   // Delivery config is read at the service boundary; disabled legacy boot needs no new secrets.
   getDeliveryConfig: () => ({
+    googlePlacesApiKey: process.env.GOOGLE_PLACES_API_KEY,
     tokenSecret: process.env.DELIVERY_TOKEN_SECRET,
     geocodingBaseUrl: process.env.DELIVERY_GEOCODING_BASE_URL || "https://data.geopf.fr/geocodage",
   }),
