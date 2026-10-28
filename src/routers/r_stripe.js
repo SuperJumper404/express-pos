@@ -1,12 +1,14 @@
 const express = require("express");
 const stripe = require("../controllers/c_stripe");
 const stripeTerminal = require("../controllers/c_stripeTerminal");
+const terminalHistory = require("../controllers/c_terminalPaymentHistory");
 const orderEditing = require("../controllers/c_orderEditing");
 const { attachOptionalCustomerSession, requireCustomerCsrfIfPresent } = require("../helpers/middleware/customerAuth");
 const {
   authentication,
   authAdmin,
   authorizeCashRegister,
+  authorizeHistory,
 } = require("../helpers/middleware/auth");
 
 const routers = express.Router();
@@ -22,6 +24,14 @@ routers
   .post("/stripe/terminal/payments", authentication, authorizeCashRegister, stripeTerminal.startPayment)
   .get("/stripe/terminal/payments/:id", authentication, authorizeCashRegister, stripeTerminal.getPaymentStatus)
   .post("/stripe/terminal/payments/:id/cancel", authentication, authorizeCashRegister, stripeTerminal.cancelPayment)
+  .get("/stripe/terminal/history", authentication, authorizeHistory, terminalHistory.listEntries)
+  .get("/stripe/terminal/standalone-payments/attachment-candidates", authentication, authorizeHistory, terminalHistory.listAttachmentCandidates)
+  .get("/stripe/terminal/standalone-payments/:id/attachments", authentication, authorizeHistory, terminalHistory.getAttachments)
+  .post("/stripe/terminal/standalone-payments/:id/attachments", authentication, authorizeHistory, terminalHistory.addAttachments)
+  .delete("/stripe/terminal/standalone-payments/:id/attachments/:archiveId", authentication, authorizeHistory, terminalHistory.removeAttachment)
+  .post("/stripe/terminal/standalone-payments", authentication, authorizeCashRegister, stripeTerminal.startStandalonePayment)
+  .get("/stripe/terminal/standalone-payments/:id", authentication, authorizeCashRegister, stripeTerminal.getStandalonePaymentStatus)
+  .post("/stripe/terminal/standalone-payments/:id/cancel", authentication, authorizeCashRegister, stripeTerminal.cancelStandalonePayment)
   .get("/stripe/terminal/kiosk/current-reader", authentication, stripeTerminal.getKioskCurrentReader)
   .post("/stripe/terminal/kiosk/payments", authentication, stripeTerminal.startKioskPayment)
   .get("/stripe/terminal/kiosk/payments/:id", authentication, stripeTerminal.getKioskPaymentStatus)

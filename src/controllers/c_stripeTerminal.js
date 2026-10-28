@@ -179,6 +179,11 @@ const buildStripeTerminalController = ({ readerService, paymentService, kioskPay
     }, { admin: false, payment: true }),
     getPaymentStatus: handle("getPaymentStatus", (req) => ({ paymentId: req.params.id }), { admin: false, payment: true }),
     cancelPayment: handle("cancelPayment", (req) => ({ paymentId: req.params.id }), { admin: false, payment: true }),
+    startStandalonePayment: handle("startStandalonePayment", (req) => ({
+      amountCents: (req.body || {}).amountCents, attemptKey: (req.body || {}).attemptKey,
+    }), { admin: false, payment: true, status: 201 }),
+    getStandalonePaymentStatus: handle("getStandalonePaymentStatus", (req) => ({ paymentId: req.params.id }), { admin: false, payment: true }),
+    cancelStandalonePayment: handle("cancelStandalonePayment", (req) => ({ paymentId: req.params.id }), { admin: false, payment: true }),
     getKioskCurrentReader: kioskHandle("getCurrentReader", () => ({})),
     startKioskPayment: kioskHandle("startPayment", (req) => ({
       checkoutPayload: pickCheckoutPayload(req.body || {}),

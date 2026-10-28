@@ -130,7 +130,7 @@ const buildStripeTerminalKioskPaymentService = ({
     const session = forUpdate && store.lockPaymentSession
       ? (await store.lockPaymentSession({ shopId, paymentId })).payment
       : await store.findPaymentSession({ shopId, paymentId });
-    if (!session || Number(session.shopid) !== shopId) fail("TERMINAL_PAYMENT_NOT_FOUND");
+    if (!session || Number(session.shopid) !== shopId || session.payment_kind === "standalone") fail("TERMINAL_PAYMENT_NOT_FOUND");
     const { order } = await orderForSession(session, store);
     if (!order) {
       if (!active(session)) return session;
@@ -257,6 +257,7 @@ const buildStripeTerminalKioskPaymentService = ({
   };
 
   const recoverActivePayment = async (session, reader = null) => {
+    if (session.payment_kind === "standalone") return false;
     if (!oldEnoughForRecovery(session)) return false;
     if (!session.stripe_payment_intent_id) {
       await cancelPreparedKioskPayment(session);

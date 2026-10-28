@@ -257,6 +257,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null, loyalty = n
        SET status = 'failed', failure_code = ?, failure_message = ?
        WHERE shopid = ? AND terminal_reader_id = ?
          AND status = 'creating' AND stripe_payment_intent_id IS NULL
+         AND payment_kind = 'order'
          AND created_at < DATE_SUB(NOW(), INTERVAL ? SECOND)`,
       [
         "TERMINAL_PAYMENT_FAILED",
@@ -314,6 +315,31 @@ const buildStripeTerminalModule = ({ connection, lockContext = null, loyalty = n
     );
     if (result.affectedRows !== 1) throw new Error("Invalid Terminal reader assignment");
     return result;
+  };
+
+  const createStandalonePaymentSession = async ({ shopId, readerId, cashierUserId, idempotencyKey,
+    connectedAccountId, amountCents, applicationFeeAmount }) => {
+    requireShopId(shopId);
+    const result = await query(
+      `INSERT INTO stripe_terminal_payments
+         (shopid, terminal_reader_id, cashier_user_id, idempotency_key, stripe_connected_account_id,
+          amount_cents, application_fee_amount, currency, status, payment_kind)
+       SELECT r.shopid, r.id, u.id, ?, ?, ?, ?, 'eur', 'creating', 'standalone'
+       FROM stripe_terminal_readers r
+       JOIN users u ON u.id = r.assigned_user_id AND u.shopid = r.shopid
+       WHERE r.shopid = ? AND r.id = ? AND r.assigned_user_id = ?
+         AND r.is_active = 1 AND u.status = 1`,
+      [idempotencyKey, connectedAccountId, amountCents, applicationFeeAmount, shopId, readerId, cashierUserId],
+    );
+    if (result.affectedRows !== 1) throw new Error("Invalid Terminal reader assignment");
+    return result;
+  };
+
+  const countPaymentAttachments = async ({ shopId, paymentId }) => {
+    requireShopId(shopId);
+    const rows = await query(`SELECT COUNT(*) AS total FROM stripe_terminal_payment_attachments
+      WHERE shopid = ? AND terminal_payment_id = ?`, [shopId, paymentId]);
+    return Number(rows[0].total);
   };
 
   const findPaymentSession = async ({ shopId, paymentId, forUpdate = false }) => {
@@ -608,6 +634,23 @@ const buildStripeTerminalModule = ({ connection, lockContext = null, loyalty = n
     return { finalized: true };
   };
 
+  const finalizeStandalonePaymentSucceeded = async ({ shopId, paymentId,
+    stripePaymentIntentId, stripeChargeId = null, cardReceiptDetails = null, timestamp }) => {
+    const payment = await findPaymentSession({ shopId, paymentId, forUpdate: true });
+    if (!payment || payment.payment_kind !== "standalone" || !stripePaymentIntentId
+      || payment.stripe_payment_intent_id !== stripePaymentIntentId) throw new Error("Terminal payment cannot be finalized");
+    if (payment.status === "succeeded") return { finalized: false };
+    const result = await query(
+      `UPDATE stripe_terminal_payments SET status = 'succeeded', stripe_charge_id = ?,
+        card_receipt_details = ?, confirmed_at = COALESCE(confirmed_at, ?)
+       WHERE shopid = ? AND id = ? AND payment_kind = 'standalone'
+         AND stripe_payment_intent_id = ? AND status <> 'succeeded'`,
+      [stripeChargeId, cardReceiptDetails, timestamp, shopId, paymentId, stripePaymentIntentId],
+    );
+    if (result.affectedRows !== 1) throw new Error("Terminal payment finalization incomplete");
+    return { finalized: true };
+  };
+
   const markKioskPaymentCounterFallback = async ({ shopId, paymentId, status, payment = "Paiement au comptoir" }) => {
     requireShopId(shopId);
     if (!["failed", "canceled"].includes(status)) throw new Error("Invalid Terminal fallback status");
@@ -738,13 +781,13 @@ const buildStripeTerminalModule = ({ connection, lockContext = null, loyalty = n
     findLocation, createLocation, updateLocation,
     listReaders, findReader, findAssignedReader, findAssignedReaderByServicePoint,
     createReader, updateReader,
-    findActivePaymentForReader, createPaymentSession, createKioskPaymentSession,
+    findActivePaymentForReader, createPaymentSession, createKioskPaymentSession, createStandalonePaymentSession, countPaymentAttachments,
     findPaymentSession,
     findPaymentByIntent, findPaymentByIdempotencyKey, updatePaymentSession,
     createAllocations, listPaymentAllocations, findOrderAllocation,
     findKioskTerminalOrder, findActiveKioskPaymentForOrder,
     lockReaderAndOrders, lockPaymentSession, finalizePaymentSucceeded,
-    finalizeKioskPaymentSucceeded, markKioskPaymentCounterFallback,
+    finalizeKioskPaymentSucceeded, finalizeStandalonePaymentSucceeded, markKioskPaymentCounterFallback,
     reserveOrderRefund, recordOrderRefund,
   };
 };

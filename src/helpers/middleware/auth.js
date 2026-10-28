@@ -38,12 +38,13 @@ const buildModuleAuthorization = ({
     if (Array.isArray(permissions) && permissions.includes(moduleKey)) return next();
     return custom(res, 403, "Acces refuse.", {}, null);
   } catch (error) {
-    return failed(res, "Erreur serveur.", moduleKey === "cashregister" ? "TERMINAL_INTERNAL_ERROR" : error.message);
+    return failed(res, "Erreur serveur.", ["cashregister", "history"].includes(moduleKey) ? "TERMINAL_INTERNAL_ERROR" : error.message);
   }
 };
 
 const authorizeStocks = buildModuleAuthorization({ moduleKey: "stocks" });
 const authorizeCashRegister = buildModuleAuthorization({ moduleKey: "cashregister" });
+const authorizeHistory = buildModuleAuthorization({ moduleKey: "history" });
 const buildAuthentication = ({ findUserByIdAndShop = defaultFindUserByIdAndShop } = {}) => (req, res, next) => {
   const authorization = req.headers.authorization;
   if (!authorization) return custom(res, 401, "Token requis, veuillez vous reconnecter.", {}, null);
@@ -102,6 +103,7 @@ module.exports = {
   buildModuleAuthorization,
   authorizeStocks,
   authorizeCashRegister,
+  authorizeHistory,
   authentication,
   authAdmin: (req, res, next) => {
     // console.log("Incomiing rqg ",req)
