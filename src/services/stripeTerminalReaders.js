@@ -264,8 +264,16 @@ const buildStripeTerminalReaderService = ({ stripe, terminalStore, staffStore })
     const user = await staffStore.findUserByIdAndShop({ id: userId, shopId });
     if (!activeStaff(user, shopId, userId)) fail("TERMINAL_FORBIDDEN");
     const reader = await terminalStore.findAssignedReader({ shopId, userId });
-    return reader && Number(reader.shopid) === shopId && Number(reader.is_active) === 1
-      && Number(reader.assigned_user_id) === userId ? readerDto(reader) : null;
+    if (!reader || Number(reader.shopid) !== shopId || Number(reader.is_active) !== 1
+      || Number(reader.assigned_user_id) !== userId) return null;
+    const result = readerDto(reader);
+    const payment = await terminalStore.findActivePaymentForReader({ shopId, readerId: reader.id });
+    if (payment && Number(payment.shopid) === shopId && Number(payment.cashier_user_id) === userId
+      && Number(payment.terminal_reader_id) === Number(reader.id) && ["creating", "processing"].includes(payment.status)) {
+      result.activePayment = { id: payment.id, paymentKind: payment.payment_kind || "order",
+        status: payment.status, amountCents: payment.amount_cents, currency: payment.currency };
+    }
+    return result;
   });
 
   return { listReaders, registerReader, assignReader, setReaderActive, refreshReaders, getCurrentReader };

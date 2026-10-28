@@ -31,6 +31,7 @@ const fixture = ({ readers = [], location = null, users } = {}) => {
     ],
   };
   const terminalStore = {
+    findActivePaymentForReader: async () => state.activePayment || null,
     findLocation: async ({ shopId }) => state.location && state.location.shopid === shopId ? state.location : null,
     createLocation: async (data) => {
       state.writes.push(data);
@@ -287,6 +288,17 @@ test("refresh retrieves only local shop readers and preserves assignment fields"
   assert.strictEqual(result[0].assignedServicePointId, 44);
   assert.strictEqual(f.state.writes[0].assignedServicePointId, undefined);
   assert(!JSON.stringify([result, f.state.writes]).includes("raw-secret"));
+});
+
+test("current reader exposes only its owner's active payment for recovery without Stripe secrets", async () => {
+  const f = fixture({ readers: [readerRow()] });
+  f.state.activePayment = { id: 41, shopid: 7, cashier_user_id: 11, terminal_reader_id: 21,
+    payment_kind: 'order', status: 'processing', amount_cents: 2200, currency: 'eur',
+    stripe_payment_intent_id: 'pi_secret', idempotency_key: 'private-key' };
+  const reader = await f.service.getCurrentReader({ shopId: 7, userId: 11 });
+  assert.deepStrictEqual(reader.activePayment, { id: 41, paymentKind: 'order', status: 'processing', amountCents: 2200, currency: 'eur' });
+  f.state.activePayment.cashier_user_id = 12;
+  assert.strictEqual((await f.service.getCurrentReader({ shopId: 7, userId: 11 })).activePayment, undefined);
 });
 
 test("current reader is resolved from staff identity and returns null without assignment", async () => {

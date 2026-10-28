@@ -74,7 +74,7 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
   };
   const stripeCall = async (operation) => {
     try { return await operation(); }
-    catch (error) { fail("TERMINAL_STRIPE_ERROR"); }
+    catch (error) { fail(error.code === "terminal_reader_busy" ? "TERMINAL_READER_BUSY" : "TERMINAL_STRIPE_ERROR"); }
   };
   const dto = async (session, store = terminalStore, intent = null) => {
     if (session.payment_kind === "standalone") {
@@ -166,12 +166,23 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
     if (active(current) && current.stripe_payment_intent_id === session.stripe_payment_intent_id
       && !["succeeded", "canceled"].includes(intent.status)
       && matchingAction(remote, session.stripe_payment_intent_id) && remote.action.status === "in_progress") {
-      const canceled = await stripeCall(() => stripe.terminal.readers.cancelAction(reader.stripe_reader_id, {}, {
-        idempotencyKey: `${session.idempotency_key}:cancel-action`,
-      }));
+      let canceled;
+      let cancellationError;
+      try {
+        canceled = await stripeCall(() => stripe.terminal.readers.cancelAction(reader.stripe_reader_id, {}, {
+          idempotencyKey: `${session.idempotency_key}:cancel-action`,
+        }));
+      } catch (error) { cancellationError = error; }
       if (!canceled || canceled.id !== reader.stripe_reader_id
         || (matchingAction(canceled, session.stripe_payment_intent_id) && canceled.action.status === "in_progress")) {
-        fail("TERMINAL_STRIPE_ERROR");
+        // A delayed response (or cached action snapshot) can outlive the actual
+        // cancellation. Confirm the live reader before retaining its lock.
+        const observed = await stripeCall(() => stripe.terminal.readers.retrieve(reader.stripe_reader_id));
+        if (!observed || observed.id !== reader.stripe_reader_id
+          || (matchingAction(observed, session.stripe_payment_intent_id) && observed.action.status === "in_progress")) {
+          if (cancellationError) throw cancellationError;
+          fail("TERMINAL_STRIPE_ERROR");
+        }
       }
       // Collection may have succeeded while cancellation was requested.
       intent = await stripeCall(() => stripe.paymentIntents.retrieve(session.stripe_payment_intent_id));
@@ -308,6 +319,7 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
         if (!matchingAction(currentReader, intent.id) || currentReader.action.status !== "in_progress") {
           await stripeCall(() => stripe.terminal.readers.processPaymentIntent(reader.stripe_reader_id, {
             payment_intent: intent.id,
+            process_config: { enable_customer_cancellation: true },
           }, { idempotencyKey: `${session.idempotency_key}:process` }));
         }
         await databaseTransaction(async (transactionStore) => {
@@ -462,6 +474,7 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
       expiredCancel = intent.status === "canceled";
     }
     let failedAction = false;
+    let customerCanceled = false;
     if (!expiredCancel && session.status === "processing" && intent.status === "requires_payment_method") {
       const reader = await terminalStore.findReader({ shopId: session.shopid, readerId: session.terminal_reader_id });
       if (!reader) fail("TERMINAL_NO_READER");
@@ -469,12 +482,13 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
       if (matchingAction(remote, intent.id) && remote.action.status === "failed") {
         intent = await cancelRemote(session, reader);
         failedAction = intent.status === "canceled";
+        customerCanceled = failedAction && remote.action.failure_code === "customer_canceled";
       }
     }
     return databaseTransaction(async (store) => {
       const current = await payment(input, store, true);
       if (!active(current)) return dto(current, store);
-      if (expiredCancel) return dto(await reconcile(current, intent, store), store, intent);
+      if (expiredCancel || customerCanceled) return dto(await reconcile(current, intent, store), store, intent);
       if (failedAction) {
         await markFailed(current, "TERMINAL_PAYMENT_FAILED", store);
         return dto(await payment(input, store), store);

@@ -166,7 +166,7 @@ test("aggregates persisted order amounts, allocates discount and creates a platf
     amount: 1750, currency: "eur", payment_method_types: ["card_present"], capture_method: "automatic", application_fee_amount: 88,
     on_behalf_of: "acct_shop", transfer_data: { destination: "acct_shop" }, metadata: { terminal_payment_id: "41", shop_id: "7" },
   });
-  assert.deepStrictEqual(f.state.calls.find((c) => c.name === "process").args.slice(0, 2), ["tmr_server", { payment_intent: "pi_terminal" }]);
+  assert.deepStrictEqual(f.state.calls.find((c) => c.name === "process").args.slice(0, 2), ["tmr_server", { payment_intent: "pi_terminal", process_config: { enable_customer_cancellation: true } }]);
   assert.deepStrictEqual(result, { id: 41, readerId: 21, status: "processing", amountCents: 1750, currency: "eur", orderIds: [12, 31], failureCode: null, failureMessage: null });
   assert.deepStrictEqual(f.state.allocations.map((a) => [a.order_id, a.amount_cents]), [[12, 700], [31, 1050]]);
   for (const c of f.state.calls) assert(!c.args.some((a) => a && a.stripeAccount));
@@ -825,6 +825,30 @@ test("cancel requires Stripe to confirm action cancellation before canceling the
   await rejects(() => f.service.cancelPayment(scope), "TERMINAL_STRIPE_ERROR");
   assert.strictEqual(f.state.sessions[0].status, "processing");
   assert(!f.state.calls.some((c) => c.name === "cancel-intent"));
+});
+
+test("cancel verifies the reader again when Stripe returns a stale action snapshot", async () => {
+  const f = fixture(); await f.service.startPayment(input);
+  f.stripe.terminal.readers.cancelAction = async () => {
+    const snapshot = clone(f.state.remote);
+    f.state.remote.action = null;
+    return snapshot;
+  };
+  assert.strictEqual((await f.service.cancelPayment(scope)).status, "canceled");
+});
+
+test("payment collection enables cancellation on the physical reader", async () => {
+  const f = fixture(); await f.service.startPayment(input);
+  const call = f.state.calls.find(c => c.name === "process");
+  assert.strictEqual(call.args[1].process_config.enable_customer_cancellation, true);
+});
+
+test("customer cancellation is reconciled as canceled rather than a failed charge", async () => {
+  const f = fixture(); await f.service.startPayment(input);
+  f.state.remote.action.status = "failed";
+  f.state.remote.action.failure_code = "customer_canceled";
+  assert.strictEqual((await f.service.getPaymentStatus(scope)).status, "canceled");
+  assert.notStrictEqual(f.state.orders[0].payment_status, "paid");
 });
 
 test("cancel reconciles a success racing with intent cancellation", async () => {

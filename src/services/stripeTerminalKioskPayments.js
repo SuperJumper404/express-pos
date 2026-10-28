@@ -314,6 +314,7 @@ const buildStripeTerminalKioskPaymentService = ({
       const handedOff = await store.withReaderActionLock({ shopId: session.shopid, readerId: reader.id }, async () => {
         await stripeCall(() => stripe.terminal.readers.processPaymentIntent(reader.stripe_reader_id, {
           payment_intent: intent.id,
+          process_config: { enable_customer_cancellation: true },
         }, { idempotencyKey: `${session.idempotency_key}:process` }));
         await databaseTransaction((transactionStore) => update(session, {
           status: "processing",
