@@ -21,7 +21,7 @@ const fixture = () => {
       try { return await work(store); } finally { release(); }
     },
     withPaymentCreationLock: async ({ paymentId }, work) => {
-      if (locks.has(paymentId)) return null;
+      if (locks.has(paymentId) || state.creationLockHeld) return null;
       locks.add(paymentId); try { return await work(store); } finally { locks.delete(paymentId); }
     },
     withReaderActionLock: async (data, work) => work(store),
@@ -34,7 +34,7 @@ const fixture = () => {
       state.sessions.push({ id, shopid: data.shopId, cashier_user_id: data.cashierUserId, terminal_reader_id: data.readerId,
         payment_kind: 'standalone', idempotency_key: data.idempotencyKey, stripe_connected_account_id: data.connectedAccountId,
         amount_cents: data.amountCents, application_fee_amount: data.applicationFeeAmount, currency: 'eur', status: 'creating',
-        stripe_payment_intent_id: null, created_at: new Date().toISOString(), confirmed_at: null });
+        stripe_payment_intent_id: null, stripe_create_submitted_at: null, created_at: new Date().toISOString(), confirmed_at: null });
       return { affectedRows: 1, insertId: id };
     },
     findPaymentSession: async ({ shopId, paymentId }) => clone(state.sessions.find(row => row.shopid === shopId && row.id === paymentId)),
@@ -42,7 +42,7 @@ const fixture = () => {
     updatePaymentSession: async data => {
       const row = state.sessions.find(row => row.id === data.paymentId && row.shopid === data.shopId);
       if (!row || row.status === 'succeeded') return { affectedRows: 0 };
-      for (const [key, column] of Object.entries({ stripePaymentIntentId: 'stripe_payment_intent_id', status: 'status', failureCode: 'failure_code' })) {
+      for (const [key, column] of Object.entries({ stripePaymentIntentId: 'stripe_payment_intent_id', stripeCreateSubmittedAt: 'stripe_create_submitted_at', status: 'status', failureCode: 'failure_code' })) {
         if (data[key] !== undefined) row[column] = data[key];
       }
       return { affectedRows: 1 };
@@ -99,6 +99,45 @@ const fixture = () => {
   await assert.rejects(() => f.service.getStandalonePaymentStatus({ ...scope, cashierUserId: 99 }), error => error.code === 'TERMINAL_PAYMENT_NOT_FOUND');
   for (const amountCents of [0, 49, 100000000, 50.5, '5000', NaN]) await assert.rejects(() => f.service.startStandalonePayment({ ...input, amountCents }), error => error.code === 'TERMINAL_INVALID_INPUT');
   for (const attemptKey of ['', 'wrong', 12, null]) await assert.rejects(() => f.service.startStandalonePayment({ ...input, attemptKey }), error => error.code === 'TERMINAL_INVALID_INPUT');
+
+  for (const preflight of ['offline', 'busy']) {
+    const unsubmitted = fixture();
+    if (preflight === 'offline') unsubmitted.state.remote.status = 'offline';
+    else unsubmitted.state.remote.action = { type: 'process_payment_intent', status: 'in_progress', process_payment_intent: { payment_intent: 'pi_external' } };
+    await assert.rejects(() => unsubmitted.service.startStandalonePayment(input), error => error.code === (preflight === 'offline' ? 'TERMINAL_READER_OFFLINE' : 'TERMINAL_READER_BUSY'));
+    assert.strictEqual(unsubmitted.state.calls.filter(name => name === 'create').length, 0);
+    unsubmitted.state.sessions[0].created_at = new Date(Date.now() - 24 * 3600000).toISOString();
+    unsubmitted.state.creationLockHeld = true;
+    await assert.rejects(() => unsubmitted.service.cancelStandalonePayment(scope), error => error.code === 'TERMINAL_PAYMENT_CREATING');
+    assert.strictEqual(unsubmitted.state.sessions[0].status, 'creating');
+    unsubmitted.state.creationLockHeld = false;
+    assert.strictEqual((await unsubmitted.service.cancelStandalonePayment(scope)).status, 'canceled', 'Old provably unsubmitted reservation can be canceled');
+    unsubmitted.state.remote.status = 'online'; unsubmitted.state.remote.action = null;
+    assert.strictEqual((await unsubmitted.service.startStandalonePayment({ ...input, attemptKey: '12345678-1234-4123-8123-123456789abd' })).status, 'processing');
+    assert.strictEqual(unsubmitted.state.calls.filter(name => name === 'create').length, 1);
+  }
+  const expiredAmbiguous = fixture(); expiredAmbiguous.state.loseCreateResponse = true;
+  await assert.rejects(() => expiredAmbiguous.service.startStandalonePayment(input));
+  assert(expiredAmbiguous.state.sessions[0].stripe_create_submitted_at, 'Persist submission before Stripe receives the request');
+  expiredAmbiguous.state.sessions[0].created_at = new Date(Date.now() - 24 * 3600000).toISOString();
+  expiredAmbiguous.state.sessions[0].stripe_create_submitted_at = expiredAmbiguous.state.sessions[0].created_at;
+  await assert.rejects(() => expiredAmbiguous.service.startStandalonePayment(input), error => error.code === 'TERMINAL_RECOVERY_REQUIRED');
+  await assert.rejects(() => expiredAmbiguous.service.cancelStandalonePayment(scope), error => error.code === 'TERMINAL_RECOVERY_REQUIRED');
+  await assert.rejects(() => expiredAmbiguous.service.startStandalonePayment({ ...input, attemptKey: '12345678-1234-4123-8123-123456789abd' }), error => error.code === 'TERMINAL_READER_BUSY');
+  assert.strictEqual(expiredAmbiguous.state.sessions[0].status, 'creating');
+  assert.strictEqual(expiredAmbiguous.state.calls.filter(name => name === 'create').length, 1);
+  for (const [remoteState, intentStatus] of [['offline', 'succeeded'], ['missing', 'succeeded'], ['offline', 'canceled'], ['missing', 'canceled'], ['offline', 'processing']]) {
+    const settledOffline = fixture(); await settledOffline.service.startStandalonePayment(input);
+    settledOffline.state.sessions[0].status = 'creating';
+    settledOffline.state.intents.values().next().value.status = intentStatus;
+    settledOffline.state.remote.status = 'offline';
+    if (remoteState === 'missing') settledOffline.state.reader = null;
+    const recovered = await settledOffline.service.startStandalonePayment(input);
+    assert.strictEqual(recovered.status, intentStatus, 'Persisted Stripe state is authoritative even without an online reader');
+    assert.strictEqual(recovered.id, 41);
+    assert.strictEqual(settledOffline.state.calls.filter(name => name === 'create').length, 1);
+    assert.strictEqual(settledOffline.state.calls.filter(name => name === 'process').length, 1);
+  }
 
   const uncertain = fixture(); uncertain.state.loseCreateResponse = true;
   await assert.rejects(() => uncertain.service.startStandalonePayment(input), error => error.code === 'TERMINAL_STRIPE_ERROR');
@@ -178,6 +217,14 @@ const fixture = () => {
   }
 
   // The real module must choose the no-order finalizer and persist confirmation once.
+  let submittedWrite;
+  const submissionStore = buildStripeTerminalModule({ connection: { query: async (sql, params) => {
+    submittedWrite = { sql, params }; return [{ affectedRows: 1 }];
+  } } });
+  await submissionStore.updatePaymentSession({ shopId: 7, paymentId: 41, stripeCreateSubmittedAt: '2026-10-28 12:00:00' });
+  assert.match(submittedWrite.sql, /SET stripe_create_submitted_at = \?/);
+  assert.match(submittedWrite.sql, /WHERE shopid = \? AND id = \?/);
+  assert.deepStrictEqual(submittedWrite.params, ['2026-10-28 12:00:00', 7, 41]);
   const sqlCalls = []; const row = { id: 41, shopid: 7, payment_kind: 'standalone', status: 'processing', stripe_payment_intent_id: 'pi_standalone', amount_cents: 5000, currency: 'eur' };
   const moduleStore = buildStripeTerminalModule({ connection: { query: async (sql, params) => {
     sqlCalls.push({ sql, params });

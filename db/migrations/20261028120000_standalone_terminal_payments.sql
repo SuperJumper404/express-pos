@@ -3,6 +3,7 @@
 ALTER TABLE stripe_terminal_payments
   ADD COLUMN payment_kind enum('order','standalone') NOT NULL DEFAULT 'order',
   ADD COLUMN confirmed_at datetime DEFAULT NULL,
+  ADD COLUMN stripe_create_submitted_at datetime DEFAULT NULL,
   ADD KEY idx_terminal_payment_history (shopid, payment_kind, confirmed_at, created_at, id);
 
 CREATE TABLE stripe_terminal_payment_attachments (
@@ -23,4 +24,5 @@ DROP TABLE IF EXISTS stripe_terminal_payment_attachments;
 ALTER TABLE stripe_terminal_payments
   DROP KEY idx_terminal_payment_history,
   DROP COLUMN confirmed_at,
+  DROP COLUMN stripe_create_submitted_at,
   DROP COLUMN payment_kind;

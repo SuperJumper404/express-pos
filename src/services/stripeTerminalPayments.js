@@ -125,12 +125,15 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
   const markFailed = (session, code, store = terminalStore) => update(session, {
     status: "failed", failureCode: code, failureMessage: ERRORS[code][1],
   }, store);
-  const reconcile = async (session, intent, store) => {
-    if (!intent || intent.id !== session.stripe_payment_intent_id
+  const assertIntentMatches = (session, intent, expectedId = session.stripe_payment_intent_id) => {
+    if (!intent || typeof intent.id !== "string" || intent.id !== expectedId
       || intent.amount !== session.amount_cents || intent.currency !== session.currency
       || !intent.metadata || intent.metadata.terminal_payment_id !== String(session.id)
       || intent.metadata.shop_id !== String(session.shopid)
       || (session.payment_kind === "standalone" && intent.metadata.payment_kind !== "standalone")) fail("TERMINAL_STRIPE_ERROR");
+  };
+  const reconcile = async (session, intent, store) => {
+    assertIntentMatches(session, intent);
     if (intent.status === "succeeded") {
       const finalize = session.payment_kind === "standalone" ? store.finalizeStandalonePaymentSucceeded : store.finalizePaymentSucceeded;
       await finalize({
@@ -222,29 +225,58 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
 
   const createPayment = async ({ session, reader }, store) => {
     // Stripe can prune a key after 24 hours. Never risk replay beyond that window.
-    const createdAt = new Date(session.created_at).getTime();
-    if (!session.stripe_payment_intent_id && (!Number.isFinite(createdAt) || Date.now() - createdAt >= 23 * 60 * 60 * 1000)) {
+    const standalone = session.payment_kind === "standalone";
+    const submittedAt = standalone ? session.stripe_create_submitted_at : session.created_at;
+    const createdAt = new Date(submittedAt).getTime();
+    if (!session.stripe_payment_intent_id && (!standalone || submittedAt != null)
+      && (!Number.isFinite(createdAt) || Date.now() - createdAt >= 23 * 60 * 60 * 1000)) {
       fail("TERMINAL_RECOVERY_REQUIRED");
     }
     if (!session.stripe_connected_account_id) fail("TERMINAL_RECOVERY_REQUIRED");
+    let intent;
+    // A known Stripe intent can settle after a lost local response. Its state
+    // must be reconciled before a missing/offline reader can block collection.
+    if (standalone && session.stripe_payment_intent_id) {
+      intent = await stripeCall(() => stripe.paymentIntents.retrieve(session.stripe_payment_intent_id));
+      assertIntentMatches(session, intent);
+      if (["succeeded", "canceled"].includes(intent.status)) {
+        return databaseTransaction(async transactionStore => dto(await reconcile(session, intent, transactionStore), transactionStore, intent), store.withTransaction);
+      }
+      if (intent.status === "processing") {
+        await databaseTransaction(async transactionStore => {
+          const current = await payment(sessionScope(session), transactionStore, true);
+          if (active(current)) await update(current, { status: "processing" }, transactionStore);
+        }, store.withTransaction);
+        return dto(await store.findPaymentSession({ shopId: session.shopid, paymentId: session.id }), store);
+      }
+    }
+    if (!reader) fail("TERMINAL_NO_READER");
     const remote = await stripeCall(() => stripe.terminal.readers.retrieve(reader.stripe_reader_id));
     if (remote.status !== "online") fail("TERMINAL_READER_OFFLINE");
     if (remote.action && remote.action.status === "in_progress"
       && !matchingAction(remote, session.stripe_payment_intent_id)) fail("TERMINAL_READER_BUSY");
-    let intent;
+    if (standalone && !session.stripe_payment_intent_id && session.stripe_create_submitted_at == null) {
+      // Commit before the external call. A crash after this write is ambiguous,
+      // while offline/busy reservations remain provably unsubmitted.
+      const timestamp = new Date();
+      await databaseTransaction(async transactionStore => {
+        const current = await payment(sessionScope(session), transactionStore, true);
+        if (!active(current)) fail("TERMINAL_RECOVERY_REQUIRED");
+        const saved = await update(current, { stripeCreateSubmittedAt: timestamp }, transactionStore);
+        if (!saved || saved.affectedRows !== 1) fail("TERMINAL_INTERNAL_ERROR");
+      }, store.withTransaction);
+      session.stripe_create_submitted_at = timestamp;
+    }
     try {
       const params = buildTerminalPaymentIntentParams({
         totalCents: session.amount_cents, applicationFeeAmount: session.application_fee_amount,
         connectedAccountId: session.stripe_connected_account_id, terminalPaymentId: session.id, shopId: session.shopid,
       });
       if (session.payment_kind === "standalone") params.metadata.payment_kind = "standalone";
-      intent = session.stripe_payment_intent_id
+      intent = intent || (session.stripe_payment_intent_id
         ? await stripe.paymentIntents.retrieve(session.stripe_payment_intent_id)
-        : await stripe.paymentIntents.create(params, { idempotencyKey: session.idempotency_key });
-      if (session.payment_kind === "standalone" && (!intent || typeof intent.id !== "string"
-        || intent.amount !== session.amount_cents || intent.currency !== session.currency || !intent.metadata
-        || intent.metadata.terminal_payment_id !== String(session.id) || intent.metadata.shop_id !== String(session.shopid)
-        || intent.metadata.payment_kind !== "standalone")) fail("TERMINAL_STRIPE_ERROR");
+        : await stripe.paymentIntents.create(params, { idempotencyKey: session.idempotency_key }));
+      if (standalone) assertIntentMatches(session, intent, intent && intent.id);
     } catch (error) {
       // Even a delayed original caller may follow another ambiguous attempt.
       // Preserve the key until a persisted PI can be reconciled or canceled.
@@ -409,7 +441,7 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
     }
     if (session.status !== "creating") return getPaymentStatus({ ...input, paymentId: session.id, paymentKind: "standalone" });
     reader ||= await terminalStore.findReader({ shopId, readerId: session.terminal_reader_id });
-    if (!reader) fail("TERMINAL_RECOVERY_REQUIRED");
+    if (!reader && !session.stripe_payment_intent_id) fail("TERMINAL_RECOVERY_REQUIRED");
     const result = await terminalStore.withPaymentCreationLock({ shopId, paymentId: session.id }, async store => {
       const current = await payment({ shopId, cashierUserId, paymentId: session.id, paymentKind: "standalone" }, store);
       if (current.status !== "creating") return dto(current, store);
@@ -454,6 +486,20 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
   const cancelPayment = safe(async (input) => {
     const session = await payment(input);
     if (!active(session)) return dto(session);
+    if (session.payment_kind === "standalone" && session.status === "creating" && !session.stripe_payment_intent_id) {
+      // Serialize against the whole creation/handoff operation, then inspect the
+      // durable marker again. Only a request never submitted to Stripe is free.
+      const result = await terminalStore.withPaymentCreationLock({ shopId: session.shopid, paymentId: session.id }, store => databaseTransaction(async transactionStore => {
+        const current = await payment(input, transactionStore, true);
+        if (!active(current)) return dto(current, transactionStore);
+        if (current.stripe_create_submitted_at != null) fail("TERMINAL_RECOVERY_REQUIRED");
+        if (current.status !== "creating" || current.stripe_payment_intent_id) fail("TERMINAL_PAYMENT_CREATING");
+        await update(current, { status: "canceled" }, transactionStore);
+        return dto(await payment(input, transactionStore), transactionStore);
+      }, store.withTransaction));
+      if (!result) fail("TERMINAL_PAYMENT_CREATING");
+      return result;
+    }
     if (session.status === "creating" || !session.stripe_payment_intent_id) fail("TERMINAL_PAYMENT_CREATING");
     const reader = await terminalStore.findReader({ shopId: session.shopid, readerId: session.terminal_reader_id });
     if (!reader) fail("TERMINAL_NO_READER");

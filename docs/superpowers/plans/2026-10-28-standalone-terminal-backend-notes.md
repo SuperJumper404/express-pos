@@ -10,8 +10,14 @@ scoped to shop, cashier and standalone type. Retrying a completed or canceled
 attempt returns that attempt; changing its amount is rejected. Creating attempts
 resume only through POST with their original attemptKey. GET reconciles known
 Stripe intents. Order/kiosk recovery cannot cancel standalone attempts, and the
-stale-creating cleanup explicitly excludes them. An unknown Stripe creation older
-than the safe 23-hour replay window stays reserved and requires verification.
+stale-creating cleanup explicitly excludes them. The durable
+`stripe_create_submitted_at` marker is committed under the creation lock before
+the first Stripe create call. Offline/busy preflight failures leave it null, so
+the same lock can safely cancel such provably unsubmitted reservations, even
+after 24 hours. A submitted unknown Stripe creation older than the safe 23-hour
+replay window stays reserved and requires verification. Known Stripe intents are
+retrieved and validated before requiring a reader; settled, canceled and
+processing intents remain recoverable with an offline or missing reader.
 
 The standalone finalizer locks and updates only its payment, preserves the first
 confirmation date and stores the existing safe card receipt. It never loads or

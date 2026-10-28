@@ -397,7 +397,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null, loyalty = n
   };
 
   const updatePaymentSession = ({ shopId, paymentId, stripePaymentIntentId,
-    stripeChargeId, cardReceiptDetails, status, failureCode, failureMessage }) => {
+    stripeChargeId, cardReceiptDetails, status, failureCode, failureMessage, stripeCreateSubmittedAt }) => {
     requireShopId(shopId);
     if (status === "succeeded") {
       throw new Error("Use finalizePaymentSucceeded for successful payments");
@@ -406,6 +406,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null, loyalty = n
     const params = [];
     for (const [value, column] of [
       [stripePaymentIntentId, "stripe_payment_intent_id"],
+      [stripeCreateSubmittedAt, "stripe_create_submitted_at"],
       [stripeChargeId, "stripe_charge_id"], [cardReceiptDetails, "card_receipt_details"], [status, "status"],
       [failureCode, "failure_code"], [failureMessage, "failure_message"],
     ]) {
