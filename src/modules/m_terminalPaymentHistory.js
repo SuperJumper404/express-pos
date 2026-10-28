@@ -63,7 +63,7 @@ const historyPaymentProjection = `SELECT p.*, cashier.username AS cashier_name, 
   FROM stripe_terminal_payments p ${paymentDisplayJoins}`;
 const archiveProjection = `SELECT a.*, CAST(a.delivery_id AS CHAR) AS delivery_id,
   CAST(a.customer_account_id AS CHAR) AS customer_account_id, sp.name AS service_point_name,
-  COALESCE(sp.name, a.username) AS username,
+  sp.name AS username,
   CASE WHEN a.payment_provider = 'stripe_terminal' AND terminal_payment.status = 'succeeded'
     THEN ROUND(a.subtotal * 100) ELSE NULL END AS stripe_terminal_amount_cents,
   CASE WHEN a.payment_provider = 'stripe_terminal' AND terminal_payment.status = 'succeeded'
@@ -142,13 +142,13 @@ const buildTerminalPaymentHistoryModule = ({ connection, withTransaction, delive
     const { itemsPerPage, offset, search } = pagination(input);
     const { column, direction } = sortOptions(input);
     const values = [shopId];
-    const archiveSearch = search ? "AND CONCAT_WS(' ', a.ordernumber, a.customer, COALESCE(sp.name, a.username), a.taken_by_name, a.prepared_by_name, a.payment_status) LIKE ?" : "";
+    const archiveSearch = search ? "AND CONCAT_WS(' ', a.ordernumber, a.customer, sp.name, a.taken_by_name, a.prepared_by_name, a.payment_status) LIKE ?" : "";
     if (search) values.push(`%${search}%`);
     values.push(shopId);
     const paymentSearch = search ? "AND CONCAT_WS(' ', 'Paiement TPE', CONCAT('TPE #', p.id), p.status, p.amount_cents / 100, cashier.username, reader.label) LIKE ?" : "";
     if (search) values.push(`%${search}%`);
     const union = `SELECT a.id, 'order' AS entry_type, COALESCE(a.archived_at, a.created) AS event_at,
-      CAST(a.ordernumber AS CHAR) AS reference, COALESCE(sp.name, a.username) AS table_name, a.customer,
+      CAST(a.ordernumber AS CHAR) AS reference, sp.name AS table_name, a.customer,
       a.taken_by_name, a.prepared_by_name, a.subtotal AS amount, a.payment_status, CAST(a.status AS CHAR) AS entry_status
       FROM archives a ${archiveJoins} WHERE a.shopid = ? AND ${visible} ${archiveSearch}
       UNION ALL
@@ -197,11 +197,11 @@ const buildTerminalPaymentHistoryModule = ({ connection, withTransaction, delive
     const shopId = positiveId(input.shopId);
     const { itemsPerPage, offset, search } = pagination(input);
     const values = [shopId];
-    const searchClause = search ? "AND CONCAT_WS(' ', a.ordernumber, a.customer, COALESCE(sp.name, a.username)) LIKE ?" : "";
+    const searchClause = search ? "AND CONCAT_WS(' ', a.ordernumber, a.customer, sp.name) LIKE ?" : "";
     if (search) values.push(`%${search}%`);
     const from = `FROM archives a ${archiveJoins} WHERE a.shopid = ? AND ${visible} ${searchClause}`;
     const totalRows = await query(`SELECT COUNT(*) AS total ${from}`, values);
-    const rows = await query(`SELECT a.id, a.ordernumber, a.subtotal, a.created, COALESCE(sp.name, a.username) AS service_point_name,
+    const rows = await query(`SELECT a.id, a.ordernumber, a.subtotal, a.created, sp.name AS service_point_name,
       a.customer ${from} ORDER BY COALESCE(a.archived_at, a.created) DESC, a.id DESC LIMIT ? OFFSET ?`, [...values, itemsPerPage, offset]);
     return { items: rows.map(row => ({ archiveId: Number(row.id), orderNumber: String(row.ordernumber || row.id),
       amountCents: archiveAmountCents(row.subtotal), createdAt: dateString(row.created),

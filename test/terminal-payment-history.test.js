@@ -142,7 +142,10 @@ test("history paginates one SQL union and preserves colliding IDs as separate ro
   assert.deepEqual(pageQuery.values.slice(-2), [2, 2]);
   assert(!pageQuery.sql.includes("Alice"));
   assert(pageQuery.values.filter(v => v === "%Alice%").length >= 2);
-  assert.match(pageQuery.sql, /COALESCE\(sp.name, a.username\)/, "a removed service point retains its archive table name");
+  for (const call of calls) {
+    assert.doesNotMatch(call.sql, /a\.username\b/, "archives have no username column");
+  }
+  assert.match(pageQuery.sql, /sp\.name AS table_name/);
 });
 
 test("standalone history displays cashier and reader with tenant-scoped search and cashier sorting", async () => {
@@ -196,6 +199,7 @@ test("candidate search is tenant scoped and paginated with server-owned amounts"
     createdAt: "2026-10-27 09:00:00", tableName: "Table 2", customer: "Alice" }], total: 2 });
   assert.deepEqual(calls[1].values, [7, "%Alice%", 1, 1]);
   assert.match(calls[1].sql, /a.shopid = \? AND COALESCE\(a.hidden_from_history, 0\) = 0/);
+  for (const call of calls) assert.doesNotMatch(call.sql, /a\.username\b/, "candidate queries must use the real archive schema");
   assert(!calls[1].sql.includes("payment_status ="), "paid and unpaid archives are eligible");
 });
 
