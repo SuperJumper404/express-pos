@@ -11,7 +11,7 @@ Object.assign(process.env, {
   JWTKEY: config().jwtSecret, CUSTOMER_AUTH_SECRET: config().secret,
   CUSTOMER_ALLOWED_ORIGINS: "https://journey.example.test",
   DELIVERY_TOKEN_SECRET: "task17-local-disposable-signing-secret",
-  STRIPE_PUBLISHABLE_KEY: "pk_test_disposable", STRIPE_WEBHOOK_SECRET: "whsec_disposable_task17",
+  STRIPE_PUBLISHABLE_KEY: "pk_test_disposable", STRIPE_WEBHOOK_SECRET: "fixture-webhook-secret-task17",
 });
 
 async function listen(server, work) {
@@ -101,7 +101,7 @@ async function main() {
     await db.pool.query("UPDATE shop SET qr_payment_mode='stripe_before_order',stripe_account_id='acct_task17_fixture',stripe_charges_enabled=1 WHERE id=7");
     require.cache[require.resolve("../src/config/dbPool")] = { exports: db.pool };
     require.cache[require.resolve("../src/config/db")] = { exports: db.pool.pool };
-    const stripe = require("stripe")("sk_test_disposable_task17", { maxNetworkRetries: 0, timeout: 5000 });
+    const stripe = require("stripe")("fixture-stripe-secret-task17", { maxNetworkRetries: 0, timeout: 5000 });
     require.cache[require.resolve("../src/config/stripe")] = { exports: { getStripe: () => stripe } };
     // Financial clock crosses Europe's repeated 02:30 hour using distinct UTC instants.
     let postingTime = "2026-10-25 00:30:00.123456";

@@ -893,6 +893,8 @@ test("default controller wires reservation SQL to one transaction connection and
     calls.push({ sql, params, dedicated });
     if (sql.includes("GET_LOCK")) { assert(dedicated && !inTransaction); return [{ acquired: 1 }]; }
     if (sql.includes("RELEASE_LOCK")) { assert(dedicated && !inTransaction); return [{ released: 1 }]; }
+    if (sql === 'SELECT id FROM shop WHERE id=? FOR UPDATE') { assert(dedicated && inTransaction); return [{ id: params[0] }]; }
+    if (sql.includes('FROM loyalty_orders WHERE')) { assert(dedicated && inTransaction); return []; }
     if (sql.includes("FROM shop")) { assert(!inTransaction); return [f.state.shop]; }
     if (sql.startsWith("SELECT") && sql.includes("FROM stripe_terminal_readers r")) {
       assert(dedicated && inTransaction);

@@ -77,6 +77,13 @@ module.exports = {
     whatsappTemplateLanguage: process.env.CUSTOMER_WHATSAPP_TEMPLATE_LANGUAGE,
     whatsappGraphVersion: process.env.CUSTOMER_WHATSAPP_GRAPH_VERSION,
   }),
+  getCustomerSmsConfig: () => ({
+    mode: process.env.CUSTOMER_SMS_MODE || 'disabled',
+    nodeEnv: process.env.NODE_ENV || 'local',
+    accountSid: process.env.CUSTOMER_SMS_TWILIO_ACCOUNT_SID,
+    authToken: process.env.CUSTOMER_SMS_TWILIO_AUTH_TOKEN,
+    from: process.env.CUSTOMER_SMS_FROM,
+  }),
   getCustomerSessionConfig: () => ({
     allowedOrigins: (process.env.CUSTOMER_ALLOWED_ORIGINS || "").split(",").map(value => value.trim()).filter(value => {
       try {

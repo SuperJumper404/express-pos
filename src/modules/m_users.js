@@ -43,7 +43,7 @@ module.exports = {
   mFindUserByIdAndShop: (id, shopid) => {
     return new Promise((resolve, reject) => {
       conn.query(
-        "SELECT users.id, users.shopid, users.access, users.staff_login_id, users.service_point_id, CASE WHEN shop.admin_user = users.id THEN 1 ELSE 0 END AS is_primary_admin FROM users LEFT JOIN shop ON shop.id = users.shopid WHERE users.id = ? AND users.shopid = ?",
+        "SELECT users.id, users.shopid, users.access, users.staff_login_id, users.staff_pin_encrypted, users.service_point_id, CASE WHEN shop.admin_user = users.id THEN 1 ELSE 0 END AS is_primary_admin FROM users LEFT JOIN shop ON shop.id = users.shopid WHERE users.id = ? AND users.shopid = ?",
         [id, shopid],
         (err, result) => {
           if (!err) {
@@ -62,7 +62,7 @@ module.exports = {
           console.log("GOOD");
           resolve(result);
         } else {
-          console.log("Error Ajout Nouveau User", err);
+          console.log("Error Ajout Nouveau User", err.code);
           reject(err);
         }
       });

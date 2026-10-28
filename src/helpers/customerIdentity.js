@@ -19,7 +19,7 @@ const normalizeCustomerDestination = ({ channel, value, countryCode } = {}) => {
       || !domain.includes(".") || `${local}@${domain}`.length > 254) throw invalid();
     return `${local}@${domain}`;
   }
-  if (channel !== "whatsapp" || input.length > 250
+  if (!["whatsapp", "sms"].includes(channel) || input.length > 250
     || (countryCode !== undefined && (typeof countryCode !== "string" || !isSupportedCountry(countryCode)))) throw invalid();
   const phone = parsePhoneNumberFromString(input, { defaultCountry: countryCode, extract: false });
   if (!phone || phone.ext || !phone.isValid()) throw invalid();

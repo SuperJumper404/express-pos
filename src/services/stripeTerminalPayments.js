@@ -311,6 +311,7 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
           discountType: input.discountType, discountValue: input.discountValue,
         });
       } catch (error) { fail("TERMINAL_INVALID_INPUT"); }
+      if (store.applyLoyaltyDiscounts) amounts = await store.applyLoyaltyDiscounts({ shopId, orders, allocations: amounts.allocations });
       if (amounts.totalCents < 50) fail("TERMINAL_INVALID_INPUT");
       const applicationFeeAmount = calculateTerminalApplicationFee(amounts.totalCents, shop.stripe_commission_percent);
       const saved = await store.createPaymentSession({

@@ -31,9 +31,9 @@ test("phone normalization uses strict whole-input max metadata and E164", () => 
   ]) assert.equal(normalizeCustomerDestination({ channel: "whatsapp", value, countryCode }), expected);
 });
 
-test("invalid destinations, extracted numbers, extensions and SMS are refused", () => {
+test("invalid destinations, extracted numbers, extensions and unknown channels are refused", () => {
   for (const input of [
-    { channel: "sms", value: "+33612345678" },
+    { channel: "unknown", value: "+33612345678" },
     ...["call +33612345678", "+33612345678 call me", "+33612345678 ext. 1", "+33612345678 x123",
       "tel:+33612345678;ext=12", "+33700000000", "+5511555555555", "+999123456789", "123", "0612345678\n"].map(value => ({ channel: "whatsapp", value })),
     { channel: "whatsapp", value: "0612345678", countryCode: "XX" },

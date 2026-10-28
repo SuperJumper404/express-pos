@@ -40,7 +40,8 @@ const repository = {
   applyCashRefund: input => buildCourierCash().applyConfirmedRefund(input),
 };
 
-const buildDeliveryRefunds = ({ repository: supplied = {}, runInTransaction = withTransaction, clock } = {}) => {
+const buildDeliveryRefunds = ({ repository: supplied = {}, runInTransaction = withTransaction, clock,
+  loyalty = Object.keys(supplied).length ? null : require('./m_loyalty').buildLoyalty() } = {}) => {
   const repo = { ...repository, ...supplied };
   const refund = async input => {
     const { actor, deliveryId, returnSource, reason, idempotencyKey } = input;
@@ -85,6 +86,8 @@ const buildDeliveryRefunds = ({ repository: supplied = {}, runInTransaction = wi
           return_source: returnSource, physical_holder_id: result.physicalHolderId, authorized_by_id: account.id, reason,
           idempotency_key: idempotencyKey, request_hash: hash, result: JSON.stringify(result), created_at: now } });
         await repo.markRefunded({ current, payment, now, connection });
+        if (loyalty) await loyalty.refundOrder({ connection, shopId: Number(account.shopid), orderId: current.delivery.origin_order_id,
+          refundedCents: amountCents, refundKey: `manual:${register ? 'register' : 'courier'}:${refundId}` });
         if (!register) await repo.applyCashRefund({ shopId: account.shopid, refundId, connection });
         return { refundId, ...result };
       });

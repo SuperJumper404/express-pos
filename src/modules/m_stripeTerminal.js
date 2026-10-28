@@ -24,11 +24,12 @@ const first = (rows) => rows[0] || null;
 const activePaymentStatus = (payment) => ["creating", "processing"].includes(payment.status);
 const staleCreatingPaymentSeconds = 120;
 
-const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
+const buildStripeTerminalModule = ({ connection, lockContext = null, loyalty = null }) => {
   if (!connection || typeof connection.query !== "function") {
     throw new Error("A database connection is required");
   }
   const query = (sql, params) => queryWith(connection, sql, params);
+  const loyaltyConnection = { query: async (sql, values) => [await query(sql, values)] };
 
   // Named locks share a connection, without holding row locks
   // during Stripe calls or checking out another connection from a waiting pool.
@@ -45,7 +46,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
         if (reusable) return null;
         throw new Error("Terminal payment lock unavailable");
       }
-      const store = buildStripeTerminalModule({ connection: dedicated, lockContext: context });
+      const store = buildStripeTerminalModule({ connection: dedicated, lockContext: context, loyalty });
       store.withTransaction = async (transactionWork) => {
         try {
           await dedicated.beginTransaction();
@@ -113,7 +114,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
         throw error;
       }
       return await work({
-        terminalStore: buildStripeTerminalModule({ connection: dedicated }),
+        terminalStore: buildStripeTerminalModule({ connection: dedicated, loyalty }),
         staffStore: {
           findUserByIdAndShop: async ({ id, shopId: userShopId }) => first(await queryWith(
             dedicated,
@@ -445,6 +446,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
   // The caller holds one transaction connection for all three locking reads.
   const lockReaderAndOrders = async ({ shopId, userId, orderIds }) => {
     requireShopId(shopId);
+    if (loyalty) await query('SELECT id FROM shop WHERE id=? FOR UPDATE', [shopId]);
     if (!Array.isArray(orderIds) || !orderIds.length
       || orderIds.some((id) => !Number.isSafeInteger(id) || id <= 0)
       || new Set(orderIds).size !== orderIds.length) {
@@ -490,6 +492,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
   // order as start, then read the current payment (never payment -> orders).
   const lockPaymentSession = async ({ shopId, paymentId }) => {
     requireShopId(shopId);
+    if (loyalty) await query('SELECT id FROM shop WHERE id=? FOR UPDATE', [shopId]);
     const allocations = await listPaymentAllocations({ shopId, paymentId });
     const orderIds = allocations.map((allocation) => allocation.order_id).sort((a, b) => a - b);
     const orders = orderIds.length ? await query(
@@ -553,6 +556,8 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
       [stripeChargeId, cardReceiptDetails, shopId, paymentId, stripePaymentIntentId],
     );
     if (result.affectedRows !== 1) throw new Error("Terminal payment finalization incomplete");
+    if (loyalty) for (const allocation of allocations) await loyalty.settlePaidOrder({ connection: loyaltyConnection,
+      shopId: Number(shopId), orderId: allocation.order_id, paymentKey: `terminal:${paymentId}`, paidCents: allocation.amount_cents });
     return { finalized: true };
   };
 
@@ -598,6 +603,8 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
       [stripeChargeId, cardReceiptDetails, shopId, paymentId, stripePaymentIntentId],
     );
     if (result.affectedRows !== 1) throw new Error("Terminal payment finalization incomplete");
+    if (loyalty) for (const allocation of allocations) await loyalty.settlePaidOrder({ connection: loyaltyConnection,
+      shopId: Number(shopId), orderId: allocation.order_id, paymentKey: `terminal:${paymentId}`, paidCents: allocation.amount_cents });
     return { finalized: true };
   };
 
@@ -634,6 +641,8 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
       [status, shopId, paymentId],
     );
     if (result.affectedRows !== 1 && activePaymentStatus(terminalPayment)) throw new Error("Terminal fallback payment update incomplete");
+    if (loyalty) for (const allocation of allocations) await loyalty.release({ connection: loyaltyConnection,
+      shopId: Number(shopId), orderId: allocation.order_id });
     return { fallback: true };
   };
 
@@ -670,6 +679,9 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
       );
       if (saved.affectedRows !== 1) throw new Error("Terminal refund order update failed");
     }
+    if (loyalty && refundStatus === 'succeeded') await loyalty.refundOrder({ connection: loyaltyConnection,
+      shopId: Number(scope.shopId), orderId: scope.orderId, refundedCents: current.allocation.amount_cents,
+      refundKey: `terminal:${refundId || `${scope.paymentId}:${scope.orderId}`}` });
     return { ...current.allocation, refund_generation: generation, stripe_refund_id: refundId, refund_status: refundStatus };
   };
 
@@ -709,6 +721,19 @@ const buildStripeTerminalModule = ({ connection, lockContext = null }) => {
   };
 
   return {
+    async applyLoyaltyDiscounts({ shopId, orders, allocations }) {
+      if (!loyalty) return { allocations, totalCents: allocations.reduce((sum, row) => sum + row.amountCents, 0) };
+      const adjusted = [];
+      for (const allocation of allocations) {
+        const order = orders.find(row => Number(row.id) === Number(allocation.orderId));
+        const gross = toCents(order.subtotal);
+        const reward = await loyalty.getOrderDiscount({ connection: loyaltyConnection, shopId: Number(shopId), orderId: allocation.orderId,
+          subtotalCents: gross, otherDiscountCents: gross - allocation.amountCents });
+        if (reward.discountCents && order.delivery_id != null) throw new Error('Delivery loyalty reward requires a new quote');
+        adjusted.push({ ...allocation, amountCents: allocation.amountCents - reward.discountCents });
+      }
+      return { allocations: adjusted, totalCents: adjusted.reduce((sum, row) => sum + row.amountCents, 0) };
+    },
     withRegistrationLock, withPaymentCreationLock, withReaderActionLock, withOrderRefundLock,
     findLocation, createLocation, updateLocation,
     listReaders, findReader, findAssignedReader, findAssignedReaderByServicePoint,

@@ -489,6 +489,11 @@ const buildOrderEditingModule = ({
   const amendOrder = (input) => {
     const amendment = validateAmendInput(input);
     return runInTransaction(async (connection) => {
+      if (repository === sqlRepository) {
+        await queryResult(connection, 'SELECT id FROM shop WHERE id=? FOR UPDATE', [amendment.shopId]);
+        const reserved = await queryResult(connection, "SELECT order_id FROM loyalty_orders WHERE shopid=? AND order_id=? AND status='reserved' FOR UPDATE", [amendment.shopId, amendment.orderId]);
+        if (reserved.length) throw new DomainError(409, 'LOYALTY_ORDER_RESERVED', 'Libérez la récompense fidélité avant de modifier la commande.');
+      }
       const order = await repository.lockOrder({
         orderId: amendment.orderId,
         shopId: amendment.shopId,

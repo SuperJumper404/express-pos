@@ -109,12 +109,18 @@ const buildSqlCustomerAuthRepository = ({ pool = require("../config/dbPool") } =
     if (!identity) {
       customerId = challenge.customer_id;
       if (challenge.purpose === "login") {
+        customerId = await require('../helpers/customerGlobalIdentity').findVerifiedCustomerAccount({ connection,
+          shopId: challenge.shopid, channel: challenge.channel, destination: challenge.destination });
+      }
+      if (challenge.purpose === "login" && !customerId) {
         await connection.query("INSERT INTO customers (shopid,created_at,updated_at) VALUES (?,?,?)", [challenge.shopid, timestamp, timestamp]);
         const [[row]] = await connection.query("SELECT CAST(LAST_INSERT_ID() AS CHAR) AS id");
         customerId = row.id;
       }
       await connection.query("INSERT INTO customer_identities (shopid,customer_id,channel,destination,verified_at,created_at) VALUES (?,?,?,?,?,?)", [challenge.shopid, customerId, challenge.channel, challenge.destination, timestamp, timestamp]);
     }
+    await require('../helpers/customerGlobalIdentity').linkVerifiedCustomerIdentity({ connection, shopId: challenge.shopid,
+      customerId, channel: challenge.channel, destination: challenge.destination });
     await connection.query(`UPDATE customer_otp_challenges SET send_status='sent',verified_at=?,consumed_at=?,verified_customer_id=?
       WHERE shopid=? AND id=?`, [timestamp, timestamp, customerId, challenge.shopid, challenge.id]);
     return { shopId: challenge.shopid, customerId, verifiedChallengeId: challenge.id };
@@ -167,7 +173,9 @@ const buildCustomerAuth = ({ repository = buildSqlCustomerAuthRepository(),
       destination = normalizeCustomerDestination({ channel, value: destination, countryCode });
       if (locale !== undefined && (typeof locale !== "string" || !/^[a-z]{2,3}(?:[-_][A-Za-z]{2})?$/.test(locale))) throw invalid();
       const normalizedIp = isIP(ip) === 6 ? new URL(`http://[${ip}]/`).hostname.slice(1, -1).replace(/^::ffff:(\w{1,4}):(\w{1,4})$/, (_all, a, b) => [parseInt(a, 16) >> 8, parseInt(a, 16) & 255, parseInt(b, 16) >> 8, parseInt(b, 16) & 255].join(".")) : ip;
-      const code = randomCode();
+      const smsConfig = require('../helpers/env').getCustomerSmsConfig();
+      const developmentSms = channel === 'sms' && smsConfig.mode === 'development' && ['local', 'development', 'test'].includes(smsConfig.nodeEnv);
+      const code = developmentSms ? process.env.CUSTOMER_SMS_DEV_CODE : randomCode();
       if (typeof code !== "string" || !/^\d{6}$/.test(code)) throw unavailable();
       let now;
       let expiresAt;

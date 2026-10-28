@@ -1,6 +1,7 @@
 const { custom, failed } = require("../helpers/response");
 const { isStaffAccess } = require("../helpers/staffAccess");
-const { buildStripeTerminalModule } = require("../modules/m_stripeTerminal");
+const { buildStripeTerminalModule: buildTerminalStore } = require("../modules/m_stripeTerminal");
+const buildStripeTerminalModule = options => buildTerminalStore({ ...options, loyalty: require('../modules/m_loyalty').buildLoyalty() });
 const { buildStripeTerminalReaderService, TerminalReaderError } = require("../services/stripeTerminalReaders");
 const { buildStripeTerminalPaymentService, TerminalPaymentError } = require("../services/stripeTerminalPayments");
 const { buildStripeTerminalKioskPaymentService } = require("../services/stripeTerminalKioskPayments");

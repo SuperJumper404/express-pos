@@ -13,7 +13,7 @@ const STAFF_ACCESS = new Set([0, 1, 4, 5]);
 const defaultFindUserByIdAndShop = async ({ id, shopId }) => {
   const pool = require("../../config/dbPool");
   const [rows] = await pool.query(
-    `SELECT id, shopid, username, access, status, module_permissions
+    `SELECT id, shopid, username, access, status, module_permissions, token
      FROM users
      WHERE id = ? AND shopid = ?
      LIMIT 1`,

@@ -2,6 +2,7 @@ const {
   registerWithStaffCredentials,
   loginWithStaffCredentials,
   setStaffCredentials,
+  getStaffCredentials,
   logout,
   activation,
   profileMe,
@@ -23,6 +24,7 @@ routers
   .post("/logout", authentication, logout)
   .get("/activate/:token/:email/:position/:access", activation)
   .get("/users", authentication, authAdmin, getAllUser)
+  .get("/user/:id/staff-credentials", authentication, authAdmin, getStaffCredentials)
   .get("/user/:id", authentication, getDetailUser)
   .patch("/user/:id/staff-credentials", authentication, setStaffCredentials)
   .patch("/user/:id", authentication, singleUploadProject, updateUser)

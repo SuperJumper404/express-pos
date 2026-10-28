@@ -83,6 +83,8 @@ app.use((error, req, res, next) => {
 });
 // Personal API is independent of any stale staff bearer carried by this browser.
 app.use(`${prefix}`, routerCustomers);
+app.use(`${prefix}`, require('./src/routers/r_loyalty'));
+app.use(`${prefix}/wallet/apple`, require('./src/routers/r_loyaltyWallet'));
 app.use(`${prefix}`, require("./src/helpers/middleware/auth").authenticationIfPresent);
 app.get(`${prefix}`, function (req, res) {
   res.json({ msg: "Hai" });
@@ -133,6 +135,14 @@ const startServer = async () => {
     });
   }, 60 * 1000);
   reservationReleaseTimer.unref();
+  const runLoyaltyMaintenance = buildNonOverlappingRunner(async () => {
+    await require('./src/modules/m_loyalty').buildLoyalty().expireReservations();
+    await require('./src/services/loyaltyWalletWorker').runLoyaltyWalletMaintenance();
+  }, { error: () => console.error('Loyalty maintenance failed; queued changes will be retried') });
+  const loyaltyTimer = setInterval(() => runLoyaltyMaintenance().catch(() => {
+    console.error('Loyalty maintenance unavailable');
+  }), 60 * 1000);
+  loyaltyTimer.unref();
 
   app.listen(envPORT, "0.0.0.0", () => {
     console.log(`Server is running onn  http://localhosst:${envPORT || 5005}`);

@@ -20,6 +20,7 @@ const mailer = require("../helpers/mailer");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const fs = require("fs");
+const { encryptPin, decryptPin } = require("../helpers/pinVault");
 const {
   createStaffLoginId,
   createStaffPin,
@@ -59,6 +60,12 @@ const requireUserId = (value, res) => {
   failed(res, "Invalid user identifier", "USER_ID_INVALID", 400);
   return false;
 };
+const privateCredentials = (res) => {
+  if (res.setHeader) res.setHeader("Cache-Control", "no-store, private");
+};
+const credentialFailure = (res, error) => error.code === "PIN_VAULT_UNAVAILABLE"
+  ? custom(res, 503, "Consultation des PIN indisponible.", {}, null)
+  : failed(res, "Erreur serveur.", "STAFF_CREDENTIALS_UNAVAILABLE");
 const normalizeStaffServicePointId = (value) => {
   const id = Number(value);
   return Number.isInteger(id) && id > 0 ? id : null;
@@ -160,6 +167,7 @@ const createInternalPassword = () =>
   `${createStaffLoginId()}${createStaffLoginId()}`;
 
 const registerWithStaffCredentials = async (req, res) => {
+  privateCredentials(res);
   if (!requireCurrentAdmin(req, res)) return;
   try {
     const body = req.body || {};
@@ -196,6 +204,7 @@ const registerWithStaffCredentials = async (req, res) => {
       if (staffAccount) {
         data.staff_login_id = staffLoginId;
         data.staff_pin_hash = await hashStaffPin(staffPin);
+        data.staff_pin_encrypted = encryptPin(staffPin, { kind: "staff", shopId: req.shopid, loginId: staffLoginId });
         data.module_permissions = JSON.stringify(
           normalizeModulePermissions(body.module_permissions, access),
         );
@@ -224,11 +233,29 @@ const registerWithStaffCredentials = async (req, res) => {
 
     return failed(res, "Erreur serveur.", "Impossible de generer un ID unique.");
   } catch (error) {
-    return failed(res, "Erreur serveur.", error.message);
+    return credentialFailure(res, error);
   }
 };
 
+const getStaffCredentials = async (req, res) => {
+  privateCredentials(res);
+  if (!requireCurrentAdmin(req, res) || !requireUserId(req.params.id, res)) return;
+  if (!req.currentUser.token || req.headers.authorization !== `Bearer ${req.currentUser.token}`) {
+    return custom(res, 401, "Session expired", {}, null);
+  }
+  try {
+    const [user] = await mFindUserByIdAndShop(Number(req.params.id), req.shopid);
+    if (!user || String(user.shopid) !== String(req.shopid) || !isStaffAccess(user.access) || Number(user.is_primary_admin) === 1) {
+      return custom(res, 404, "Utilisateur introuvable.", {}, null);
+    }
+    const pin = user.staff_pin_encrypted
+      ? decryptPin(user.staff_pin_encrypted, { kind: "staff", shopId: req.shopid, loginId: user.staff_login_id }) : null;
+    return success(res, "OK", {}, { staff_login_id: user.staff_login_id, staff_pin: pin, needs_regeneration: !pin });
+  } catch (error) { return credentialFailure(res, error); }
+};
+
 const setStaffCredentials = async (req, res) => {
+  privateCredentials(res);
   if (!requireCurrentAdmin(req, res) || !requireUserId(req.params.id, res)) return;
   try {
     const users = await mFindUserByIdAndShop(Number(req.params.id), req.shopid);
@@ -249,6 +276,7 @@ const setStaffCredentials = async (req, res) => {
           {
             staff_login_id: staffLoginId,
             staff_pin_hash: await hashStaffPin(staffPin),
+            staff_pin_encrypted: encryptPin(staffPin, { kind: "staff", shopId: req.shopid, loginId: staffLoginId }),
             updated: new Date(),
           },
           user.id,
@@ -266,7 +294,7 @@ const setStaffCredentials = async (req, res) => {
 
     return failed(res, "Erreur serveur.", "Impossible de generer un ID unique.");
   } catch (error) {
-    return failed(res, "Erreur serveur.", error.message);
+    return credentialFailure(res, error);
   }
 };
 
@@ -329,6 +357,7 @@ module.exports = {
   loginWithStaffCredentials,
   loginWithKioskCredentials,
   setStaffCredentials,
+  getStaffCredentials,
   register: (req, res) => {
     if (!requireCurrentAdmin(req, res)) return;
     const body = req.body;

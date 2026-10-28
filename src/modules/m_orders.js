@@ -368,6 +368,7 @@ const buildOrderArchiveModule = ({
   repository = archiveSqlRepository,
   withTransaction: runInTransaction = withTransaction,
   createToken = nanoid,
+  loyalty = repository === archiveSqlRepository ? require('./m_loyalty').buildLoyalty() : null,
 } = {}) => {
   const hydrateActiveDetails = async (rows, orderId, connection) => {
     const detailIds = rows.map((row) => row.orderDetailsId).filter(Boolean);
@@ -475,6 +476,18 @@ const buildOrderArchiveModule = ({
           throw new DomainError(409, "DELIVERY_TOTAL_MISMATCH", "Delivery settlement must match its accepted total");
         }
       }
+      let loyaltyDiscount;
+      if (loyalty && !hiddenFromHistory && !terminalAllocation && order.payment_status !== 'paid') {
+        const base = applyArchiveDiscountToDetails({ order, orderDetails, discount: deliveryContext ? {} : discount });
+        const subtotalCents = cents(base.archiveDiscountFields.subtotal == null ? order.subtotal : base.archiveDiscountFields.subtotal);
+        loyaltyDiscount = await loyalty.getOrderDiscount({ connection, shopId: Number(order.shopid), orderId: order.id,
+          subtotalCents: subtotalCents + cents(base.archiveDiscountFields.discount_amount || 0), otherDiscountCents: cents(base.archiveDiscountFields.discount_amount || 0) });
+        if (loyaltyDiscount.discountCents && deliveryContext) throw new DomainError(409, 'LOYALTY_DELIVERY_REQUOTE_REQUIRED', 'Reward requires a new confirmed delivery quote');
+        if (loyaltyDiscount.discountCents) {
+          const gross = orderDetails.length ? orderDetails.reduce((sum, detail) => sum + cents(detail.total), 0) : cents(order.subtotal);
+          discount = { ...discount, discountType: 'amount', discountValue: (gross - subtotalCents + loyaltyDiscount.discountCents) / 100 };
+        }
+      }
       const discountApplication = applyArchiveDiscountToDetails({
         order,
         orderDetails,
@@ -506,6 +519,11 @@ const buildOrderArchiveModule = ({
       };
       if (deliveryContext && order.payment_status === "unpaid") {
         await recordRegisterSettlement({ current: deliveryContext, operatorId, paymentMethod, connection });
+      }
+      if (loyalty) {
+        if (hiddenFromHistory) await loyalty.release({ connection, shopId: Number(order.shopid), orderId: order.id });
+        else if (archive.payment_status === 'paid') await loyalty.settlePaidOrder({ connection,
+          shopId: Number(order.shopid), orderId: order.id, paymentKey: `counter:${order.id}`, paidCents: cents(archive.subtotal) });
       }
       const archiveResult = await repository.insertArchive({ archive, connection });
       const archiveOrderId = archiveResult.insertId;
@@ -1345,6 +1363,8 @@ module.exports.collectDeliveryOrderPayment = ({ orderId, shopId, paymentMethod, 
   assertDeliveryCollectionAllowed(order);
   await assertNoPendingDeliveryTerminal({ orderId, shopId, connection });
   await recordRegisterSettlement({ current: context, operatorId, paymentMethod, connection });
+  await require('./m_loyalty').buildLoyalty().settlePaidOrder({ connection, shopId: Number(shopId), orderId,
+    paymentKey: `counter:${orderId}`, paidCents: toCents(order.subtotal) });
   return queryResult(connection, "UPDATE orders SET ? WHERE shopid = ? AND id = ? AND payment_status = 'unpaid'", [buildCashRegisterCollectionFields(paymentMethod), shopId, orderId]);
 });
 module.exports.buildOrderArchiveModule = buildOrderArchiveModule;

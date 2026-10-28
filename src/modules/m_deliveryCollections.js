@@ -64,7 +64,8 @@ const explicitTime = value => {
   return date.toISOString().replace("T", " ").replace("Z", "000");
 };
 
-const buildDeliveryCollections = ({ repository: supplied = {}, runInTransaction = withTransaction, clock } = {}) => {
+const buildDeliveryCollections = ({ repository: supplied = {}, runInTransaction = withTransaction, clock,
+  loyalty = Object.keys(supplied).length ? null : require('./m_loyalty').buildLoyalty() } = {}) => {
   const repo = { ...repository, ...supplied };
   const collect = async input => {
     const { actor, deliveryId, method, expectedVersion, idempotencyKey } = input;
@@ -124,6 +125,8 @@ const buildDeliveryCollections = ({ repository: supplied = {}, runInTransaction 
           result: JSON.stringify(summary), created_at: now,
         } });
         delivery.version += 1;
+        if (loyalty) await loyalty.settlePaidOrder({ connection, shopId: Number(effectiveActor.shopId),
+          orderId: delivery.origin_order_id, paymentKey: `collection:${collectionId}`, paidCents: amountCents });
         await repo.saveVersion({ delivery, now, connection });
         await repo.appendEvent({ connection, event: {
           shopid: effectiveActor.shopId, delivery_id: delivery.id, version: delivery.version, event_type: "collectPayment",

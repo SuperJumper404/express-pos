@@ -81,17 +81,17 @@ if (require.main === module) {
       await t.test("discovery is lazy, contains only booleans, and requires independent auth secret plus each provider config", async () => {
         let current = {};
         const lazy = buildCustomerCodeTransports({ getConfig: () => current });
-        assert.deepEqual(lazy.channels(), { email: false, whatsapp: false });
+        assert.deepEqual(lazy.channels(), { email: false, whatsapp: false, sms: false, smsDevelopment: false });
         current = config();
-        assert.deepEqual(lazy.channels(), { email: true, whatsapp: true });
+        assert.deepEqual(lazy.channels(), { email: true, whatsapp: true, sms: false, smsDevelopment: false });
         for (const key of ["secret", "jwtSecret", "email", "mailApiKey", "mailSecretKey", "whatsappAccessToken", "whatsappPhoneNumberId", "whatsappTemplateName", "whatsappTemplateLanguage", "whatsappGraphVersion"]) {
           current = { ...config(), [key]: "" };
           const channels = lazy.channels();
-          if (key === "secret") assert.deepEqual(channels, { email: false, whatsapp: false });
+          if (key === "secret") assert.deepEqual(channels, { email: false, whatsapp: false, sms: false, smsDevelopment: false });
           else if (key !== "jwtSecret") assert.equal(channels[key.startsWith("whatsapp") ? "whatsapp" : "email"], false);
         }
         current = { ...config(), secret: config().jwtSecret };
-        assert.deepEqual(lazy.channels(), { email: false, whatsapp: false });
+        assert.deepEqual(lazy.channels(), { email: false, whatsapp: false, sms: false, smsDevelopment: false });
         const count = boundary.requests.length;
         await assert.rejects(lazy.sendCode(input), { code: "CUSTOMER_CHANNEL_UNAVAILABLE" });
         assert.equal(boundary.requests.length, count);

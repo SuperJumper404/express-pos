@@ -43,14 +43,16 @@ const postMeta = (config, payload) => new Promise((resolve, reject) => {
   request.end(JSON.stringify(payload));
 });
 
-const buildCustomerCodeTransports = ({ getConfig = () => require("../helpers/env").getCustomerAuthConfig() } = {}) => ({
-  channels: () => configuredChannels(getConfig()),
+const buildCustomerCodeTransports = ({ getConfig = () => require("../helpers/env").getCustomerAuthConfig(),
+  sms = require('./customerSms').buildSmsTransport() } = {}) => ({
+  channels: () => ({ ...configuredChannels(getConfig()), sms: authSecretReady(getConfig()) && sms.available(), smsDevelopment: sms.development() }),
   async sendCode({ channel, destination, code, expiresInMinutes, locale }) {
     const config = getConfig();
-    if (!configuredChannels(config)[channel]) throw channelUnavailable();
+    if (!(channel === 'sms' ? authSecretReady(config) && sms.available() : configuredChannels(config)[channel])) throw channelUnavailable();
     if (typeof code !== "string" || !/^\d{6}$/.test(code) || expiresInMinutes !== 10
       || (locale !== undefined && (typeof locale !== "string" || !/^[a-z]{2,3}(?:[-_][A-Za-z]{2})?$/.test(locale)))) throw unavailable();
     destination = normalizeCustomerDestination({ channel, value: destination });
+    if (channel === 'sms') return sms.send({ destination, code });
     try {
       if (channel === "email") {
         const french = !locale || locale.startsWith("fr");

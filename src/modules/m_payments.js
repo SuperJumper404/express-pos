@@ -133,7 +133,10 @@ const sqlRepository = {
     ).then((rows) => rows[0] || null);
   },
 
-  lockOrder: (input) => resolveCommercialOrder({ ...input, forUpdate: true }),
+  lockOrder: async (input) => {
+    await input.connection.query('SELECT id FROM shop WHERE id=? FOR UPDATE', [input.shopId]);
+    return resolveCommercialOrder({ ...input, forUpdate: true });
+  },
 
   lockOrderReservations: ({ orderId, connection }) => queryResult(
     connection,
@@ -469,6 +472,7 @@ const buildPaymentModule = ({
   withTransaction: runInTransaction = withTransaction,
   finalizeReservations: settleReservations = finalizeReservations,
   now = () => new Date(),
+  loyalty = repository === sqlRepository ? require('./m_loyalty').buildLoyalty() : null,
 } = {}) => {
   const timestamp = () => formatDate(now());
   const replacementAttemptToken = () => crypto.randomBytes(32).toString("hex");
@@ -633,6 +637,8 @@ const buildPaymentModule = ({
         timestamp: currentTimestamp,
         connection,
       });
+      if (loyalty) await loyalty.settlePaidOrder({ connection, shopId: Number(payment.shop_id), orderId: order.id,
+        paymentKey: `stripe:${paymentIntentId}`, paidCents: Number(payment.amount_cents) });
       return { paid: true };
     });
   };
@@ -727,6 +733,7 @@ const buildPaymentModule = ({
       status,
       connection,
     });
+    if (loyalty) await loyalty.release({ connection, shopId: Number(payment.shop_id), orderId: order.id });
     return { status };
   };
 
@@ -971,6 +978,7 @@ const buildPaymentModule = ({
         timestamp: currentTimestamp,
         connection,
       });
+      if (loyalty) await loyalty.release({ connection, shopId: Number(shopId), orderId: order.id });
       return { canceled: true };
     },
   );
@@ -1009,6 +1017,7 @@ const buildPaymentModule = ({
       if (!result.affectedRows) {
         throw new Error("Orphaned Stripe order changed during cancellation");
       }
+      if (loyalty) await loyalty.release({ connection, shopId: Number(shopId), orderId: order.id });
       return { canceled: true };
     },
   );
@@ -1119,6 +1128,11 @@ const buildPaymentModule = ({
       && cumulativeRefunded >= Number(payment.amount_cents);
     const individualRefundIsPartial = refund.amount != null
       && Number(refund.amount) !== Number(payment.amount_cents);
+    if (loyalty && refund.status === 'succeeded' && Number.isSafeInteger(Number(refund.amount)) && Number(refund.amount) > 0) {
+      await loyalty.refundOrder({ connection, shopId: Number(payment.shop_id), orderId: order.id,
+        refundedCents: Number(refund.amount), ...(hasAuthoritativeCumulative ? { cumulativeRefundedCents: cumulativeRefunded } : {}),
+        refundKey: `stripe:${refund.id}${hasAuthoritativeCumulative ? `:total:${cumulativeRefunded}` : ''}` });
+    }
     if ((refund.status === "succeeded"
       && hasAuthoritativeCumulative
       && !cumulativeRefundComplete)

@@ -76,6 +76,7 @@ const canonicalPayload = (input) => {
       ? input.paymentMode.trim().toLowerCase()
       : input.paymentMode,
     ...(input.verifiedCustomer && { customer_account_id: input.verifiedCustomer.customerId }),
+    ...(input.loyaltyRewardId && { loyalty_reward_id: input.loyaltyRewardId, loyalty_confirmed: input.loyaltyConfirmed }),
     ...(input.fulfillmentType === "delivery" && {
       fulfillment_type: "delivery",
       actor_id: input.actorId,
@@ -214,6 +215,7 @@ const normalizeCheckoutRequestBody = (body = {}, { paymentModeOverride } = {}) =
       : { servicePointId: body.service_point_id }),
     items,
     expectedTotal: body.expected_total,
+    ...(body.loyalty_reward_id !== undefined && { loyaltyRewardId: body.loyalty_reward_id, loyaltyConfirmed: body.loyalty_confirmed }),
     ...(body.discount_type === undefined
       ? {}
       : { discountType: body.discount_type }),
@@ -306,6 +308,8 @@ const validateCheckoutInput = (input = {}) => {
   const isTakeaway = normalizeBoolean(input.isTakeaway, "is_takeaway");
   const delivery = input.fulfillmentType === "delivery";
   const verifiedCustomer = input.verifiedCustomer;
+  if (input.loyaltyRewardId !== undefined && (!verifiedCustomer || delivery || typeof input.loyaltyRewardId !== 'string'
+    || !/^[A-Za-z0-9_-]{1,64}$/.test(input.loyaltyRewardId) || input.loyaltyConfirmed !== true)) throw invalidRequest('loyalty_reward');
   if (verifiedCustomer && (verifiedCustomer.shopId !== Number(input.shopId)
     || typeof verifiedCustomer.customerId !== "string" || !/^[1-9]\d{0,19}$/.test(verifiedCustomer.customerId)
     || BigInt(verifiedCustomer.customerId) > 18446744073709551615n)) throw invalidRequest("customer_session");
@@ -346,6 +350,7 @@ const validateCheckoutInput = (input = {}) => {
     clientOrderToken: input.clientOrderToken.trim(),
     paymentMode: input.paymentMode.trim().toLowerCase(),
     ...(verifiedCustomer && { verifiedCustomer: { shopId: verifiedCustomer.shopId, customerId: verifiedCustomer.customerId } }),
+    ...(input.loyaltyRewardId && { loyaltyRewardId: input.loyaltyRewardId, loyaltyConfirmed: true }),
     ...(delivery && input.deliveryDetails !== undefined && { deliveryDetails: normalizeDeliveryDetails(input.deliveryDetails) }),
   };
 };
@@ -358,7 +363,7 @@ const queryResult = async (connection, sql, params = []) => {
 const sqlRepository = {
   findUserById: ({ userId, shopId, connection }) => queryResult(
     connection,
-    `SELECT id, shopid, username, access, status
+    `SELECT id, shopid, username, access, status, module_permissions
      FROM users
      WHERE id = ? AND shopid = ?
      LIMIT 1`,
@@ -623,6 +628,7 @@ const buildCheckoutModule = ({
   reservationTtlMs = RESERVATION_TTL_MS,
   deliveryQuotes = buildDeliveryQuotes(),
   deliveryOrders = buildDeliveryOrders({ clock: now }),
+  loyalty = repository === sqlRepository ? require('./m_loyalty').buildLoyalty() : null,
 } = {}) => {
   const runWithConnection = (connection, work) => (
     connection ? work(connection) : runInTransaction(work)
@@ -932,7 +938,7 @@ const buildCheckoutModule = ({
         resolvedItems,
         discount.amount,
       );
-      const total = discount.total;
+      let total = discount.total;
       const serverQuote = {
         ...quote,
         total,
@@ -969,6 +975,7 @@ const buildCheckoutModule = ({
           connection,
         })
         : null;
+      require('../helpers/checkoutPaymentAuthority').assertCheckoutPaymentAuthority({ ...checkout, actor });
       const takenBy = actor && isOrderTakerAccess(actor.access)
         ? { id: Number(actor.id), name: actor.username }
         : { id: null, name: null };
@@ -1144,6 +1151,16 @@ const buildCheckoutModule = ({
         });
       }
 
+      if (loyalty && checkout.verifiedCustomer) await loyalty.attachCustomerOrder({ connection,
+        shopId: checkout.shopId, orderId, customerId: checkout.verifiedCustomer.customerId });
+      if (checkout.loyaltyRewardId) {
+        if (!loyalty) throw new DomainError(503, 'LOYALTY_UNAVAILABLE', 'Loyalty unavailable');
+        const applied = await loyalty.applyCheckoutReward({ connection, shopId: checkout.shopId, orderId,
+          customerId: checkout.verifiedCustomer.customerId, rewardId: checkout.loyaltyRewardId, confirmed: checkout.loyaltyConfirmed });
+        total = applied.totalCents / 100;
+      }
+      if (loyalty && paymentState.payment_status === 'paid') await loyalty.settlePaidOrder({ connection,
+        shopId: checkout.shopId, orderId, paymentKey: `counter:${orderId}`, paidCents: Math.round(total * 100) });
       const result = {
         orderId,
         total,

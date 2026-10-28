@@ -110,7 +110,7 @@ if (require.main === module) {
     await withHttp(app, async request => {
       const channels = await request(`${prefix}/customer-auth/channels`, { headers: { Origin: "https://shop.smarteat.test", Authorization: "Bearer stale" } });
       assert.equal(channels.status, 200, channels.raw);
-      assert.deepEqual(channels.data.data, { email: false, whatsapp: false });
+      assert.deepEqual(channels.data.data, { email: false, whatsapp: false, sms: false, smsDevelopment: false });
       assert.equal(channels.headers["access-control-allow-origin"], "https://shop.smarteat.test");
       assert.equal(channels.headers["access-control-allow-credentials"], "true");
       const own = await request(`${prefix}/customer-auth/session?shopId=7`, { headers: { Authorization: "Bearer stale" } });

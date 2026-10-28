@@ -1,0 +1,23 @@
+const assert = require('assert');
+const { buildLoyaltyController } = require('../src/controllers/c_loyalty');
+const calls = [];
+const loyalty = new Proxy({}, { get: (_, method) => async input => { calls.push({ method, input }); return { ok: true }; } });
+const controller = buildLoyaltyController({ loyalty });
+const response = () => ({ statusCode: null, payload: null, set() {}, status(value) { this.statusCode = value; return this; }, json(value) { this.payload = value; return this; } });
+const admin = { sessionSubject: 'staff', id: 1, shopid: 2, currentUser: { id: 1, shopid: 2, access: 0, status: 1 }, body: {}, query: {}, params: {} };
+(async () => {
+  let res = response(); await controller.getProgram(admin, res); assert.strictEqual(res.statusCode, 200);
+  assert.deepStrictEqual(calls.pop(), { method: 'getProgram', input: { shopId: 2 } });
+  res = response(); await controller.getProgram({ ...admin, sessionSubject: 'service_point' }, res); assert.strictEqual(res.statusCode, 403);
+  res = response(); await controller.saveProgram({ ...admin, currentUser: { ...admin.currentUser, access: 1, module_permissions: '["cashregister"]' } }, res); assert.strictEqual(res.statusCode, 403);
+  res = response(); await controller.lookup({ ...admin, currentUser: { ...admin.currentUser, access: 1, module_permissions: '["cashregister"]' }, body: { qr: 'a'.repeat(64) } }, res); assert.strictEqual(res.statusCode, 200);
+  assert.strictEqual(calls.pop().input.shopId, 2);
+  res = response(); await controller.lookup({ ...admin, body: { qr: 'a'.repeat(64), shopId: 9 } }, res); assert.strictEqual(res.statusCode, 422);
+  res = response(); await controller.getPersonal({ customerSession: { shopId: 3, customerId: '50' }, query: {} }, res); assert.strictEqual(res.statusCode, 200);
+  assert.deepStrictEqual(calls.pop(), { method: 'getMember', input: { shopId: 3, customerId: '50' } });
+  res = response(); await controller.getPersonal({ customerSession: { shopId: 3, customerId: '50' }, query: { shopId: '3' } }, res); assert.strictEqual(res.statusCode, 200);
+  res = response(); await controller.getPersonal({ customerSession: { shopId: 3, customerId: '50' }, query: { shopId: '4' } }, res); assert.strictEqual(res.statusCode, 422);
+  res = response(); await controller.enroll({ customerSession: { shopId: 3, customerId: '50' }, body: { customerId: '51' }, query: {} }, res); assert.strictEqual(res.statusCode, 422);
+  res = response(); await controller.getPersonal({ query: {} }, res); assert.strictEqual(res.statusCode, 401);
+  console.log('loyalty authorization tests passed');
+})().catch(error => { console.error(error); process.exitCode = 1; });
