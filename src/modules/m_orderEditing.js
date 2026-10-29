@@ -9,6 +9,7 @@ const { buildDeliveryQuotes } = require("./m_deliveryQuotes");
 const { buildDeliveryOrders } = require("./m_deliveryOrders");
 const { isOrderTakerAccess } = require("../helpers/staffAccess");
 const { adjustProductStock } = require("../helpers/productStockMutation");
+const { assertNoActiveTerminalPayment } = require("../helpers/terminalOrderPayment");
 
 const EDITABLE_PAYMENT_STATUSES = new Set(["unpaid", "requires_payment"]);
 const isOrderEditable = (order = {}) =>
@@ -21,6 +22,7 @@ const queryResult = async (connection, sql, params = []) => {
 };
 
 const sqlRepository = {
+  assertNoActiveTerminalPayment,
   findOrder: ({ orderId, shopId, connection }) => queryResult(
     connection,
     "SELECT orders.*, CAST(delivery_id AS CHAR) AS delivery_id, CAST(customer_account_id AS CHAR) AS customer_account_id FROM orders WHERE id = ? AND shopid = ? LIMIT 1",
@@ -508,6 +510,9 @@ const buildOrderEditingModule = ({
           if (replay) return replay;
         }
         throw new DomainError(404, "ORDER_NOT_FOUND", "Commande introuvable.");
+      }
+      if (repository.assertNoActiveTerminalPayment) {
+        await repository.assertNoActiveTerminalPayment({ connection, shopId: amendment.shopId, orderId: order.id });
       }
       let deliveryContext;
       let deliveryCheckout;

@@ -15,6 +15,7 @@ const DomainError = require("../helpers/domainError");
 const deliveryOrders = require("./m_deliveryOrders");
 const { toCents, assertCents } = require("../helpers/deliveryMoney");
 const { recordRegisterSettlement } = require("./m_deliveryRegisterPayments");
+const { assertNoActiveTerminalPayment, assertTerminalOrderCanBeDiscarded } = require("../helpers/terminalOrderPayment");
 
 const queryResult = async (connection, sql, params = []) => {
   const [result] = await (connection || pool).query(sql, params);
@@ -29,6 +30,7 @@ const assertNoPendingDeliveryTerminal = async ({ orderId, shopId, connection }) 
 };
 
 const archiveSqlRepository = {
+  assertNoActiveTerminalPayment,
   findTerminalAllocationForArchive: ({ shopId, orderId, paymentId, connection }) => (
     buildStripeTerminalModule({ connection }).findOrderAllocation({ shopId, orderId, paymentId })
   ),
@@ -435,6 +437,9 @@ const buildOrderArchiveModule = ({
         connection,
       });
       if (!order) throw new Error("Commande introuvable");
+      if (order.delivery_id == null && repository.assertNoActiveTerminalPayment) {
+        await repository.assertNoActiveTerminalPayment({ connection, shopId: order.shopid, orderId: order.id });
+      }
 
       let deliveryContext;
       if (order.delivery_id != null) {
@@ -454,6 +459,7 @@ const buildOrderArchiveModule = ({
       }
 
       const hiddenFromHistory = Boolean(discount.hiddenFromHistory);
+      if (hiddenFromHistory) assertTerminalOrderCanBeDiscarded(order);
       if (hiddenFromHistory && Array.isArray(discount.allowedStatuses)) {
         const allowedStatuses = new Set(discount.allowedStatuses.map(Number));
         if (!allowedStatuses.has(Number(order.status))) {
@@ -890,21 +896,15 @@ module.exports = {
       });
     });
   },
-  mUpdateOrders: (data, id) => {
-    return new Promise((resolve, reject) => {
-      conn.query(
-        "UPDATE orders SET ? WHERE id = ?",
-        [data, id],
-        (err, result) => {
-          if (!err) {
-            resolve(result);
-          } else {
-            reject(new Error(err));
-          }
-        },
-      );
-    });
-  },
+  mUpdateOrders: (data, id) => withTransaction(async (connection) => {
+    const order = await archiveSqlRepository.findOrderForArchive({ orderId: id, connection });
+    if (!order) return { affectedRows: 0 };
+    await assertNoActiveTerminalPayment({ connection, shopId: order.shopid, orderId: order.id });
+    if (order.stripe_terminal_payment_id != null) {
+      throw new DomainError(409, "TERMINAL_PAYMENT_ALREADY_COLLECTED", "Cette commande a deja ete encaissee par TPE.");
+    }
+    return queryResult(connection, "UPDATE orders SET ? WHERE id = ?", [data, id]);
+  }),
   mDeleteOrder: (id) => {
     return new Promise((resolve, reject) => {
       console.log("delete", id);

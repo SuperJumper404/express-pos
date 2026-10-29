@@ -3,6 +3,7 @@ const DomainError = require("../helpers/domainError");
 const { ORDER_STATUSES } = require("../helpers/orderStatus");
 const { isStaffAccess } = require("../helpers/staffAccess");
 const { withTransaction } = require("../helpers/withTransaction");
+const { assertNoActiveTerminalPayment, assertTerminalOrderCanBeDiscarded } = require("../helpers/terminalOrderPayment");
 
 const ALLOWED_TRANSITIONS = new Set([
   `${ORDER_STATUSES.PENDING}:${ORDER_STATUSES.PREPARING}`,
@@ -17,6 +18,7 @@ const queryResult = async (connection, sql, params = []) => {
 };
 
 const sqlRepository = {
+  assertNoActiveTerminalPayment,
   findUserById: ({ userId, shopId, connection }) => queryResult(
     connection,
     `SELECT id, shopid, username, access
@@ -82,6 +84,10 @@ const buildOrderTransitionModule = ({
         throw new DomainError(409, "DELIVERY_TRANSITION_NOT_ALLOWED", "Delivery cancellation requires its explicit commercial workflow");
       }
       assertOrderStatusTransition(order, nextStatus);
+      if (Number(nextStatus) === ORDER_STATUSES.CANCELED) assertTerminalOrderCanBeDiscarded(order);
+      if (Number(nextStatus) === ORDER_STATUSES.CANCELED && repository.assertNoActiveTerminalPayment) {
+        await repository.assertNoActiveTerminalPayment({ connection, shopId, orderId: order.id });
+      }
       if (beforeTransition) {
         await beforeTransition({ order, connection });
       }

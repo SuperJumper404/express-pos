@@ -21,7 +21,7 @@ const hasShopFilter = (call, alias, shopId) => {
   const shopId = 7;
   const userId = 11;
   const reader = { id: 3, shopid: shopId, assigned_user_id: userId, is_active: 1 };
-  for (const status of [3, 0, 1, 2, 4, 5]) {
+  for (const status of [1, 2, 3, 0, 4, 5]) {
     const realistic = makeStore((sql) => {
       if (/FROM stripe_terminal_readers r/.test(sql)) return [reader];
       if (/FROM orders o/.test(sql)) return [{ id: 21, shopid: shopId, status,
@@ -37,13 +37,44 @@ const hasShopFilter = (call, alias, shopId) => {
     const settle = () => realistic.store.finalizePaymentSucceeded({
       shopId, paymentId: 42, stripePaymentIntentId: "pi_test", timestamp: new Date(),
     });
+    if ([1, 2, 3].includes(status)) {
+      assert.strictEqual((await reserve()).orders[0].status, status);
+      assert.deepStrictEqual(await settle(), { finalized: true });
+      assert.match(realistic.calls.find((call) => /UPDATE orders/.test(call.sql)).sql,
+        /o\.finished = CASE WHEN o\.delivery_id IS NULL AND o\.status = 3 THEN \? ELSE o\.finished END/);
+      const paymentSql = realistic.calls.find((call) => /UPDATE orders/.test(call.sql)).sql;
+      assert.match(paymentSql, /SET o\.payment_status = 'paid'/);
+      assert(!/\bo\.status\s*=/.test(paymentSql.split("CASE")[0]), "Collecting payment must preserve kitchen status");
+    } else {
+      await assert.rejects(reserve, /Invalid Terminal order selection/);
+      await assert.rejects(settle, /Terminal order finalization incomplete/);
+      assert(!realistic.calls.some((call) => /UPDATE orders/.test(call.sql)));
+    }
+  }
+  for (const status of [1, 2, 3, 4]) {
+    const delivery = makeStore((sql) => {
+      if (/FROM stripe_terminal_readers r/.test(sql)) return [reader];
+      if (/FROM orders o/.test(sql)) return [{ id: 21, shopid: shopId, status,
+        delivery_id: "9007199254740993", payment_status: "unpaid", subtotal: "12.00",
+        payment_provider: null, stripe_payment_intent_id: null }];
+      if (/FROM stripe_terminal_payment_orders a/.test(sql)) return /SELECT a\.\*/.test(sql)
+        ? [{ order_id: 21, amount_cents: 1200 }] : [];
+      if (/FROM stripe_terminal_payments p/.test(sql)) return /status IN/.test(sql) ? [] : [{
+        id: 42, shopid: shopId, stripe_payment_intent_id: "pi_test", status: "processing",
+      }];
+      return { affectedRows: 1 };
+    });
+    const reserve = () => delivery.store.lockReaderAndOrders({ shopId, userId, orderIds: [21] });
+    const settle = () => delivery.store.finalizePaymentSucceeded({
+      shopId, paymentId: 42, stripePaymentIntentId: "pi_test", timestamp: new Date(),
+    });
     if (status === 3) {
       assert.strictEqual((await reserve()).orders[0].status, 3);
       assert.deepStrictEqual(await settle(), { finalized: true });
     } else {
       await assert.rejects(reserve, /Invalid Terminal order selection/);
       await assert.rejects(settle, /Terminal order finalization incomplete/);
-      assert(!realistic.calls.some((call) => /UPDATE orders/.test(call.sql)));
+      assert(!delivery.calls.some(call => /UPDATE orders/.test(call.sql)));
     }
   }
   const { store, calls } = makeStore((sql) => {
@@ -153,7 +184,7 @@ const hasShopFilter = (call, alias, shopId) => {
 
   for (const badOrder of [
     { id: 21, shopid: 8, status: 3, payment_status: "unpaid" },
-    { id: 21, shopid: 7, status: 2, payment_status: "unpaid" },
+    { id: 21, shopid: 7, status: 4, payment_status: "unpaid" },
     { id: 21, shopid: 7, status: 3, payment_status: "paid" },
   ]) {
     const rejected = makeStore((sql) => {

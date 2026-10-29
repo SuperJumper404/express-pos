@@ -497,7 +497,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null, loyalty = n
     if (orders.length !== sortedIds.length || orders.some((order, index) => (
       order.id !== sortedIds[index]
       || Number(order.shopid) !== Number(shopId)
-      || Number(order.status) !== 3
+      || !(order.delivery_id == null ? [1, 2, 3] : [3]).includes(Number(order.status))
       || order.payment_status !== "unpaid"
       || order.stripe_terminal_payment_id != null
       || (order.delivery_id != null && (order.payment_provider != null || order.stripe_payment_intent_id != null))
@@ -559,7 +559,8 @@ const buildStripeTerminalModule = ({ connection, lockContext = null, loyalty = n
     const count = allocations.length;
     if (!count) throw new Error("Terminal payment has no allocations");
     if (lockedOrders.length !== count || lockedOrders.some((order) => (
-      Number(order.shopid) !== Number(shopId) || Number(order.status) !== 3
+      Number(order.shopid) !== Number(shopId)
+      || !(order.delivery_id == null ? [1, 2, 3] : [3]).includes(Number(order.status))
       || order.payment_status !== "unpaid" || order.stripe_terminal_payment_id != null
     ))) throw new Error("Terminal order finalization incomplete");
     if (lockedOrders.some(order => order.delivery_id != null && (
@@ -574,7 +575,7 @@ const buildStripeTerminalModule = ({ connection, lockContext = null, loyalty = n
            o.payment_provider = 'stripe_terminal',
            o.payment = 'Carte bancaire - TPE Stripe',
            o.stripe_terminal_payment_id = ?,
-           o.finished = CASE WHEN o.delivery_id IS NULL THEN ? ELSE o.finished END
+           o.finished = CASE WHEN o.delivery_id IS NULL AND o.status = 3 THEN ? ELSE o.finished END
        WHERE o.shopid = ? AND a.shopid = ? AND a.terminal_payment_id = ?
          AND o.payment_status = 'unpaid' AND o.stripe_terminal_payment_id IS NULL`,
       [paymentId, timestamp, shopId, shopId, paymentId],
