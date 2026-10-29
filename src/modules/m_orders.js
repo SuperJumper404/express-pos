@@ -112,7 +112,10 @@ const archiveSqlRepository = {
             orderdetail.total_ht AS total_ht,
             orderdetail.total_vat AS total_vat,
             CAST(orders.delivery_id AS CHAR) AS delivery_id,
-            CAST(orders.customer_account_id AS CHAR) AS customer_account_id
+            CAST(orders.customer_account_id AS CHAR) AS customer_account_id,
+            (SELECT p.reader_label FROM stripe_terminal_payments p
+             WHERE p.id = orders.stripe_terminal_payment_id AND p.shopid = orders.shopid
+               AND p.status = 'succeeded') AS terminal_reader_label
      FROM orders
      LEFT JOIN orderdetail ON orders.id = orderdetail.orderid
      LEFT JOIN products ON orderdetail.productid = products.id AND products.shopid = orders.shopid
@@ -147,7 +150,10 @@ const archiveSqlRepository = {
             archivesdetail.total_ht AS total_ht,
             archivesdetail.total_vat AS total_vat,
             CAST(archives.delivery_id AS CHAR) AS delivery_id,
-            CAST(archives.customer_account_id AS CHAR) AS customer_account_id
+            CAST(archives.customer_account_id AS CHAR) AS customer_account_id,
+            (SELECT p.reader_label FROM stripe_terminal_payments p
+             WHERE p.id = archives.stripe_terminal_payment_id AND p.shopid = archives.shopid
+               AND p.status = 'succeeded') AS terminal_reader_label
      FROM archives
      LEFT JOIN archivesdetail ON archives.id = archivesdetail.orderId
      LEFT JOIN products ON archivesdetail.productid = products.id AND products.shopid = archives.shopid
@@ -166,7 +172,10 @@ const archiveSqlRepository = {
             archivesdetail.total_ht AS total_ht,
             archivesdetail.total_vat AS total_vat,
             CAST(archives.delivery_id AS CHAR) AS delivery_id,
-            CAST(archives.customer_account_id AS CHAR) AS customer_account_id
+            CAST(archives.customer_account_id AS CHAR) AS customer_account_id,
+            (SELECT p.reader_label FROM stripe_terminal_payments p
+             WHERE p.id = archives.stripe_terminal_payment_id AND p.shopid = archives.shopid
+               AND p.status = 'succeeded') AS terminal_reader_label
      FROM archives
      LEFT JOIN archivesdetail ON archives.id = archivesdetail.orderId
      LEFT JOIN products ON archivesdetail.productid = products.id
@@ -626,7 +635,8 @@ module.exports = {
                 CASE WHEN orders.payment_status = 'paid'
                   AND orders.payment_provider = 'stripe_terminal'
                   AND terminal_payment.status = 'succeeded'
-                THEN terminal_allocation.amount_cents ELSE NULL END AS stripe_terminal_amount_cents
+                THEN terminal_allocation.amount_cents ELSE NULL END AS stripe_terminal_amount_cents,
+                terminal_payment.reader_label AS terminal_reader_label
          FROM orders
          LEFT JOIN service_points ON service_points.id = orders.service_point_id
          LEFT JOIN stripe_terminal_payment_orders terminal_allocation
@@ -1149,7 +1159,8 @@ module.exports = {
                 THEN terminal_payment.stripe_charge_id ELSE NULL END AS stripe_terminal_charge_id
                 ,CASE WHEN archives.payment_provider = 'stripe_terminal'
                   AND terminal_payment.status = 'succeeded'
-                THEN terminal_payment.card_receipt_details ELSE NULL END AS stripe_terminal_card_receipt_details
+                THEN terminal_payment.card_receipt_details ELSE NULL END AS stripe_terminal_card_receipt_details,
+                terminal_payment.reader_label AS terminal_reader_label
          FROM archives
          LEFT JOIN service_points ON service_points.id = archives.service_point_id
          LEFT JOIN stripe_terminal_payments terminal_payment

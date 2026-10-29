@@ -1,6 +1,7 @@
 const { randomUUID } = require("crypto");
 const { toStripeAmount } = require("../helpers/stripePayment");
 const { standalonePaymentDto } = require("../helpers/standaloneTerminalPayment");
+const { cardWaitExpired, staleTerminalCreation } = require("../helpers/terminalCardWait");
 const {
   allocateTerminalOrderAmounts, calculateTerminalApplicationFee, buildTerminalPaymentIntentParams,
 } = require("../helpers/stripeTerminal");
@@ -43,11 +44,7 @@ const positiveId = (value) => {
 };
 const active = (session) => ["creating", "processing"].includes(session.status);
 const cancelable = (intent) => ["requires_payment_method", "requires_confirmation", "requires_action", "requires_capture"].includes(intent.status);
-const recoverableActivePaymentAgeMs = 30 * 1000;
-const oldEnoughForRecovery = (session) => {
-  const createdAt = new Date(session.created_at).getTime();
-  return Number.isFinite(createdAt) && Date.now() - createdAt >= recoverableActivePaymentAgeMs;
-};
+const oldEnoughForRecovery = session => cardWaitExpired(session) || staleTerminalCreation(session);
 const matchingAction = (reader, intentId) => reader.action
   && reader.action.type === "process_payment_intent"
   && reader.action.process_payment_intent
@@ -94,6 +91,7 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
     return {
       id: session.id,
       readerId: session.terminal_reader_id,
+      readerLabel: session.reader_label || null,
       status: session.status,
       amountCents: session.amount_cents,
       currency: session.currency,
@@ -155,12 +153,17 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
     return result;
   };
   const sessionScope = (session) => ({ shopId: session.shopid, cashierUserId: session.cashier_user_id, paymentId: session.id, paymentKind: session.payment_kind || "order" });
-  const cancelRemote = (session, reader, store = terminalStore) => readerAction(session, async (lockedStore) => {
-    const current = await payment(sessionScope(session), lockedStore);
+  const cancelRemote = (session, reader, store = terminalStore, awaitingCardOnly = false) => readerAction(session, async (lockedStore) => {
+    const current = await lockedStore.findPaymentSession({ shopId: session.shopid, paymentId: session.id });
+    if (!current || Number(current.shopid) !== Number(session.shopid)
+      || Number(current.cashier_user_id) !== Number(session.cashier_user_id)
+      || (current.payment_kind || "order") !== (session.payment_kind || "order")) fail("TERMINAL_RECOVERY_REQUIRED");
     if (current.terminal_reader_id !== reader.id || (current.stripe_payment_intent_id
       && current.stripe_payment_intent_id !== session.stripe_payment_intent_id)) fail("TERMINAL_RECOVERY_REQUIRED");
     const remote = await stripeCall(() => stripe.terminal.readers.retrieve(reader.stripe_reader_id));
     let intent = await stripeCall(() => stripe.paymentIntents.retrieve(session.stripe_payment_intent_id));
+    assertIntentMatches(session, intent);
+    if (awaitingCardOnly && intent.status !== "requires_payment_method") return intent;
     // cancelAction is untargeted: keep the reader lock from this read through
     // cancellation so another application instance cannot hand off its next PI.
     if (active(current) && current.stripe_payment_intent_id === session.stripe_payment_intent_id
@@ -187,7 +190,7 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
       // Collection may have succeeded while cancellation was requested.
       intent = await stripeCall(() => stripe.paymentIntents.retrieve(session.stripe_payment_intent_id));
     }
-    if (active(current) && cancelable(intent)) {
+    if (active(current) && cancelable(intent) && (!awaitingCardOnly || intent.status === "requires_payment_method")) {
       try {
         intent = await stripe.paymentIntents.cancel(intent.id, {}, { idempotencyKey: `${session.idempotency_key}:cancel` });
       } catch (error) {
@@ -198,37 +201,45 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
     return intent;
   }, store);
 
-  const markCanceled = async (session) => {
+  const markCanceled = async (session, store = terminalStore) => {
     await databaseTransaction(async (transactionStore) => {
       const current = await payment(sessionScope(session), transactionStore, true);
       if (active(current)) await update(current, { status: "canceled" }, transactionStore);
-    }, terminalStore.withTransaction);
+    }, store.withTransaction);
   };
 
-  const recoverActivePayment = async (session) => {
-    if (session.payment_kind === "standalone") return false;
+  const recoverActivePayment = async (session, includeStandalone = false, store = terminalStore, creationLocked = false) => {
+    if (session.payment_kind === "standalone" && !includeStandalone) return false;
+    if (!active(session)) return false;
     if (!session.stripe_payment_intent_id || !oldEnoughForRecovery(session)) return false;
+    if (session.status === 'creating' && !creationLocked) {
+      return Boolean(await store.withPaymentCreationLock({ shopId: session.shopid, paymentId: session.id }, async lockedStore => {
+        const current = await lockedStore.findPaymentSession({ shopId: session.shopid, paymentId: session.id });
+        return current && recoverActivePayment(current, includeStandalone, lockedStore, true);
+      }));
+    }
     let intent = await stripeCall(() => stripe.paymentIntents.retrieve(session.stripe_payment_intent_id));
     if (["succeeded", "canceled"].includes(intent.status)) {
       await databaseTransaction(
         async (transactionStore) => reconcile(session, intent, transactionStore),
-        terminalStore.withTransaction,
+        store.withTransaction,
       );
       return true;
     }
-    if (!cancelable(intent)) return false;
-    const reader = await terminalStore.findReader({ shopId: session.shopid, readerId: session.terminal_reader_id });
+    assertIntentMatches(session, intent);
+    if (intent.status !== "requires_payment_method") return false;
+    const reader = await store.findReader({ shopId: session.shopid, readerId: session.terminal_reader_id });
     if (!reader) return false;
-    intent = await cancelRemote(session, reader);
+    intent = await cancelRemote(session, reader, store, true);
     if (intent.status === "succeeded") {
       await databaseTransaction(
         async (transactionStore) => reconcile(session, intent, transactionStore),
-        terminalStore.withTransaction,
+        store.withTransaction,
       );
       return true;
     }
     if (intent.status === "canceled") {
-      await markCanceled(session);
+      await markCanceled(session, store);
       return true;
     }
     return false;
@@ -316,6 +327,11 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
         const currentReader = await stripeCall(() => stripe.terminal.readers.retrieve(reader.stripe_reader_id));
         if (currentReader.status !== "online") fail("TERMINAL_READER_OFFLINE");
         if (currentReader.action && currentReader.action.status === "in_progress" && !matchingAction(currentReader, intent.id)) fail("TERMINAL_READER_BUSY");
+        if (!current.card_wait_started_at) {
+          await databaseTransaction(async transactionStore => {
+            await update(current, { cardWaitStartedAt: new Date() }, transactionStore);
+          }, lockedStore.withTransaction);
+        }
         if (!matchingAction(currentReader, intent.id) || currentReader.action.status !== "in_progress") {
           await stripeCall(() => stripe.terminal.readers.processPaymentIntent(reader.stripe_reader_id, {
             payment_intent: intent.id,
@@ -467,10 +483,10 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
     if (!active(session) || !session.stripe_payment_intent_id) return dto(session);
     let intent = await stripeCall(() => stripe.paymentIntents.retrieve(session.stripe_payment_intent_id));
     let expiredCancel = false;
-    if (session.payment_kind !== "standalone" && oldEnoughForRecovery(session) && cancelable(intent)) {
+    if (session.status === 'processing' && cardWaitExpired(session) && intent.status === "requires_payment_method") {
       const reader = await terminalStore.findReader({ shopId: session.shopid, readerId: session.terminal_reader_id });
       if (!reader) fail("TERMINAL_NO_READER");
-      intent = await cancelRemote(session, reader);
+      intent = await cancelRemote(session, reader, terminalStore, true);
       expiredCancel = intent.status === "canceled";
     }
     let failedAction = false;
@@ -525,6 +541,8 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
   });
 
   return { startPayment, getPaymentStatus, cancelPayment, startStandalonePayment,
+    maintainPayment: session => recoverActivePayment(session, true),
+    cancelRemotePayment: cancelRemote,
     getStandalonePaymentStatus: input => getPaymentStatus({ ...input, paymentKind: "standalone" }),
     cancelStandalonePayment: input => cancelPayment({ ...input, paymentKind: "standalone" }) };
 };

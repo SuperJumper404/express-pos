@@ -4,6 +4,7 @@ const standalonePaymentDto = (session, intent = null) => ({
   id: Number(session.id),
   paymentKind: 'standalone',
   readerId: Number(session.terminal_reader_id),
+  readerLabel: session.reader_label || null,
   status: session.status,
   amountCents: Number(session.amount_cents),
   currency: session.currency,

@@ -21,6 +21,7 @@ const {
   runStripePaymentMaintenance,
 } = require("./src/services/stripePaymentMaintenance");
 const dbPool = require("./src/config/dbPool");
+const { runStripeTerminalMaintenance } = require("./src/services/stripeTerminalMaintenance");
 const { waitForDatabase } = require("./src/helpers/waitForDatabase");
 const { envPORT, envPUBLICIMAGEPATH } = require("./src/helpers/env");
 const prefix = require("./src/config/prefix");
@@ -135,6 +136,11 @@ const startServer = async () => {
     });
   }, 60 * 1000);
   reservationReleaseTimer.unref();
+  const runTerminalMaintenance = buildNonOverlappingRunner(runStripeTerminalMaintenance, { info() {} });
+  const terminalTimer = setInterval(() => runTerminalMaintenance().catch(() => {
+    console.error('Terminal card wait maintenance unavailable; retrying');
+  }), 1000);
+  terminalTimer.unref();
   const runLoyaltyMaintenance = buildNonOverlappingRunner(async () => {
     await require('./src/modules/m_loyalty').buildLoyalty().expireReservations();
     await require('./src/services/loyaltyWalletWorker').runLoyaltyWalletMaintenance();

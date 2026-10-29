@@ -112,6 +112,7 @@ const fixture = () => {
       const session = state.sessions.find((row) => row.shopid === data.shopId && row.id === data.paymentId);
       if (!session) return { affectedRows: 0 };
       if (data.stripePaymentIntentId !== undefined) session.stripe_payment_intent_id = data.stripePaymentIntentId;
+      if (data.cardWaitStartedAt !== undefined) session.card_wait_started_at ||= data.cardWaitStartedAt;
       if (data.stripeChargeId !== undefined) session.stripe_charge_id = data.stripeChargeId;
       if (data.cardReceiptDetails !== undefined) session.card_receipt_details = data.cardReceiptDetails;
       if (data.status !== undefined) session.status = data.status;
@@ -309,6 +310,7 @@ test("starts one kiosk order and one Terminal PaymentIntent on the assigned read
     orderId: 100,
     orderNumber: "B100",
     readerId: 21,
+    readerLabel: null,
     status: "processing",
     amountCents: 2000,
     currency: "eur",
@@ -381,6 +383,7 @@ test("reconciles a canceled active reader payment before starting a kiosk paymen
     stripe_payment_intent_id: "pi_old",
     stripe_charge_id: null,
     created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+    card_wait_started_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
   });
   f.state.allocations.push({
     shopid: 7,
@@ -431,6 +434,7 @@ test("cleans a stale cancelable kiosk reader payment before starting a new one",
     stripe_payment_intent_id: "pi_old",
     stripe_charge_id: null,
     created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+    card_wait_started_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
   });
   f.state.allocations.push({
     shopid: 7,
@@ -492,6 +496,7 @@ test("cleans a stale kiosk preparation without a Stripe intent before starting a
     stripe_payment_intent_id: null,
     stripe_charge_id: null,
     created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+    card_wait_started_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
   });
   f.state.allocations.push({
     shopid: 7,
@@ -511,10 +516,10 @@ test("cleans a stale kiosk preparation without a Stripe intent before starting a
   assert.strictEqual(result.status, "processing");
 });
 
-test("polling expires a kiosk terminal payment after thirty seconds", async () => {
+test("polling expires a kiosk terminal payment after twelve seconds", async () => {
   const f = fixture();
   await f.service.startPayment({ shopId: 7, servicePointId: 4, checkoutPayload });
-  f.state.sessions[0].created_at = new Date(Date.now() - 31 * 1000).toISOString();
+  f.state.sessions[0].card_wait_started_at = new Date(Date.now() - 12001).toISOString();
   f.state.intent.status = "requires_payment_method";
   f.state.remote.action = {
     type: "process_payment_intent",
@@ -537,16 +542,14 @@ test("polling expires a kiosk terminal payment after thirty seconds", async () =
   assert(f.state.calls.some((call) => call.name === "counter-fallback"));
 });
 
-test("reader lock timeout cancels the kiosk intent and falls back to counter payment", async () => {
+test("reader lock timeout retains the kiosk reservation until cancellation can be verified", async () => {
   const f = fixture();
   f.terminalStore.withReaderActionLock = async () => null;
-  const result = await f.service.startPayment({ shopId: 7, servicePointId: 4, checkoutPayload });
-  assert.strictEqual(result.outcome, "failed");
-  assert.strictEqual(result.status, "failed");
+  await assert.rejects(() => f.service.startPayment({ shopId: 7, servicePointId: 4, checkoutPayload }),
+    error => error.code === 'TERMINAL_READER_BUSY');
+  assert.strictEqual(f.state.sessions[0].status, 'creating');
   assert.strictEqual(f.state.calls.filter((call) => call.name === "process").length, 0);
-  assert.strictEqual(f.state.calls.filter((call) => call.name === "cancel-intent").length, 1);
-  assert.strictEqual(f.state.orders[0].payment, "Paiement au comptoir");
-  assert.strictEqual(f.state.orders[0].payment_status, "unpaid");
+  assert.strictEqual(f.state.calls.filter((call) => call.name === "cancel-intent").length, 0);
 });
 
 test("success reconciliation marks the kiosk order paid and exposes only safe card-ticket fields", async () => {
@@ -648,6 +651,40 @@ test("explicit kiosk cancel cancels the Terminal payment and removes the prepare
     [{ orderId: 100, status: "release", operator: 0 }],
   );
   assert.strictEqual(f.state.calls.some((call) => call.name === "counter-fallback"), false);
+});
+
+test("kiosk failure polling keeps a card authorization reserved when cancellation races", async () => {
+  const f = fixture();
+  await f.service.startPayment({ shopId: 7, servicePointId: 4, checkoutPayload });
+  f.state.remote.action.status = 'failed';
+  f.stripe.paymentIntents.cancel = async () => {
+    f.state.intent.status = 'processing';
+    return clone(f.state.intent);
+  };
+  const result = await f.service.getPaymentStatus({ shopId: 7, servicePointId: 4, paymentId: 41 });
+  assert.strictEqual(result.status, 'processing');
+  assert.strictEqual(f.state.orders[0].payment_provider, 'stripe_terminal');
+});
+
+test("server card wait maintenance cancels an unanswered kiosk payment after twelve seconds", async () => {
+  const f = fixture();
+  await f.service.startPayment({ shopId: 7, servicePointId: 4, checkoutPayload });
+  assert(f.state.sessions[0].card_wait_started_at);
+  f.state.sessions[0].card_wait_started_at = new Date(Date.now() - 12001).toISOString();
+  await f.service.maintainPayment(f.state.sessions[0]);
+  assert.strictEqual(f.state.sessions[0].status, 'canceled');
+  assert.deepStrictEqual(f.state.orders, []);
+});
+
+test("maintenance recovers a kiosk intent persisted before the handoff deadline exists", async () => {
+  const f = fixture();
+  await f.service.startPayment({ shopId: 7, servicePointId: 4, checkoutPayload });
+  Object.assign(f.state.sessions[0], { status: 'creating', card_wait_started_at: null,
+    created_at: new Date(Date.now() - 31000).toISOString() });
+  f.state.remote.action = null;
+  await f.service.maintainPayment(f.state.sessions[0]);
+  assert.strictEqual(f.state.sessions[0].status, 'canceled');
+  assert.deepStrictEqual(f.state.orders, []);
 });
 
 (async () => {

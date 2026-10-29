@@ -190,7 +190,7 @@ test("standalone history displays cashier and reader with tenant-scoped search a
   assert.equal(result.items[0].taken_by_name, "Camille");
   assert.equal(result.items[0].readerLabel, "Comptoir");
   assert.equal(result.items[0].terminalPayment.paymentKind, "standalone");
-  assert(!Object.prototype.hasOwnProperty.call(result.items[0].terminalPayment, "readerLabel"));
+  assert.equal(result.items[0].terminalPayment.readerLabel, "Comptoir");
   for (const call of calls) {
     assert.match(call.sql, /LEFT JOIN users cashier ON cashier.id = p.cashier_user_id AND cashier.shopid = p.shopid/);
     assert.match(call.sql, /LEFT JOIN stripe_terminal_readers reader ON reader.id = p.terminal_reader_id AND reader.shopid = p.shopid/);

@@ -87,7 +87,7 @@ const fixture = () => {
       const session = state.sessions.find((s) => s.shopid === data.shopId && s.id === data.paymentId);
       assert.notStrictEqual(data.status, "succeeded");
       if (!session || session.status === "succeeded") return { affectedRows: 0 };
-      for (const [key, column] of Object.entries({ stripePaymentIntentId: "stripe_payment_intent_id", stripeChargeId: "stripe_charge_id", cardReceiptDetails: "card_receipt_details", status: "status", failureCode: "failure_code", failureMessage: "failure_message" })) {
+      for (const [key, column] of Object.entries({ cardWaitStartedAt: "card_wait_started_at", stripePaymentIntentId: "stripe_payment_intent_id", stripeChargeId: "stripe_charge_id", cardReceiptDetails: "card_receipt_details", status: "status", failureCode: "failure_code", failureMessage: "failure_message" })) {
         if (data[key] !== undefined) session[column] = data[key];
       }
       state.events.push(data.stripePaymentIntentId ? "intent-saved" : `status:${data.status}`);
@@ -167,7 +167,7 @@ test("aggregates persisted order amounts, allocates discount and creates a platf
     on_behalf_of: "acct_shop", transfer_data: { destination: "acct_shop" }, metadata: { terminal_payment_id: "41", shop_id: "7" },
   });
   assert.deepStrictEqual(f.state.calls.find((c) => c.name === "process").args.slice(0, 2), ["tmr_server", { payment_intent: "pi_terminal", process_config: { enable_customer_cancellation: true } }]);
-  assert.deepStrictEqual(result, { id: 41, readerId: 21, status: "processing", amountCents: 1750, currency: "eur", orderIds: [12, 31], failureCode: null, failureMessage: null });
+  assert.deepStrictEqual(result, { id: 41, readerId: 21, readerLabel: null, status: "processing", amountCents: 1750, currency: "eur", orderIds: [12, 31], failureCode: null, failureMessage: null });
   assert.deepStrictEqual(f.state.allocations.map((a) => [a.order_id, a.amount_cents]), [[12, 700], [31, 1050]]);
   for (const c of f.state.calls) assert(!c.args.some((a) => a && a.stripeAccount));
   assert(f.state.events.indexOf("session") < f.state.events.indexOf("commit"));
@@ -217,6 +217,7 @@ test("start reconciles a canceled active reader payment before reserving a new c
     status: "processing",
     stripe_payment_intent_id: "pi_canceled",
     created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+    card_wait_started_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
   });
   f.state.intentsById.set("pi_canceled", {
     id: "pi_canceled",
@@ -250,6 +251,7 @@ test("start cancels a stale cancelable active reader payment before reserving a 
     status: "processing",
     stripe_payment_intent_id: "pi_stale",
     created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+    card_wait_started_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
   });
   f.state.allocations.push(
     { shopid: 7, terminal_payment_id: 40, order_id: 12, amount_cents: 800 },
@@ -276,10 +278,10 @@ test("start cancels a stale cancelable active reader payment before reserving a 
   assert.strictEqual(result.status, "processing");
 });
 
-test("polling expires a cash-register terminal payment after thirty seconds", async () => {
+test("polling expires a cash-register terminal payment after twelve seconds", async () => {
   const f = fixture();
   await f.service.startPayment(input);
-  f.state.sessions[0].created_at = new Date(Date.now() - 31 * 1000).toISOString();
+  f.state.sessions[0].card_wait_started_at = new Date(Date.now() - 12001).toISOString();
   f.state.intent.status = "requires_payment_method";
   f.state.remote.action = {
     type: "process_payment_intent",
@@ -950,7 +952,7 @@ test("default controller wires reservation SQL to one transaction connection and
     }
     if (sql.startsWith("UPDATE stripe_terminal_payments")) {
       assert(dedicated && inTransaction);
-      return f.terminalStore.updatePaymentSession({ shopId: params[1], paymentId: params[2], ...(sql.includes("stripe_payment_intent_id =") ? { stripePaymentIntentId: params[0] } : { status: params[0] }) });
+      return f.terminalStore.updatePaymentSession({ shopId: params[1], paymentId: params[2], ...(sql.includes("stripe_payment_intent_id =") ? { stripePaymentIntentId: params[0] } : sql.includes('card_wait_started_at =') ? { cardWaitStartedAt: params[0] } : { status: params[0] }) });
     }
     throw new Error(`Unexpected test SQL: ${sql}`);
   };
@@ -978,6 +980,16 @@ test("default controller wires reservation SQL to one transaction connection and
     assert.strictEqual(f.state.sessions.length, 1);
     assert.deepStrictEqual(f.state.allocations.map((a) => a.amount_cents), [700, 1050]);
   } finally { paths.forEach((p, i) => { if (previous[i]) require.cache[p] = previous[i]; else delete require.cache[p]; }); }
+});
+
+test("maintenance recovers an order intent persisted before the handoff deadline exists", async () => {
+  const f = fixture(); await f.service.startPayment(input);
+  Object.assign(f.state.sessions[0], { status: 'creating', card_wait_started_at: null,
+    created_at: new Date(Date.now() - 31000).toISOString() });
+  f.state.remote.action = null;
+  await f.service.maintainPayment(f.state.sessions[0]);
+  assert.strictEqual(f.state.sessions[0].status, 'canceled');
+  assert(f.state.orders.every(order => order.payment_status === 'unpaid'));
 });
 
 (async () => {

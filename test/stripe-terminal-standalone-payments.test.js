@@ -42,7 +42,7 @@ const fixture = () => {
     updatePaymentSession: async data => {
       const row = state.sessions.find(row => row.id === data.paymentId && row.shopid === data.shopId);
       if (!row || row.status === 'succeeded') return { affectedRows: 0 };
-      for (const [key, column] of Object.entries({ stripePaymentIntentId: 'stripe_payment_intent_id', stripeCreateSubmittedAt: 'stripe_create_submitted_at', status: 'status', failureCode: 'failure_code' })) {
+      for (const [key, column] of Object.entries({ cardWaitStartedAt: 'card_wait_started_at', stripePaymentIntentId: 'stripe_payment_intent_id', stripeCreateSubmittedAt: 'stripe_create_submitted_at', status: 'status', failureCode: 'failure_code' })) {
         if (data[key] !== undefined) row[column] = data[key];
       }
       return { affectedRows: 1 };
@@ -75,15 +75,56 @@ const fixture = () => {
   } } };
   const service = buildStripeTerminalPaymentService({ stripe, terminalStore: store,
     shopStore: { findShop: async () => ({ id: 7, stripe_account_id: 'acct_shop', stripe_charges_enabled: 1, stripe_commission_percent: 5 }) } });
-  return { state, store, service };
+  return { state, store, service, stripe };
 };
 
 (async () => {
+  // The server must enforce the card wait even with no polling browser.
+  const timeout = fixture(); await timeout.service.startStandalonePayment(input);
+  assert(timeout.state.sessions[0].card_wait_started_at, 'Persist the reader handoff start');
+  timeout.state.sessions[0].card_wait_started_at = new Date(Date.now() - 12001).toISOString();
+  await timeout.service.maintainPayment(timeout.state.sessions[0]);
+  assert.strictEqual(timeout.state.sessions[0].status, 'canceled');
+  assert(timeout.state.calls.includes('cancel-action'));
+  const authorizing = fixture(); await authorizing.service.startStandalonePayment(input);
+  authorizing.state.sessions[0].card_wait_started_at = new Date(Date.now() - 12001).toISOString();
+  authorizing.state.intents.values().next().value.status = 'processing';
+  await authorizing.service.maintainPayment(authorizing.state.sessions[0]);
+  assert.strictEqual(authorizing.state.sessions[0].status, 'processing');
+  assert(!authorizing.state.calls.includes('cancel-action'));
+  authorizing.state.intents.values().next().value.status = 'succeeded';
+  await authorizing.service.maintainPayment(authorizing.state.sessions[0]);
+  assert.strictEqual(authorizing.state.sessions[0].status, 'succeeded');
+  const racedAuthorization = fixture(); await racedAuthorization.service.startStandalonePayment(input);
+  racedAuthorization.state.sessions[0].card_wait_started_at = new Date(Date.now() - 12001).toISOString();
+  const cancelAction = racedAuthorization.stripe.terminal.readers.cancelAction;
+  racedAuthorization.stripe.terminal.readers.cancelAction = async () => {
+    racedAuthorization.state.intents.values().next().value.status = 'processing';
+    return cancelAction();
+  };
+  const { buildStripeTerminalMaintenance } = require('../src/services/stripeTerminalMaintenance');
+  const runClosedBrowserMaintenance = buildStripeTerminalMaintenance({
+    terminalStore: { listExpiredCardWaitPayments: async () => clone(racedAuthorization.state.sessions) },
+    paymentService: racedAuthorization.service, kioskPaymentService: {}, logger: console,
+  });
+  await runClosedBrowserMaintenance();
+  assert.strictEqual(racedAuthorization.state.sessions[0].status, 'processing');
+  assert(!racedAuthorization.state.calls.includes('cancel'), 'Card authorization racing cancellation remains protected');
+  const orphanedHandoff = fixture(); await orphanedHandoff.service.startStandalonePayment(input);
+  Object.assign(orphanedHandoff.state.sessions[0], { status: 'creating', card_wait_started_at: null,
+    created_at: new Date(Date.now() - 31000).toISOString() });
+  orphanedHandoff.state.remote.action = null;
+  orphanedHandoff.state.creationLockHeld = true;
+  await orphanedHandoff.service.maintainPayment(orphanedHandoff.state.sessions[0]);
+  assert.strictEqual(orphanedHandoff.state.sessions[0].status, 'creating', 'Never recover creation while its owner is still running');
+  orphanedHandoff.state.creationLockHeld = false;
+  await orphanedHandoff.service.maintainPayment(orphanedHandoff.state.sessions[0]);
+  assert.strictEqual(orphanedHandoff.state.sessions[0].status, 'canceled', 'Recover persisted intent after a crash before handoff');
   // Missing typed creation, replay after success or allocation reads would break this contract.
   const f = fixture();
   assert.strictEqual(typeof f.service.startStandalonePayment, 'function');
   const first = await f.service.startStandalonePayment(input);
-  assert.deepStrictEqual({ ...first, createdAt: 'date' }, { id: 41, paymentKind: 'standalone', readerId: 21,
+  assert.deepStrictEqual({ ...first, createdAt: 'date' }, { id: 41, paymentKind: 'standalone', readerId: 21, readerLabel: null,
     status: 'processing', amountCents: 5000, currency: 'eur', createdAt: 'date', confirmedAt: null,
     failureCode: null, failureMessage: null, cardTicket: null, attachmentsCount: 0 });
   assert.strictEqual(f.state.sessions.length, 1);

@@ -193,4 +193,4 @@ const buildStripeTerminalController = ({ readerService, paymentService, kioskPay
   };
 };
 
-module.exports = { buildStripeTerminalController, ...buildStripeTerminalController() };
+module.exports = { buildStripeTerminalController, getDefaultPaymentService, getDefaultKioskPaymentService, ...buildStripeTerminalController() };

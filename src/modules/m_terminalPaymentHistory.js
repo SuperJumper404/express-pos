@@ -56,7 +56,7 @@ const paymentDisplayJoins = `LEFT JOIN users cashier ON cashier.id = p.cashier_u
 const paymentProjection = `SELECT p.*, (SELECT COUNT(*) FROM stripe_terminal_payment_attachments c
   WHERE c.shopid = p.shopid AND c.terminal_payment_id = p.id) AS attachments_count
   FROM stripe_terminal_payments p`;
-const historyPaymentProjection = `SELECT p.*, cashier.username AS cashier_name, reader.label AS reader_label,
+const historyPaymentProjection = `SELECT p.*, cashier.username AS cashier_name, COALESCE(p.reader_label, reader.label) AS reader_label,
   (SELECT COUNT(*) FROM stripe_terminal_payment_attachments c
     WHERE c.shopid = p.shopid AND c.terminal_payment_id = p.id) AS attachments_count
   FROM stripe_terminal_payments p ${paymentDisplayJoins}`;
@@ -68,7 +68,8 @@ const archiveProjection = `SELECT a.*, CAST(a.delivery_id AS CHAR) AS delivery_i
   CASE WHEN a.payment_provider = 'stripe_terminal' AND terminal_payment.status = 'succeeded'
     THEN terminal_payment.stripe_charge_id ELSE NULL END AS stripe_terminal_charge_id,
   CASE WHEN a.payment_provider = 'stripe_terminal' AND terminal_payment.status = 'succeeded'
-    THEN terminal_payment.card_receipt_details ELSE NULL END AS stripe_terminal_card_receipt_details
+    THEN terminal_payment.card_receipt_details ELSE NULL END AS stripe_terminal_card_receipt_details,
+  terminal_payment.reader_label AS terminal_reader_label
   FROM archives a ${archiveJoins}
   LEFT JOIN stripe_terminal_payments terminal_payment ON terminal_payment.id = a.stripe_terminal_payment_id
     AND terminal_payment.shopid = a.shopid`;

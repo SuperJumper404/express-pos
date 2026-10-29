@@ -1,5 +1,6 @@
 const { resolveCommercialOrder } = require("./m_deliveryOrders");
 const { toCents } = require("../helpers/deliveryMoney");
+const { CARD_WAIT_TIMEOUT_MS, STALE_CREATION_TIMEOUT_MS } = require("../helpers/terminalCardWait");
 
 const queryWith = async (connection, sql, params = []) => {
   if (typeof connection.promise === "function") {
@@ -282,10 +283,10 @@ const buildStripeTerminalModule = ({ connection, lockContext = null, loyalty = n
     requireShopId(shopId);
     const result = await query(
       `INSERT INTO stripe_terminal_payments
-         (shopid, terminal_reader_id, cashier_user_id, idempotency_key, stripe_connected_account_id,
+         (shopid, terminal_reader_id, reader_label, cashier_user_id, idempotency_key, stripe_connected_account_id,
           amount_cents, application_fee_amount, currency, discount_type,
           discount_value, status)
-       SELECT r.shopid, r.id, u.id, ?, ?, ?, ?, ?, ?, ?, 'creating'
+       SELECT r.shopid, r.id, r.label, u.id, ?, ?, ?, ?, ?, ?, ?, 'creating'
        FROM stripe_terminal_readers r
        JOIN users u ON u.id = r.assigned_user_id AND u.shopid = r.shopid
        WHERE r.shopid = ? AND r.id = ? AND r.assigned_user_id = ?
@@ -302,9 +303,9 @@ const buildStripeTerminalModule = ({ connection, lockContext = null, loyalty = n
     requireShopId(shopId);
     const result = await query(
       `INSERT INTO stripe_terminal_payments
-         (shopid, terminal_reader_id, cashier_user_id, idempotency_key, stripe_connected_account_id,
+         (shopid, terminal_reader_id, reader_label, cashier_user_id, idempotency_key, stripe_connected_account_id,
           amount_cents, application_fee_amount, currency, status)
-       SELECT r.shopid, r.id, 0, ?, ?, ?, ?, ?, 'creating'
+       SELECT r.shopid, r.id, r.label, 0, ?, ?, ?, ?, ?, 'creating'
        FROM stripe_terminal_readers r
        JOIN service_points sp ON sp.id = r.assigned_service_point_id
          AND sp.shopid = r.shopid
@@ -322,9 +323,9 @@ const buildStripeTerminalModule = ({ connection, lockContext = null, loyalty = n
     requireShopId(shopId);
     const result = await query(
       `INSERT INTO stripe_terminal_payments
-         (shopid, terminal_reader_id, cashier_user_id, idempotency_key, stripe_connected_account_id,
+         (shopid, terminal_reader_id, reader_label, cashier_user_id, idempotency_key, stripe_connected_account_id,
           amount_cents, application_fee_amount, currency, status, payment_kind)
-       SELECT r.shopid, r.id, u.id, ?, ?, ?, ?, 'eur', 'creating', 'standalone'
+       SELECT r.shopid, r.id, r.label, u.id, ?, ?, ?, ?, 'eur', 'creating', 'standalone'
        FROM stripe_terminal_readers r
        JOIN users u ON u.id = r.assigned_user_id AND u.shopid = r.shopid
        WHERE r.shopid = ? AND r.id = ? AND r.assigned_user_id = ?
@@ -397,13 +398,17 @@ const buildStripeTerminalModule = ({ connection, lockContext = null, loyalty = n
   };
 
   const updatePaymentSession = ({ shopId, paymentId, stripePaymentIntentId,
-    stripeChargeId, cardReceiptDetails, status, failureCode, failureMessage, stripeCreateSubmittedAt }) => {
+    stripeChargeId, cardReceiptDetails, status, failureCode, failureMessage, stripeCreateSubmittedAt, cardWaitStartedAt }) => {
     requireShopId(shopId);
     if (status === "succeeded") {
       throw new Error("Use finalizePaymentSucceeded for successful payments");
     }
     const updates = [];
     const params = [];
+    if (cardWaitStartedAt !== undefined) {
+      updates.push("card_wait_started_at = COALESCE(card_wait_started_at, ?)");
+      params.push(cardWaitStartedAt);
+    }
     for (const [value, column] of [
       [stripePaymentIntentId, "stripe_payment_intent_id"],
       [stripeCreateSubmittedAt, "stripe_create_submitted_at"],
@@ -764,7 +769,16 @@ const buildStripeTerminalModule = ({ connection, lockContext = null, loyalty = n
     return saveOrderRefund(scope, current, { generation, refundId, refundStatus });
   };
 
+  const listExpiredCardWaitPayments = ({ now = new Date() } = {}) => query(
+    `SELECT p.* FROM stripe_terminal_payments p
+     WHERE p.status IN ('creating', 'processing') AND p.stripe_payment_intent_id IS NOT NULL
+       AND (p.card_wait_started_at <= ? OR (p.status = 'creating' AND p.card_wait_started_at IS NULL
+         AND p.created_at <= ?)) ORDER BY COALESCE(p.card_wait_started_at, p.created_at), p.id`,
+    [new Date(now.getTime() - CARD_WAIT_TIMEOUT_MS), new Date(now.getTime() - STALE_CREATION_TIMEOUT_MS)],
+  );
+
   return {
+    listExpiredCardWaitPayments,
     async applyLoyaltyDiscounts({ shopId, orders, allocations }) {
       if (!loyalty) return { allocations, totalCents: allocations.reduce((sum, row) => sum + row.amountCents, 0) };
       const adjusted = [];
