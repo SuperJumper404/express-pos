@@ -18,25 +18,25 @@ const archive = { id: 123, shopid: 7, ordernumber: "A123", subtotal: "40.00", st
   customer: "Alice", service_point_name: "Table 2", hidden_from_history: 0 };
 
 const fixture = () => {
-  const state = { payments: [{ ...payment }], archives: [{ ...archive }], attachments: [], calls: [], transaction: false };
+  const state = { payments: [{ ...payment }], archives: [{ ...archive }], orders: [{ ...archive, ordernumber: 'ACTIVE123', status: 1 }], attachments: [], calls: [], transaction: false };
   const connection = { query: async (sql, values = []) => {
     state.calls.push({ sql, values });
     if (/INSERT INTO stripe_terminal_payment_attachments/.test(sql)) {
       assert(state.transaction, "attachments must be added in one transaction");
       const row = values[0];
-      if (!state.attachments.some(a => a.terminal_payment_id === row.terminal_payment_id && a.archive_id === row.archive_id)) state.attachments.push({ ...row, created_at: "2026-10-28 11:00:00" });
+      if (!state.attachments.some(a => a.terminal_payment_id === row.terminal_payment_id && (row.order_id != null ? a.order_id === row.order_id : a.archive_id === row.archive_id))) state.attachments.push({ ...row, created_at: "2026-10-28 11:00:00" });
       return [{ affectedRows: 1 }];
     }
     if (/DELETE FROM stripe_terminal_payment_attachments/.test(sql)) {
       assert(state.transaction);
       const [shopId, paymentId, archiveId] = values;
-      state.attachments = state.attachments.filter(a => !(a.shopid === shopId && a.terminal_payment_id === paymentId && a.archive_id === archiveId));
+      state.attachments = state.attachments.filter(a => !(a.shopid === shopId && a.terminal_payment_id === paymentId && (/order_id = \?/.test(sql) ? a.order_id : a.archive_id) === archiveId));
       return [{ affectedRows: 1 }];
     }
     if (/FROM stripe_terminal_payment_attachments a/.test(sql)) {
       const [shopId, paymentId] = values;
       return [state.attachments.filter(a => a.shopid === shopId && a.terminal_payment_id === paymentId).map(a => ({ ...a,
-        available: state.archives.some(o => o.id === a.archive_id && o.shopid === shopId && !o.hidden_from_history) ? 1 : 0 }))];
+        available: (a.archive_id != null ? state.archives.some(o => o.id === a.archive_id && o.shopid === shopId && !o.hidden_from_history) : state.orders.some(o => o.id === a.order_id && o.shopid === shopId)) ? 1 : 0 }))];
     }
     if (/FROM stripe_terminal_payments p/.test(sql) && !/UNION ALL/.test(sql)) {
       const [shopId, paymentId] = values;
@@ -46,6 +46,10 @@ const fixture = () => {
     if (/FROM archives a/.test(sql) && !/UNION ALL/.test(sql)) {
       const [shopId, ...ids] = values;
       return [state.archives.filter(a => a.shopid === shopId && ids.includes(a.id) && !a.hidden_from_history).map(a => ({ ...a }))];
+    }
+    if (/FROM orders o/.test(sql)) {
+      const [shopId, ...ids] = values;
+      return [state.orders.filter(o => o.shopid === shopId && ids.includes(o.id)).map(o => ({ ...o }))];
     }
     throw new Error(`Unexpected SQL: ${sql}`);
   } };
@@ -101,7 +105,7 @@ test("deleting or hiding an archive retains the attachment snapshot and disables
     attachedAt: "2026-10-28 11:00:00", available: false });
 });
 
-test("attachments reject foreign, hidden, active, unconfirmed and wrong-kind records atomically", async () => {
+test("attachments reject foreign, hidden and wrong-kind records atomically", async () => {
   const f = fixture();
   await assert.rejects(() => f.module.getAttachments({ shopId: 8, paymentId: 123 }), { code: "TERMINAL_PAYMENT_NOT_FOUND" });
   f.state.archives.push({ ...archive, id: 124, shopid: 8 });
@@ -109,10 +113,34 @@ test("attachments reject foreign, hidden, active, unconfirmed and wrong-kind rec
   assert.equal(f.state.attachments.length, 0);
   f.state.archives[0].hidden_from_history = 1;
   await assert.rejects(() => f.module.addAttachments({ shopId: 7, userId: 11, paymentId: 123, archiveIds: [123] }), { code: "TERMINAL_INVALID_ATTACHMENTS" });
-  f.state.payments[0].status = "processing";
-  await assert.rejects(() => f.module.removeAttachment({ shopId: 7, userId: 11, paymentId: 123, archiveId: 123 }), { code: "TERMINAL_PAYMENT_NOT_SETTLED" });
   f.state.payments[0].payment_kind = "order";
   await assert.rejects(() => f.module.getAttachments({ shopId: 7, paymentId: 123 }), { code: "TERMINAL_PAYMENT_NOT_FOUND" });
+});
+
+test("informational links accept every payment status and active/archive ID collisions without financial mutations", async () => {
+  for (const status of ['canceled', 'failed', 'creating', 'processing', 'succeeded']) {
+    const f = fixture(); f.state.payments[0].status = status;
+    const before = JSON.stringify([f.state.payments, f.state.orders, f.state.archives]);
+    const result = await f.module.addAttachments({ shopId: 7, userId: 11, paymentId: 123, archiveIds: [123], orderIds: [123] });
+    assert.equal(result.attachments.length, 2);
+    assert(result.attachments.some(a => a.orderId === 123 && a.archiveId === null && a.available));
+    assert(result.attachments.some(a => a.archiveId === 123));
+    assert.equal(JSON.stringify([f.state.payments, f.state.orders, f.state.archives]), before);
+    await f.module.removeAttachment({ shopId: 7, userId: 11, paymentId: 123, orderId: 123 });
+    const final = await f.module.removeAttachment({ shopId: 7, userId: 11, paymentId: 123, archiveId: 123 });
+    assert.equal(final.attachments.length, 0);
+  }
+});
+
+test("active links reject foreign orders and retain snapshots after source deletion", async () => {
+  const f = fixture(); f.state.orders.push({ ...archive, id: 124, shopid: 8 });
+  await assert.rejects(f.module.addAttachments({ shopId: 7, userId: 11, paymentId: 123, orderIds: [123, 124] }), { code: 'TERMINAL_INVALID_ATTACHMENTS' });
+  assert.equal(f.state.attachments.length, 0);
+  await f.module.addAttachments({ shopId: 7, userId: 11, paymentId: 123, orderIds: [123] });
+  f.state.orders = [];
+  const result = await f.module.getAttachments({ shopId: 7, paymentId: 123 });
+  assert.equal(result.attachments[0].available, false);
+  assert.equal(result.attachments[0].orderNumber, 'ACTIVE123');
 });
 
 test("history paginates one SQL union and preserves colliding IDs as separate row types", async () => {

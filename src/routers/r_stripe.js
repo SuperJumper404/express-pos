@@ -28,6 +28,7 @@ routers
   .get("/stripe/terminal/standalone-payments/attachment-candidates", authentication, authorizeHistory, terminalHistory.listAttachmentCandidates)
   .get("/stripe/terminal/standalone-payments/:id/attachments", authentication, authorizeHistory, terminalHistory.getAttachments)
   .post("/stripe/terminal/standalone-payments/:id/attachments", authentication, authorizeHistory, terminalHistory.addAttachments)
+  .delete("/stripe/terminal/standalone-payments/:id/attachments/orders/:orderId", authentication, authorizeHistory, terminalHistory.removeOrderAttachment)
   .delete("/stripe/terminal/standalone-payments/:id/attachments/:archiveId", authentication, authorizeHistory, terminalHistory.removeAttachment)
   .post("/stripe/terminal/standalone-payments", authentication, authorizeCashRegister, stripeTerminal.startStandalonePayment)
   .get("/stripe/terminal/standalone-payments/:id", authentication, authorizeCashRegister, stripeTerminal.getStandalonePaymentStatus)

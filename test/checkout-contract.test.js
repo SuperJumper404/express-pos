@@ -2833,6 +2833,10 @@ const makeArchiveHarness = ({ failAfterActiveDeletion = false } = {}) => {
       events.push(["insert-archive", id]);
       return { insertId: id };
     },
+    linkTerminalAttachmentsToArchive: async ({ shopId, orderId, archiveId, connection }) => {
+      assert.strictEqual(connection.transaction, true);
+      events.push(['link-terminal-attachments', shopId, orderId, archiveId]);
+    },
     findOrderDetails: async ({ orderId }) => state.details.filter(
       (row) => row.orderid === Number(orderId),
     ),
@@ -2935,6 +2939,9 @@ const runArchiveSnapshotContracts = async () => {
   }]);
 
   const archiveResult = await harness.orderModule.mArchiveOrder(42, "Carte", 7);
+  const linked = harness.events.find(event => Array.isArray(event) && event[0] === 'link-terminal-attachments');
+  assert.deepStrictEqual(linked.slice(1, 3), [7, 42]);
+  assert(harness.events.indexOf(linked) < harness.events.indexOf('delete-order'), 'Transfer links before removing their active source');
   assert.strictEqual(archiveResult.affectedRows, 1);
   assert.strictEqual(harness.getState().orders.length, 0);
   assert.strictEqual(harness.getState().details.length, 0);

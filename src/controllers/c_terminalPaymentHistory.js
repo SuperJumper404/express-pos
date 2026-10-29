@@ -33,9 +33,10 @@ const buildTerminalPaymentHistoryController = ({ historyStore } = {}) => {
   };
   return {
     listEntries: handle("listEntries", queryParameters),
-    listAttachmentCandidates: handle("listAttachmentCandidates", queryParameters),
+    listAttachmentCandidates: handle("listAttachmentCandidates", req => ({ ...queryParameters(req), includeActive: (req.query || {}).includeActive })),
     getAttachments: handle("getAttachments", req => ({ paymentId: req.params.id })),
-    addAttachments: handle("addAttachments", req => ({ paymentId: req.params.id, archiveIds: (req.body || {}).archiveIds })),
+    addAttachments: handle("addAttachments", req => ({ paymentId: req.params.id, archiveIds: (req.body || {}).archiveIds, orderIds: (req.body || {}).orderIds })),
+    removeOrderAttachment: handle("removeAttachment", req => ({ paymentId: req.params.id, orderId: req.params.orderId })),
     removeAttachment: handle("removeAttachment", req => ({ paymentId: req.params.id, archiveId: req.params.archiveId })),
   };
 };

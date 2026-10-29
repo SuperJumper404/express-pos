@@ -54,6 +54,9 @@ const archiveSqlRepository = {
     "INSERT INTO archives SET ?",
     [archive],
   ),
+  linkTerminalAttachmentsToArchive: ({ shopId, orderId, archiveId, connection }) => queryResult(connection,
+    "UPDATE stripe_terminal_payment_attachments SET archive_id = ? WHERE shopid = ? AND order_id = ? AND archive_id IS NULL",
+    [archiveId, shopId, orderId]),
   findOrderDetails: ({ orderId, connection }) => queryResult(
     connection,
     "SELECT * FROM orderdetail WHERE orderid = ? ORDER BY id FOR UPDATE",
@@ -527,6 +530,9 @@ const buildOrderArchiveModule = ({
       }
       const archiveResult = await repository.insertArchive({ archive, connection });
       const archiveOrderId = archiveResult.insertId;
+      if (repository.linkTerminalAttachmentsToArchive) {
+        await repository.linkTerminalAttachmentsToArchive({ shopId: order.shopid, orderId: order.id, archiveId: archiveOrderId, connection });
+      }
       if (deliveryContext) {
         await deliveryOrders.archiveDeliveryOrder({ shopId: order.shopid, deliveryId: order.delivery_id,
           archiveId: archiveOrderId, preparationStatus: order.status, connection });

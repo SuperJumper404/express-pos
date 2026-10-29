@@ -4,7 +4,6 @@ const { toCents } = require("../helpers/deliveryMoney");
 const ERRORS = {
   TERMINAL_INVALID_INPUT: [422, "Parametres de l'historique invalides."],
   TERMINAL_PAYMENT_NOT_FOUND: [404, "Paiement terminal introuvable."],
-  TERMINAL_PAYMENT_NOT_SETTLED: [409, "Seuls les paiements confirmes acceptent des pieces jointes."],
   TERMINAL_INVALID_ATTACHMENTS: [422, "Une commande jointe n'est pas disponible."],
   TERMINAL_INTERNAL_ERROR: [500, "Impossible de recuperer l'historique terminal."],
 };
@@ -86,39 +85,47 @@ const buildTerminalPaymentHistoryModule = ({ connection, withTransaction, delive
   };
   const attachmentResponse = async (shopId, paymentId, db = connection) => {
     const session = await paymentById(shopId, paymentId, db);
-    const rows = await query(`SELECT a.archive_id, a.order_number, a.amount_cents, a.created_at,
-      CASE WHEN source.id IS NOT NULL THEN 1 ELSE 0 END AS available
+    const rows = await query(`SELECT a.archive_id, a.order_id, a.order_number, a.amount_cents, a.created_at,
+      CASE WHEN a.archive_id IS NOT NULL THEN source.id IS NOT NULL ELSE live_order.id IS NOT NULL END AS available
       FROM stripe_terminal_payment_attachments a
       LEFT JOIN archives source ON source.id = a.archive_id AND source.shopid = a.shopid
         AND COALESCE(source.hidden_from_history, 0) = 0
+      LEFT JOIN orders live_order ON a.archive_id IS NULL AND live_order.id = a.order_id AND live_order.shopid = a.shopid
       WHERE a.shopid = ? AND a.terminal_payment_id = ? ORDER BY a.created_at, a.archive_id`, [shopId, paymentId], db);
     return { payment: standalonePaymentDto(session), attachments: rows.map(row => ({
-      archiveId: Number(row.archive_id), orderNumber: String(row.order_number), amountCents: Number(row.amount_cents),
+      archiveId: row.archive_id == null ? null : Number(row.archive_id),
+      ...(row.order_id != null && { orderId: Number(row.order_id) }),
+      orderNumber: String(row.order_number), amountCents: Number(row.amount_cents),
       attachedAt: dateString(row.created_at), available: Number(row.available) === 1,
     })) };
   };
   const getAttachments = async input => attachmentResponse(positiveId(input.shopId), positiveId(input.paymentId));
-  const assertSettled = session => { if (session.status !== "succeeded") fail("TERMINAL_PAYMENT_NOT_SETTLED"); };
   const addAttachments = async input => {
     const shopId = positiveId(input.shopId);
     const paymentId = positiveId(input.paymentId);
     const userId = positiveId(input.userId);
-    if (!Array.isArray(input.archiveIds) || !input.archiveIds.length || input.archiveIds.length > 100
-      || input.archiveIds.some(id => !Number.isSafeInteger(id) || id <= 0)) fail("TERMINAL_INVALID_INPUT");
-    const archiveIds = [...new Set(input.archiveIds.map(positiveId))].sort((a, b) => a - b);
+    const archives = input.archiveIds === undefined ? [] : input.archiveIds;
+    const orders = input.orderIds === undefined ? [] : input.orderIds;
+    if (![archives, orders].every(ids => Array.isArray(ids) && ids.every(id => Number.isSafeInteger(id) && id > 0))
+      || archives.length + orders.length < 1 || archives.length + orders.length > 100) fail("TERMINAL_INVALID_INPUT");
+    const archiveIds = [...new Set(archives)].sort((a, b) => a - b);
+    const orderIds = [...new Set(orders)].sort((a, b) => a - b);
     return transaction(async db => {
-      // Lock archives before the payment, matching existing archive settlement paths.
-      const rows = await query(`SELECT a.id, a.ordernumber, a.subtotal FROM archives a
+      // Lock active sources first, so archiving cannot remove a source while it is linked.
+      const activeRows = orderIds.length ? await query(`SELECT o.id, o.ordernumber, o.subtotal FROM orders o
+        WHERE o.shopid = ? AND o.id IN (${orderIds.map(() => "?").join(", ")}) ORDER BY o.id FOR UPDATE`, [shopId, ...orderIds], db) : [];
+      const rows = archiveIds.length ? await query(`SELECT a.id, a.ordernumber, a.subtotal FROM archives a
         WHERE a.shopid = ? AND a.id IN (${archiveIds.map(() => "?").join(", ")}) AND ${visible}
-        ORDER BY a.id FOR UPDATE`, [shopId, ...archiveIds], db);
-      if (rows.length !== archiveIds.length || rows.some(row => !archiveIds.includes(Number(row.id)))) fail("TERMINAL_INVALID_ATTACHMENTS");
-      const session = await paymentById(shopId, paymentId, db, true);
-      assertSettled(session);
-      for (const row of rows) {
+        ORDER BY a.id FOR UPDATE`, [shopId, ...archiveIds], db) : [];
+      if (rows.length !== archiveIds.length || rows.some(row => !archiveIds.includes(Number(row.id)))
+        || activeRows.length !== orderIds.length || activeRows.some(row => !orderIds.includes(Number(row.id)))) fail("TERMINAL_INVALID_ATTACHMENTS");
+      await paymentById(shopId, paymentId, db, true);
+      for (const row of [...rows.map(row => ({ ...row, source: 'archive' })), ...activeRows.map(row => ({ ...row, source: 'order' }))]) {
         const amountCents = archiveAmountCents(row.subtotal);
         await query(`INSERT INTO stripe_terminal_payment_attachments SET ?
-          ON DUPLICATE KEY UPDATE archive_id = VALUES(archive_id)`, [{
-          shopid: shopId, terminal_payment_id: paymentId, archive_id: Number(row.id),
+          ON DUPLICATE KEY UPDATE terminal_payment_id = VALUES(terminal_payment_id)`, [{
+          shopid: shopId, terminal_payment_id: paymentId, archive_id: row.source === 'archive' ? Number(row.id) : null,
+          ...(row.source === 'order' && { order_id: Number(row.id) }),
           order_number: String(row.ordernumber || row.id), amount_cents: amountCents, attached_by_user_id: userId,
         }], db);
       }
@@ -128,11 +135,13 @@ const buildTerminalPaymentHistoryModule = ({ connection, withTransaction, delive
   const removeAttachment = async input => {
     const shopId = positiveId(input.shopId);
     const paymentId = positiveId(input.paymentId);
-    const archiveId = positiveId(input.archiveId);
+    if (input.archiveId !== undefined && input.orderId !== undefined) fail("TERMINAL_INVALID_INPUT");
+    const column = input.orderId === undefined ? "archive_id" : "order_id";
+    const sourceId = positiveId(input.orderId === undefined ? input.archiveId : input.orderId);
     positiveId(input.userId);
     return transaction(async db => {
-      assertSettled(await paymentById(shopId, paymentId, db, true));
-      await query("DELETE FROM stripe_terminal_payment_attachments WHERE shopid = ? AND terminal_payment_id = ? AND archive_id = ?", [shopId, paymentId, archiveId], db);
+      await paymentById(shopId, paymentId, db, true);
+      await query(`DELETE FROM stripe_terminal_payment_attachments WHERE shopid = ? AND terminal_payment_id = ? AND ${column} = ?`, [shopId, paymentId, sourceId], db);
       return attachmentResponse(shopId, paymentId, db);
     });
   };
@@ -196,6 +205,22 @@ const buildTerminalPaymentHistoryModule = ({ connection, withTransaction, delive
   const listAttachmentCandidates = async input => {
     const shopId = positiveId(input.shopId);
     const { itemsPerPage, offset, search } = pagination(input);
+    if (input.includeActive === true || input.includeActive === 'true') {
+      const filters = search ? "AND CONCAT_WS(' ', a.ordernumber, a.customer, sp.name) LIKE ?" : "";
+      const values = [shopId, ...(search ? [`%${search}%`] : []), shopId, ...(search ? [`%${search}%`] : [])];
+      const union = `SELECT a.id, 'archive' AS source_type, a.ordernumber, a.subtotal, a.created, a.status,
+        COALESCE(a.archived_at, a.created) AS event_at, sp.name AS service_point_name, a.customer
+        FROM archives a ${archiveJoins} WHERE a.shopid = ? AND ${visible} ${filters}
+        UNION ALL
+        SELECT a.id, 'order', a.ordernumber, a.subtotal, a.created, a.status, a.created, sp.name, a.customer
+        FROM orders a ${archiveJoins} WHERE a.shopid = ? ${filters}`;
+      const totals = await query(`SELECT COUNT(*) AS total FROM (${union}) attachment_candidates`, values);
+      const rows = await query(`SELECT * FROM (${union}) attachment_candidates ORDER BY event_at DESC, source_type, id DESC LIMIT ? OFFSET ?`, [...values, itemsPerPage, offset]);
+      return { items: rows.map(row => ({ archiveId: row.source_type === 'archive' ? Number(row.id) : null,
+        ...(row.source_type === 'order' && { orderId: Number(row.id) }), orderStatus: row.status == null ? null : Number(row.status),
+        orderNumber: String(row.ordernumber || row.id), amountCents: archiveAmountCents(row.subtotal), createdAt: dateString(row.created),
+        tableName: row.service_point_name || null, customer: row.customer || null })), total: Number(totals[0].total) };
+    }
     const values = [shopId];
     const searchClause = search ? "AND CONCAT_WS(' ', a.ordernumber, a.customer, sp.name) LIKE ?" : "";
     if (search) values.push(`%${search}%`);
