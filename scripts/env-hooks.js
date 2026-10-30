@@ -3,6 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
+const filterSecretMatches = require("./secret-scan-filter");
 
 const root = path.resolve(__dirname, "..");
 const managedEnvFiles = [".env.local", ".env.staging", ".env.production"];
@@ -174,8 +175,10 @@ function redact(text) {
 }
 
 function failWithMatches(title, output) {
+  const matches = filterSecretMatches(output, secretPattern);
+  if (!matches) return;
   console.error(`[env-hooks] ${title}`);
-  console.error(redact(output.trim()));
+  console.error(redact(matches.trim()));
   process.exit(1);
 }
 
