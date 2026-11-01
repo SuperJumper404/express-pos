@@ -61,10 +61,16 @@ const buildSqlLoyaltyRepository = ({ pool = require('../config/dbPool') } = {}) 
       DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%sZ') AS createdAt FROM loyalty_ledger WHERE shopid=? AND member_id=? ORDER BY id DESC LIMIT 100`, [shopId, memberId]);
     return rows.map(row => ({ ...row, points: Number(row.points) }));
   },
-  async members({ shopId, connection }) {
-    const [rows] = await connection.query(`SELECT m.id,CAST(m.customer_id AS CHAR) AS customerId,c.name,m.balance,m.reserved
-      FROM loyalty_members m JOIN customers c ON c.shopid=m.shopid AND c.id=m.customer_id WHERE m.shopid=? ORDER BY m.created_at DESC LIMIT 250`, [shopId]);
-    return rows.map(row => ({ ...row, balance: Number(row.balance), reserved: Number(row.reserved), available: Number(row.balance) - Number(row.reserved) }));
+  async members({ shopId, page = 1, pageSize = 25, search = '', connection }) {
+    const pattern = `%${search.replace(/[!%_]/g, '!$&')}%`;
+    const from = `FROM loyalty_members m JOIN customers c ON c.shopid=m.shopid AND c.id=m.customer_id WHERE m.shopid=?
+      ${search ? "AND (c.name LIKE ? ESCAPE '!' OR c.contact_phone LIKE ? ESCAPE '!' OR m.card_number LIKE ? ESCAPE '!')" : ''}`;
+    const params = search ? [shopId, pattern, pattern, pattern] : [shopId];
+    const [[count]] = await connection.query(`SELECT COUNT(*) AS total ${from}`, params);
+    const [rows] = await connection.query(`SELECT m.id,CAST(m.customer_id AS CHAR) AS customerId,c.name,c.contact_phone AS phone,m.card_number AS cardNumber,m.balance,m.reserved,
+      EXISTS(SELECT 1 FROM loyalty_wallet_passes p JOIN loyalty_wallet_registrations r ON r.serial=p.serial WHERE p.shopid=m.shopid AND p.member_id=m.id AND p.provider='apple') AS walletRegistered
+      ${from} ORDER BY m.created_at DESC,m.id LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]);
+    return { items: rows.map(row => ({ ...row, balance: Number(row.balance), reserved: Number(row.reserved), available: Number(row.balance) - Number(row.reserved), walletRegistered: !!Number(row.walletRegistered) })), total: Number(count.total), page, pageSize };
   },
   async order({ shopId, orderId, connection }) {
     const [[row]] = await connection.query(`SELECT *,DATE_FORMAT(reservation_expires_at,'%Y-%m-%dT%H:%i:%sZ') AS reservation_expires_at
@@ -131,7 +137,9 @@ const buildLoyalty = ({ repository = buildSqlLoyaltyRepository(), runInTransacti
   };
   const programFor = async scope => {
     const row = await repository.program(scope);
-    return { ...normalizeProgram(row ? parse(row.config) : {}), version: row ? row.version : 0, walletAssetVersion: row && row.wallet_asset_version || null };
+    const wallet = require('../services/loyaltyWallet').readConfig();
+    const appleWalletAvailable = ['development', 'production'].includes(wallet.mode) && ['applePassTypeId', 'appleTeamId', 'appleCertificatePath', 'appleKeyPath', 'appleWwdrPath', 'appleAssetsPath', 'appleWebServiceUrl', 'offersBaseUrl'].every(key => !!wallet[key]);
+    return { ...normalizeProgram(row ? parse(row.config) : {}), version: row ? row.version : 0, walletAssetVersion: row && row.wallet_asset_version || null, appleWalletAvailable };
   };
   const memberFor = async scope => {
     const row = await repository.member(scope); if (!row) throw missing(); return row;
@@ -230,7 +238,13 @@ const buildLoyalty = ({ repository = buildSqlLoyaltyRepository(), runInTransacti
       const member = await repository.member({ ...scope, connection });
       return member ? view(member, connection) : scope.customerId ? { member: null, program: await programFor({ ...scope, connection }) } : Promise.reject(missing());
     }),
-    listMembers: scope => transaction(scope, connection => repository.members({ ...scope, connection })),
+    listMembers: ({ shopId, page = 1, pageSize = 25, search = '' }) => transaction({ shopId }, async connection => {
+      integer(page, 1, 1000000); integer(pageSize, 1, 100);
+      if (typeof search !== 'string' || search.length > 128 || /[\x00-\x1f\x7f]/.test(search)) throw invalid();
+      const result = await repository.members({ shopId, page, pageSize, search: search.trim(), connection });
+      for (const member of result.items) if (!member.cardNumber) member.cardNumber = await service.ensureCardNumber({ shopId, memberId: member.id, connection });
+      return result;
+    }),
     lookup: ({ shopId, audience, ...input }) => transaction({ shopId }, async connection => {
       const lookup = normalizeLoyaltyLookup(input);
       if (lookup.kind === 'qr') return view(await memberFor({ shopId, qr: lookup.value, connection }), connection, audience);
