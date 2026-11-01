@@ -44,8 +44,8 @@ const buildSqlLoyaltyRepository = ({ pool = require('../config/dbPool') } = {}) 
     if (result.affectedRows) await connection.query(`INSERT IGNORE INTO loyalty_wallet_jobs (shopid,member_id,revision,next_attempt_at,created_at)
       SELECT shopid,id,revision,UTC_TIMESTAMP(),UTC_TIMESTAMP() FROM loyalty_members WHERE shopid=? AND id=?`, [shopId, memberId]);
   },
-  setMarketingConsent: ({ shopId, memberId, marketingConsent, connection }) => connection.query(`UPDATE loyalty_members SET marketing_consent=?,marketing_consent_at=UTC_TIMESTAMP(3),
-    marketing_consent_version=marketing_consent_version+1 WHERE shopid=? AND id=?`, [marketingConsent, shopId, memberId]),
+  setMarketingConsent: ({ shopId, memberId, marketingConsent, connection }) => connection.query(`UPDATE loyalty_members SET marketing_consent=?,marketing_consent_at=UTC_TIMESTAMP(3),wallet_message=IF(?,'',wallet_message),
+    marketing_consent_version=marketing_consent_version+1 WHERE shopid=? AND id=?`, [marketingConsent, !marketingConsent, shopId, memberId]),
   async lookupMembers({ shopId, kind, value, connection }) {
     const [rows] = kind === 'phone' ? await connection.query(`SELECT DISTINCT m.id FROM loyalty_members m
       JOIN customers c ON c.shopid=m.shopid AND c.id=m.customer_id WHERE m.shopid=? AND (

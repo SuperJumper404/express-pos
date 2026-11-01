@@ -10,6 +10,8 @@ const input = { shopId: 7, member: { id: 'member-1', qr: 'a'.repeat(64), balance
 (async () => {
   const payload = buildWalletPayload(input);
   assert.equal(payload.balance, 120);
+  assert.equal(buildWalletPayload({ ...input, member: { ...input.member, marketing_consent: 1, wallet_message: 'Votre offre du jour' } }).walletMessage, 'Votre offre du jour');
+  assert.equal(buildWalletPayload({ ...input, member: { ...input.member, marketing_consent: 0, wallet_message: 'Votre offre du jour' } }).walletMessage, '');
   assert.equal(payload.qr, input.member.qr);
   assert.match(payload.offer, /Crêpe/);
   assert.match(payload.next, /200/);
@@ -51,5 +53,10 @@ const input = { shopId: 7, member: { id: 'member-1', qr: 'a'.repeat(64), balance
   const body = JSON.parse(Buffer.from(issued.url.split('/').pop().split('.')[1], 'base64url'));
   assert.equal(body.payload.loyaltyObjects[0].id, '1234.smarteat_7_stable-serial');
   assert.equal(successCalls.filter(call => call.method === 'PATCH' && call.url.includes('loyaltyObject')).length, 1);
+  const appleOnlyEvents = [];
+  const appleOnly = buildLoyaltyWallet({ repository: { passesForMember: async () => [{ provider: 'google', serial: 'google' }, { provider: 'apple', serial: 'apple' }],
+    markUpdated: async serial => appleOnlyEvents.push(serial), registrations: async () => [], readMember: async () => { throw new Error('must not touch Google'); } } });
+  await appleOnly.synchronizeMember({ shopId: 7, memberId: 'member', provider: 'apple' });
+  assert.deepEqual(appleOnlyEvents, ['apple']);
   console.log('loyalty wallet: payload, ZIP, signature, stable Google IDs, provider failures and disabled mode passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
