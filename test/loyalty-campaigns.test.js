@@ -4,6 +4,18 @@ let campaigns = {};
 try { campaigns = require('../src/modules/m_loyaltyCampaigns'); } catch (e) { if (e.code !== 'MODULE_NOT_FOUND') throw e; }
 const requestId = '00000000-0000-4000-8000-000000000001';
 const ready = { mode: 'development', applePassTypeId: 'pass.test', appleTeamId: 'TEST', appleCertificatePath: 'cert', appleKeyPath: 'key', appleWwdrPath: 'wwdr', appleAssetsPath: 'assets', appleWebServiceUrl: 'https://test.example/wallet' };
+test('SQL campaign draft retains an unsigned bigint id without JavaScript rounding', async () => {
+  const exactId = '9007199254740993'; const recipientIds = [];
+  const connection = { async query(sql, values) {
+    if (sql.startsWith('INSERT INTO loyalty_wallet_campaigns ')) return [{ insertId: Number(exactId) }];
+    if (sql.startsWith('SELECT ')) return [[{ id: exactId }]];
+    recipientIds.push(values[0]); return [{}];
+  } };
+  const repository = campaigns.buildSqlCampaignRepository({ pool: {} });
+  const result = await repository.insertDraft({ shopId: 7, requestId, message: 'Offre', targetMemberId: null, actorId: 2,
+    recipients: [{ id: 'member', consentVersion: 1 }], connection });
+  assert.equal(result.id, exactId); assert.deepEqual(recipientIds, [exactId]);
+});
 function fixture() {
   assert.equal(typeof campaigns.buildLoyaltyCampaigns, 'function');
   const rows = []; let audience = [{ id: 'member-1', consentVersion: 1 }]; let queueCount = 0; let now = new Date('2026-11-01T12:00:00Z');

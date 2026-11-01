@@ -102,7 +102,41 @@ async function run() {
     assert.equal(Number((await readRows('SELECT subtotal FROM orders WHERE id=?', [loser]))[0].subtotal), 10);
     assert.equal((await loyalty.getMember({ shopId: 7, customerId: '51' })).reserved, 0);
     assert((await readRows('SELECT * FROM loyalty_wallet_jobs WHERE shopid=7 AND member_id=?', [alice.id])).length > 1);
-    console.log('PASS loyalty MySQL migrations, global identity/two restaurants, QR isolation, concurrent reservations, duplicate payment, refund, rollback, expiration, real price/VAT and outbox');
+    // The real kiosk transaction reserves against the same member without customer authentication.
+    now = new Date('2026-11-01T12:00:00Z');
+    const [kiosk] = await pool.query("INSERT INTO service_points (shopid,name,type,is_active,created) VALUES (7,'Fixture kiosk','kiosk',1,UTC_TIMESTAMP())");
+    const { buildCheckoutModule } = require('../src/modules/m_checkout');
+    const checkout = buildCheckoutModule({ withTransaction: runInTransaction, loyalty, now: () => now });
+    const input = { shopId: 7, sessionSubject: 'service_point', servicePointId: kiosk.insertId, orderSource: 'borne',
+      customer: { name: 'Fixture', phone: '0612345678' }, items: [{ productId: 21, quantity: 1, selectedChoiceIds: [] }],
+      expectedTotal: 12.5, paymentMode: 'stripe_terminal_kiosk', clientOrderToken: 'loyalty-sql-kiosk',
+      loyaltyMemberId: alice.id, loyaltyRewardId: 'coffee', loyaltyConfirmed: true, loyaltyExpectedDiscountCents: 200 };
+    await assert.rejects(checkout.createCheckout({ ...input, loyaltyExpectedDiscountCents: 100 }), { code: 'LOYALTY_REQUOTE_REQUIRED' });
+    assert.equal((await readRows('SELECT id FROM orders WHERE client_order_token=?', [input.clientOrderToken])).length, 0);
+    const created = await checkout.createCheckout(input);
+    assert.equal(created.total, 10.5);
+    assert.equal((await checkout.createCheckout(input)).idempotent_replay, true);
+    await paidTransaction(connection => loyalty.settlePaidOrder({ connection, shopId: 7, orderId: created.orderId, paymentKey: 'kiosk-fixture', paidCents: 1050 }));
+    await paidTransaction(connection => loyalty.settlePaidOrder({ connection, shopId: 7, orderId: created.orderId, paymentKey: 'kiosk-fixture', paidCents: 1050 }));
+    assert.equal((await loyalty.getMember({ shopId: 7, customerId: '51' })).balance, 38);
+    // Freeze a registered Apple audience, then withdraw consent before worker processing.
+    await loyalty.setMarketingConsent({ shopId: 7, customerId: '51', marketingConsent: true });
+    const serial = '00000000-0000-4000-8000-000000000099';
+    await pool.query("INSERT INTO loyalty_wallet_passes (serial,shopid,member_id,provider,auth_token) VALUES (?,7,?,'apple',REPEAT('a',64))", [serial, alice.id]);
+    await pool.query("INSERT INTO loyalty_wallet_registrations (serial,device_id,push_token) VALUES (?,'fixture-device','fixture-push')", [serial]);
+    const { buildLoyaltyCampaigns, buildSqlCampaignRepository } = require('../src/modules/m_loyaltyCampaigns');
+    const campaigns = buildLoyaltyCampaigns({ repository: buildSqlCampaignRepository({ pool }), runInTransaction });
+    const draft = await campaigns.createDraft({ shopId: 7, actorId: 10, requestId: '00000000-0000-4000-8000-000000000098', message: 'Fixture only', target: { type: 'all' } });
+    assert.equal(draft.recipientCount, 1);
+    await runInTransaction(connection => buildSqlCampaignRepository({ pool }).queue({ shopId: 7, campaignId: draft.id, now, connection }));
+    await loyalty.setMarketingConsent({ shopId: 7, customerId: '51', marketingConsent: false });
+    const jobs = require('../src/services/loyaltyCampaignWorker').buildSqlCampaignJobs({ pool });
+    const job = await jobs.claim(); assert.equal(job.memberId, alice.id);
+    assert.equal(await jobs.prepare(job), false);
+    await jobs.complete(job, 'skipped');
+    assert.equal((await readRows('SELECT status FROM loyalty_wallet_campaign_recipients WHERE campaign_id=?', [draft.id]))[0].status, 'skipped');
+    assert.equal((await readRows('SELECT wallet_message FROM loyalty_members WHERE id=?', [alice.id]))[0].wallet_message, '');
+    console.log('PASS loyalty MySQL migrations, lookup/backfill, isolation, concurrent reservations, payment/refund/rollback, kiosk discount/replay and frozen campaign consent');
   });
 }
 

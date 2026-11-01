@@ -23,7 +23,21 @@ Les étiquettes de mise à jour proviennent d'un compteur SQL global verrouillé
 
 La personnalisation Apple utilise le nom et les couleurs du programme. Les images viennent du répertoire serveur validé, pas d'un téléchargement arbitraire de `logoUrl` : préparer les logos serveur requis avant mise en service. Pour plusieurs restaurants, placer les images dans `APPLE_WALLET_ASSETS_PATH/SHOPID/` : les fichiers de ce répertoire sont prioritaires, avec repli vers les icônes communes du répertoire racine. Les fichiers ne sont jamais choisis à partir d'un chemin fourni par le navigateur.
 
-## Google
+## Extension caisse, borne et administration
+
+Après les migrations fidélité existantes, appliquer dans l'ordre `20261101120000_loyalty_card_numbers.sql`, `20261101121000_loyalty_marketing_consent.sql`, `20261101122000_loyalty_wallet_assets.sql`, `20261101123000_loyalty_wallet_campaigns.sql` sur une base de développement. Aucun lancement automatique.
+
+L'adhésion exige une session client et une preuve signée de table active du même restaurant (`X-Table-Session`), plus CSRF. Caisse et borne retrouvent uniquement des adhésions existantes, sans OTP et sans fabriquer de session personnelle. Les quotas SQL sont de 30/minute par borne, 60/minute par membre du personnel ; l'identifiant d'acteur est haché.
+
+Pour les anciennes cartes : `node scripts/backfill-loyalty-card-numbers.js` avec `LOYALTY_BACKFILL_DATABASE_URL` explicitement définie. Le script est reprenable et préserve QR/soldes ; la lecture attribue aussi les numéros manquants et synchronise Wallet.
+
+L'administration publie des variantes PNG contrôlées dans `APPLE_WALLET_ASSETS_PATH/SHOPID/VERSION/` : logo 160×50, 320×100, 480×150 ; bandeau 375×144, 750×288, 1125×432 pixels. Apple peut adapter le cadrage. Les icônes communes restent requises côté serveur, les images précédentes servent de repli. Conserver les anciennes versions jusqu'à vérification des références et sauvegarde. Les fichiers orphelins après échec incertain peuvent être nettoyés ultérieurement.
+
+Les campagnes Apple sont limitées à 200 caractères et un envoi par restaurant toutes les cinq minutes. Un brouillon fige l'audience consentante enregistrée ; une confirmation met les destinataires en attente. Requêtes et confirmations répétées sont idempotentes. Le worker vérifie encore la version du consentement et l'enregistrement avant de changer le message du pass existant. Un retrait de consentement efface le message ; se réinscrire ne réactive pas une ancienne campagne.
+
+La maintenance minute traite aussi `loyalty_wallet_campaign_recipients` : bail de 15 minutes, reprise progressive de 30 secondes à 24 heures, 20 destinataires par passage. Surveiller statut, tentatives, prochaine reprise et erreur générique. `processed` signifie synchronisation traitée, pas alerte affichée ou lue. Les points restent indépendants.
+
+## Google (fonctionnement existant)
 
 Créer l'émetteur dans Google Pay & Wallet Console, activer Wallet API et autoriser le compte de service. Fournir Issuer ID, adresse du compte de service, fichier de clé privée PEM protégé et origines web autorisées. Le logo du programme doit être une URL HTTPS publique. La classe est `ISSUER.smarteat_SHOP`, l'objet `ISSUER.smarteat_SHOP_SERIAL` ; un changement de points met à jour l'objet existant par PATCH.
 

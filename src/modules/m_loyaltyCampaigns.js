@@ -17,11 +17,12 @@ const buildSqlCampaignRepository = ({ pool = require('../config/dbPool') } = {})
       return rows;
     },
     async insertDraft({ shopId, requestId, message, targetMemberId, actorId, recipients, connection }) {
-      const [result] = await connection.query('INSERT INTO loyalty_wallet_campaigns (shopid,request_id,message,target_member_id,actor_id,recipient_count) VALUES (?,?,?,?,?,?)',
+      await connection.query('INSERT INTO loyalty_wallet_campaigns (shopid,request_id,message,target_member_id,actor_id,recipient_count) VALUES (?,?,?,?,?,?)',
         [shopId, requestId, message, targetMemberId, actorId, recipients.length]);
-      const campaignId = String(result.insertId);
+      const draft = await find(connection, 'shopid=? AND request_id=?', [shopId, requestId]);
+      const campaignId = draft.id;
       for (const member of recipients) await connection.query('INSERT INTO loyalty_wallet_campaign_recipients (campaign_id,shopid,member_id,consent_version) VALUES (?,?,?,?)', [campaignId, shopId, member.id, member.consentVersion]);
-      return find(connection, 'shopid=? AND id=?', [shopId, campaignId]);
+      return draft;
     },
     async lastSent({ shopId, connection }) { const [[row]] = await connection.query("SELECT DATE_FORMAT(MAX(sent_at),'%Y-%m-%dT%H:%i:%sZ') AS sentAt FROM loyalty_wallet_campaigns WHERE shopid=?", [shopId]); return row.sentAt; },
     async queue({ shopId, campaignId, now, connection }) {
