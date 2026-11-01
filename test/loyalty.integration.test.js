@@ -37,6 +37,16 @@ async function run() {
     assert.notEqual(alice.qr, elsewhere.qr);
     const readded = await loyalty.enroll({ shopId: 7, customerId: '51' });
     assert.equal(readded.id, alice.id); assert.equal(readded.qr, alice.qr);
+    assert.match(alice.cardNumber, /^\d{16}$/);
+    assert.equal(readded.cardNumber, alice.cardNumber);
+    await pool.query("INSERT INTO customer_account_identities (channel,destination,account_id,verified_at) VALUES ('phone','+33612345678',?,UTC_TIMESTAMP())", [globalId]);
+    assert.equal((await loyalty.lookup({ shopId: 7, kind: 'phone', value: '0612345678', countryCode: 'FR' })).id, alice.id);
+    assert.equal((await loyalty.lookup({ shopId: 8, kind: 'phone', value: '+33612345678' })).id, elsewhere.id);
+    await pool.query('UPDATE loyalty_members SET card_number=NULL WHERE id=?', [alice.id]);
+    const { backfillCardNumbers } = require('../scripts/backfill-loyalty-card-numbers');
+    assert.equal((await backfillCardNumbers({ pool })).updated, 1);
+    assert.equal((await backfillCardNumbers({ pool })).updated, 0);
+    assert.equal((await loyalty.getMember({ shopId: 7, customerId: '51' })).qr, alice.qr);
     await loyalty.adjust({ shopId: 7, memberId: alice.id, points: 50, reason: 'Fixture balance', actorId: 10 });
     assert.equal((await loyalty.getMember({ shopId: 8, customerId: '52' })).balance, 0);
     await assert.rejects(() => loyalty.lookup({ shopId: 8, qr: alice.qr }), error => error.status === 404);

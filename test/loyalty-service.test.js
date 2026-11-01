@@ -2,7 +2,7 @@ const assert = require('assert');
 const { buildLoyalty } = require('../src/modules/m_loyalty');
 const { normalizeProgram } = require('../src/helpers/loyalty');
 let state = { program: normalizeProgram({ enabled: true, rewards: [{ id: 'r', name: 'Café', points: 30, type: 'fixed', value: 200 }] }),
-  members: [{ id: 'm', shopid: 1, customer_id: '10', qr: 'a'.repeat(64), balance: 50, reserved: 0, revision: 1 }], orders: [], ledger: [], jobs: [] };
+  members: [{ id: 'm', shopid: 1, customer_id: '10', qr: 'a'.repeat(64), card_number: '0001234567890123', balance: 50, reserved: 0, revision: 1 }], orders: [], ledger: [], jobs: [] };
 let tail = Promise.resolve();
 let now = new Date('2026-10-24T12:00:00Z');
 let paymentBusy = false;
