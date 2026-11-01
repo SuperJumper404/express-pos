@@ -702,6 +702,29 @@ test("polling success finalizes paid orders atomically without archiving them", 
   assert.strictEqual(f.state.calls.length, count);
 });
 
+test("unexpanded Stripe charges persist receipt fields for later history printing", async () => {
+  const f = fixture(); await f.service.startPayment(input);
+  f.state.intent.status = "succeeded";
+  f.state.intent.latest_charge = "ch_terminal";
+  const retrieve = f.stripe.paymentIntents.retrieve;
+  let expansions = 0;
+  f.stripe.paymentIntents.retrieve = async (id, options) => {
+    const intent = await retrieve(id);
+    if (options && options.expand.includes("latest_charge")) {
+      expansions++;
+      intent.latest_charge = { id: "ch_terminal", payment_method_details: { card_present: {
+        brand: "visa", last4: "4242", funding: "debit",
+        receipt: { application_preferred_name: "VISA", dedicated_file_name: "A0000000031010" },
+      } } };
+    }
+    return intent;
+  };
+  const paid = await f.service.getPaymentStatus(scope);
+  assert.strictEqual(expansions, 1);
+  assert.strictEqual(paid.cardTicket.last4, "4242");
+  assert.strictEqual(JSON.parse(f.state.sessions[0].card_receipt_details).funding, "debit");
+});
+
 test("failed success finalization preserves active session for paid-but-not-archived recovery", async () => {
   const f = fixture(); await f.service.startPayment(input); f.state.intent.status = "succeeded";
   f.terminalStore.finalizePaymentSucceeded = async () => { throw new Error("raw-secret DB"); };

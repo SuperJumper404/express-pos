@@ -25,6 +25,7 @@ routers
   .get("/stripe/terminal/payments/:id", authentication, authorizeCashRegister, stripeTerminal.getPaymentStatus)
   .post("/stripe/terminal/payments/:id/cancel", authentication, authorizeCashRegister, stripeTerminal.cancelPayment)
   .get("/stripe/terminal/history", authentication, authorizeHistory, terminalHistory.listEntries)
+  .get("/stripe/terminal/history/:id/card-ticket", authentication, authorizeHistory, terminalHistory.getCardTicket)
   .get("/stripe/terminal/standalone-payments/attachment-candidates", authentication, authorizeHistory, terminalHistory.listAttachmentCandidates)
   .get("/stripe/terminal/standalone-payments/:id/attachments", authentication, authorizeHistory, terminalHistory.getAttachments)
   .post("/stripe/terminal/standalone-payments/:id/attachments", authentication, authorizeHistory, terminalHistory.addAttachments)
