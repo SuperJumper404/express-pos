@@ -144,6 +144,7 @@ const startServer = async () => {
   const runLoyaltyMaintenance = buildNonOverlappingRunner(async () => {
     await require('./src/modules/m_loyalty').buildLoyalty().expireReservations();
     await require('./src/services/loyaltyWalletWorker').runLoyaltyWalletMaintenance();
+    await require('./src/services/loyaltyCampaignWorker').runLoyaltyCampaignMaintenance();
   }, { error: () => console.error('Loyalty maintenance failed; queued changes will be retried') });
   const loyaltyTimer = setInterval(() => runLoyaltyMaintenance().catch(() => {
     console.error('Loyalty maintenance unavailable');

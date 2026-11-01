@@ -42,7 +42,8 @@ const buildWalletPayload = ({ program, member, shopId, offersUrl }) => {
   const rewards = (program.rewards || []).filter(reward => (!reward.expiresAt || Date.parse(reward.expiresAt) > Date.now()) && Number.isFinite(reward.points)).sort((a, b) => a.points - b.points);
   const usable = rewards.find(reward => reward.points <= available);
   const next = rewards.find(reward => reward.points > available);
-  return { name: program.name || "SmartEat", active: program.enabled !== false, shopId, balance, available, qr: member.qr, cardNumber: member.cardNumber || member.card_number || null, walletAssetVersion: program.walletAssetVersion || null, offersUrl: safeUrl(offersUrl),
+  return { name: program.name || "SmartEat", active: program.enabled !== false, shopId, balance, available, qr: member.qr, cardNumber: member.cardNumber || member.card_number || null, walletAssetVersion: program.walletAssetVersion || null,
+    walletMessage: Number(member.marketingConsent || member.marketing_consent) === 1 ? member.walletMessage || member.wallet_message || '' : '', offersUrl: safeUrl(offersUrl),
     offer: usable ? `${usable.name} — ${usable.points} points (conditions dans SmartEat)` : "Découvrez vos récompenses dans SmartEat",
     next: next ? `${next.name} à ${next.points} points` : "Tous les paliers atteints",
     logoUrl: program.logoUrl ? safeUrl(program.logoUrl) : null,
@@ -209,7 +210,8 @@ const buildLoyaltyWallet = ({ getConfig = readConfig, repository, request = json
       barcodes: [{ format: "PKBarcodeFormatQR", message: payload.qr, messageEncoding: "iso-8859-1", ...(payload.cardNumber ? { altText: payload.cardNumber } : {}) }],
       storeCard: { primaryFields: [{ key: "points", label: "POINTS", value: payload.balance, changeMessage: "Votre solde est de %@ points." }],
         secondaryFields: [{ key: "offer", label: "RÉCOMPENSE", value: payload.offer }], auxiliaryFields: [{ key: "next", label: "PROCHAIN PALIER", value: payload.next }, ...(payload.cardNumber ? [{ key: 'card', label: 'CARTE', value: payload.cardNumber }] : [])],
-        backFields: [{ key: "offers", label: "Voir mes offres", value: payload.offersUrl }, { key: "conditions", label: "Conditions", value: "Consultez SmartEat pour les conditions et la confirmation d’utilisation des points." }] } };
+        backFields: [{ key: "offers", label: "Voir mes offres", value: payload.offersUrl }, { key: "conditions", label: "Conditions", value: "Consultez SmartEat pour les conditions et la confirmation d’utilisation des points." },
+          { key: 'message', label: 'Votre restaurant', value: payload.walletMessage, changeMessage: '%@' }] } };
     const files = { "pass.json": Buffer.from(JSON.stringify(json)) };
     const artwork = payload.walletAssetVersion ? await require('./loyaltyWalletAssets').buildLoyaltyWalletAssets({ rootPath: config.appleAssetsPath }).readAssets({ shopId: payload.shopId, assetVersion: payload.walletAssetVersion }) : {};
     for (const name of ["icon.png", "icon@2x.png", "icon@3x.png", "logo.png", "logo@2x.png", "logo@3x.png", "strip.png", "strip@2x.png", "strip@3x.png"]) {
@@ -238,8 +240,9 @@ const buildLoyaltyWallet = ({ getConfig = readConfig, repository, request = json
   const issueWallet = async ({ provider, program, member, shopId }) => {
     if (!["apple", "google"].includes(provider)) throw new DomainError(400, "WALLET_PROVIDER_INVALID", "Fournisseur Wallet invalide.");
     const config = getConfig(); configured(config, provider);
-    const payload = buildWalletPayload({ program, member, shopId, offersUrl: offers(config, shopId) });
     const pass = await repo().ensurePass({ provider, member, shopId });
+    const latest = typeof repo().readMember === 'function' ? await repo().readMember(pass) : { program, member, shopId };
+    const payload = buildWalletPayload({ ...latest, offersUrl: offers(config, shopId) });
     if (provider === "apple") {
       const bytes = await applePass({ config, payload, pass });
       return { provider, mode: config.mode, status: "ready", contentType: "application/vnd.apple.pkpass", fileName: "fidelite.pkpass", passBase64: bytes.toString("base64") };
@@ -273,9 +276,10 @@ const buildLoyaltyWallet = ({ getConfig = readConfig, repository, request = json
       }); request.end("{}");
     });
   };
-  const synchronizeMember = async ({ shopId, memberId }) => {
+  const synchronizeMember = async ({ shopId, memberId, provider }) => {
     const passes = await repo().passesForMember({ shopId, memberId });
     for (const pass of passes) {
+      if (provider && pass.provider !== provider) continue;
       if (pass.provider === "google") { const input = await repo().readMember(pass); const config = getConfig(); configured(config, "google");
         await upsertGoogle(config, googleData(config, buildWalletPayload({ ...input, offersUrl: offers(config, shopId) }), pass, shopId)); }
       else {

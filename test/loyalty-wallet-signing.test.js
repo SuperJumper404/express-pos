@@ -40,6 +40,12 @@ const entries = bytes => {
     assert.equal(json.serialNumber, updated.serialNumber); assert.equal(json.authenticationToken, updated.authenticationToken);
     assert.equal(updated.storeCard.primaryFields[0].value, 200); assert.match(json.logoText, /TEST/);
     assert(files['strip@3x.png']); assert.equal(json.barcodes[0].altText, '0001234567890123');
+    assert.equal(json.storeCard.backFields.find(field => field.key === 'message').value, '');
+    const fresh = buildLoyaltyWallet({ getConfig: () => config, repository: { ensurePass: async () => pass,
+      readMember: async () => ({ ...input, member: { ...input.member, balance: 333, marketing_consent: 1, wallet_message: 'Offre du jour' } }) } });
+    const freshJson = JSON.parse(entries(Buffer.from((await fresh.issueWallet(input)).passBase64, 'base64'))['pass.json']);
+    assert.equal(freshJson.storeCard.primaryFields[0].value, 333);
+    assert.equal(freshJson.storeCard.backFields.find(field => field.key === 'message').value, 'Offre du jour');
     assert.equal(json.barcodes[0].message, input.member.qr); assert.ok(!json.storeCard.backFields[0].value.includes('auth'));
     const manifest = JSON.parse(files['manifest.json']);
     for (const name of Object.keys(manifest)) assert.equal(require('crypto').createHash('sha1').update(files[name]).digest('hex'), manifest[name]);
