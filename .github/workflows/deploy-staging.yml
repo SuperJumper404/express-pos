@@ -52,10 +52,18 @@ jobs:
               npx --yes @dotenvx/dotenvx decrypt -f .env.staging
             ! grep -q "encrypted:" .env.staging
 
-            docker compose --env-file .env.staging -f "$COMPOSE_FILE" down --remove-orphans || true
-            docker compose --env-file .env.staging -f "$COMPOSE_FILE" up -d --force-recreate
+            WALLET_COMPOSE=/home/vscodeserver/.smarteat/apple-wallet/staging/compose-wallet.sh
+            compose_staging() {
+              if [ -x "$WALLET_COMPOSE" ]; then
+                "$WALLET_COMPOSE" "$@"
+              else
+                docker compose --env-file .env.staging -f "$COMPOSE_FILE" "$@"
+              fi
+            }
 
-            docker compose --env-file .env.staging -f "$COMPOSE_FILE" ps
+            compose_staging down --remove-orphans || true
+            compose_staging up -d --force-recreate
+            compose_staging ps
 
   deploy-pm2:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'pm2' }}
