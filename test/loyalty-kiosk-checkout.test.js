@@ -14,8 +14,9 @@ function fixture(value = 200) {
     tail = pending.catch(() => {}); return pending;
   };
   const program = normalizeProgram({ enabled: true, rewards: [{ id: 'coffee', name: 'Café', type: 'fixed', value, points: 30 }] });
+  let version = 1;
   const loyaltyRepository = {
-    lockShop: async () => {}, program: async () => ({ config: program, version: 1 }),
+    lockShop: async () => {}, program: async () => ({ config: program, version }),
     member: async ({ shopId, memberId: id }) => shopId === 7 && (!id || id === memberId) ? state.member : null,
     saveMember: async ({ connection, ...member }) => Object.assign(state.member, member), history: async () => state.ledger,
     sourceOrder: async ({ shopId, orderId }) => state.orders.find(o => o.shopid === shopId && o.id === Number(orderId)),
@@ -41,10 +42,21 @@ function fixture(value = 200) {
     lockExpiredReservations: async () => [],
   };
   const checkout = buildCheckoutModule({ repository, withTransaction: transact, loyalty, getResolvedProductConfigurations: async () => new Map() });
-  const input = { shopId: 7, sessionSubject: 'service_point', servicePointId: 5, orderSource: 'borne', customer: { name: 'Client', phone: '0612345678' }, items: [{ productId: 21, quantity: 1, selectedChoiceIds: [] }], expectedTotal: 10, paymentMode: 'stripe_terminal_kiosk', clientOrderToken: 'attempt-1', loyaltyMemberId: memberId, loyaltyRewardId: 'coffee', loyaltyConfirmed: true, loyaltyExpectedDiscountCents: value };
-  return { checkout, loyalty, input, state: () => state, program, repository, transact };
+  const input = { shopId: 7, sessionSubject: 'service_point', servicePointId: 5, orderSource: 'borne', customer: { name: 'Client', phone: '0612345678' }, items: [{ productId: 21, quantity: 1, selectedChoiceIds: [] }], expectedTotal: 10, paymentMode: 'stripe_terminal_kiosk', clientOrderToken: 'attempt-1', loyaltyMemberId: memberId, loyaltyRewardId: 'coffee', loyaltyConfirmed: true, loyaltyExpectedDiscountCents: value, loyaltyExpectedPointsCost: 30, loyaltyProgramVersion: 1 };
+  return { checkout, loyalty, input, state: () => state, program, repository, transact, setVersion: value => { version = value; } };
 }
 
+module.exports = { fixture };
+if (require.main === module) {
+test('confirmed points cost and program version cannot drift before checkout', async () => {
+  for (const changed of ['points', 'version']) {
+    const f = fixture();
+    if (changed === 'points') f.program.rewards[0].points = 40;
+    else f.setVersion(2);
+    await assert.rejects(f.checkout.createCheckout({ ...f.input, loyaltyExpectedPointsCost: 30, loyaltyProgramVersion: 1 }), { code: 'LOYALTY_REQUOTE_REQUIRED' });
+    assert.equal(f.state().orders.length, 0); assert.equal(f.state().member.reserved, 0);
+  }
+});
 test('kiosk preview prices real products without writing or reserving points', async () => {
   const f = fixture(); assert.equal(typeof f.checkout.previewLoyaltyCheckout, 'function');
   const preview = await f.checkout.previewLoyaltyCheckout(f.input);
@@ -75,6 +87,8 @@ test('loyalty identity and confirmed discount participate in checkout idempotenc
   const { input } = fixture();
   assert.notEqual(canonicalPayloadHash(input), canonicalPayloadHash({ ...input, loyaltyMemberId: '00000000-0000-4000-8000-000000000002' }));
   assert.notEqual(canonicalPayloadHash(input), canonicalPayloadHash({ ...input, loyaltyExpectedDiscountCents: 100 }));
+  assert.notEqual(canonicalPayloadHash(input), canonicalPayloadHash({ ...input, loyaltyExpectedPointsCost: 40 }));
+  assert.notEqual(canonicalPayloadHash(input), canonicalPayloadHash({ ...input, loyaltyProgramVersion: 2 }));
 });
 test('a fully rewarded kiosk order is settled without Stripe and a tiny positive remainder requires counter payment', async () => {
   const free = fixture(1000); const result = await free.checkout.createCheckout({ ...free.input, paymentMode: 'loyalty_zero_total' });
@@ -101,3 +115,4 @@ test('concurrent kiosk attempts cannot spend the same points and an expired offe
   await assert.rejects(expired.checkout.createCheckout(expired.input), { code: 'LOYALTY_REWARD_UNAVAILABLE' });
   assert.equal(expired.state().orders.length, 0);
 });
+}

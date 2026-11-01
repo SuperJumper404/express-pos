@@ -286,10 +286,10 @@ const buildLoyalty = ({ repository = buildSqlLoyaltyRepository(), runInTransacti
       const member = await memberFor({ shopId, memberId, connection });
       const program = await programFor({ shopId, connection });
       if (!program.enabled) throw conflict('LOYALTY_DISABLED', 'Loyalty disabled');
-      return rewardId ? evaluateLoyaltyReward({ program, member, rewardId, subtotalCents, lines, now: clock().getTime() })
-        : { reward: null, pointsCost: 0, discountCents: 0 };
+      return { ...(rewardId ? evaluateLoyaltyReward({ program, member, rewardId, subtotalCents, lines, now: clock().getTime() })
+        : { reward: null, pointsCost: 0, discountCents: 0 }), programVersion: Number(program.version) };
     },
-    reserve: ({ shopId, orderId, rewardId, confirmed, connection: existingConnection }) => {
+    reserve: ({ shopId, orderId, rewardId, confirmed, expectedPointsCost, expectedProgramVersion, connection: existingConnection }) => {
       const reserveIn = async connection => {
       if (confirmed !== true) throw new DomainError(422, 'LOYALTY_CONFIRMATION_REQUIRED', 'Explicit confirmation required');
       const source = await repository.sourceOrder({ shopId, orderId: orderValid(orderId), connection }); if (!source) throw missing();
@@ -300,12 +300,14 @@ const buildLoyalty = ({ repository = buildSqlLoyaltyRepository(), runInTransacti
       if (order.status === 'paid') throw conflict('LOYALTY_ORDER_PAID', 'Order already paid');
       if (order.status === 'reserved') throw conflict('LOYALTY_ALREADY_RESERVED', 'Points already reserved');
       const program = await programFor({ shopId, connection });
+      if (expectedProgramVersion !== undefined && Number(program.version) !== expectedProgramVersion) throw conflict('LOYALTY_REQUOTE_REQUIRED', 'Confirm updated loyalty reward');
       const member = await memberFor({ shopId, memberId: order.member_id, connection });
       const subtotalCents = Math.round(Number(source.subtotal) * 100);
       integer(subtotalCents);
       const lines = await repository.lines({ shopId, orderId, connection });
       const { reward, discountCents } = evaluateLoyaltyReward({ program, member, rewardId, subtotalCents, lines,
         otherDiscountCents: Math.round(Number(source.discount_amount || 0) * 100), now: clock().getTime() });
+      if (expectedPointsCost !== undefined && reward.points !== expectedPointsCost) throw conflict('LOYALTY_REQUOTE_REQUIRED', 'Confirm updated loyalty reward');
       const expiresAt = new Date(clock().getTime() + 15 * 60000).toISOString();
       Object.assign(order, { status: 'reserved', rule_snapshot: { ...program, lines }, reward_snapshot: reward, points_cost: reward.points,
         discount_cents: discountCents, reservation_expires_at: expiresAt });
@@ -316,14 +318,14 @@ const buildLoyalty = ({ repository = buildSqlLoyaltyRepository(), runInTransacti
       };
       return existingConnection ? reserveIn(existingConnection) : transaction({ shopId }, reserveIn);
     },
-    async applyCheckoutReward({ connection, shopId, orderId, customerId, memberId, rewardId, confirmed }) {
+    async applyCheckoutReward({ connection, shopId, orderId, customerId, memberId, rewardId, confirmed, expectedPointsCost, expectedProgramVersion }) {
       if (!connection) throw invalid(); scopeValid({ shopId }); orderId = orderValid(orderId);
       if (!!customerId === !!memberId) throw invalid();
       if (memberId) await service.attachIdentifiedOrder({ connection, shopId, orderId, memberId });
       else await service.attachCustomerOrder({ connection, shopId, orderId, customerId });
       const source = await repository.sourceOrder({ shopId, orderId, connection });
       const lines = await repository.checkoutLines({ shopId, orderId, connection });
-      const result = await service.reserve({ connection, shopId, orderId, rewardId, confirmed });
+      const result = await service.reserve({ connection, shopId, orderId, rewardId, confirmed, expectedPointsCost, expectedProgramVersion });
       const subtotalCents = integer(Math.round(Number(source.subtotal) * 100));
       // Includes previous normal discounts but never delivery fees: delivery checkout must be rejected by its caller.
       const discountedLines = allocateDiscount(lines, result.discountCents);

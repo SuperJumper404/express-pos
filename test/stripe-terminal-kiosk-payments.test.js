@@ -687,7 +687,8 @@ test("maintenance recovers a kiosk intent persisted before the handoff deadline 
   assert.deepStrictEqual(f.state.orders, []);
 });
 
-(async () => {
+module.exports = { fixture };
+if (require.main === module) (async () => {
   for (const { name, run } of tests) {
     await run();
     console.log(`PASS ${name}`);

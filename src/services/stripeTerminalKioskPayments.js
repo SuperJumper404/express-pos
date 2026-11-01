@@ -35,6 +35,7 @@ const pickCheckoutPayload = (body = {}) => {
     "customer", "customerID", "phone", "remark", "items", "expected_total",
     "discount_type", "discount_value", "is_takeaway", "client_order_token",
     "loyalty_member_id", "loyalty_reward_id", "loyalty_confirmed", "loyalty_expected_discount_cents",
+    "loyalty_expected_points_cost", "loyalty_program_version",
   ];
   return allowed.reduce((result, key) => {
     if (body[key] !== undefined) result[key] = body[key];
@@ -74,7 +75,7 @@ const buildStripeTerminalKioskPaymentService = ({
 
   const safe = (operation) => async (input) => {
     try { return await operation(input); } catch (error) {
-      if (error instanceof TerminalPaymentError) throw error;
+      if (error instanceof TerminalPaymentError || require('../helpers/loyaltyTerminalError')(error)) throw error;
       fail("TERMINAL_INTERNAL_ERROR");
     }
   };
