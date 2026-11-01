@@ -23,7 +23,8 @@ const personalScope = req => {
   return { shopId: session.shopId, customerId: session.customerId };
 };
 const buildLoyaltyController = ({ loyalty = require('../modules/m_loyalty').buildLoyalty(), wallet,
-  access = require('../helpers/middleware/loyaltyAccess').buildLoyaltyAccess() } = {}) => {
+  access = require('../helpers/middleware/loyaltyAccess').buildLoyaltyAccess(),
+  tableContext = require('../helpers/middleware/loyaltyTableContext').buildLoyaltyTableContext() } = {}) => {
   const endpoint = (work, personal = false) => async (req, res) => {
     res.set('Cache-Control', 'no-store');
     try {
@@ -61,8 +62,26 @@ const buildLoyaltyController = ({ loyalty = require('../modules/m_loyalty').buil
     attach: endpoint(req => loyalty.attach({ ...staffScope(req, false), orderId: req.params.orderId, ...fields(req, ['qr']) })),
     reserve: endpoint(req => loyalty.reserve({ ...staffScope(req, false), orderId: req.params.orderId, ...fields(req, ['rewardId', 'confirmed']) })),
     release: endpoint(req => { const scope = staffScope(req, false); fields(req, []); return loyalty.release({ ...scope, orderId: req.params.orderId }); }),
-    getPersonal: endpoint(req => loyalty.getMember(personalScope(req)), true),
-    enroll: endpoint(req => { const scope = personalScope(req); fields(req, []); return loyalty.enroll(scope); }, true),
+    getPersonal: endpoint(async req => {
+      const scope = personalScope(req);
+      const result = await loyalty.getMember(scope);
+      return result.id ? result : { ...result, canEnroll: !!await tableContext.read({ shopId: scope.shopId, token: req.headers && req.headers['x-table-session'] }) };
+    }, true),
+    enroll: endpoint(async req => {
+      const scope = personalScope(req);
+      const { marketingConsent = false } = fields(req, ['marketingConsent']);
+      if (typeof marketingConsent !== 'boolean') throw invalid();
+      if (!await tableContext.read({ shopId: scope.shopId, token: req.headers && req.headers['x-table-session'] })) {
+        throw new DomainError(403, 'LOYALTY_TABLE_REQUIRED', 'Scan a table QR to join loyalty');
+      }
+      return loyalty.enroll({ ...scope, marketingConsent });
+    }, true),
+    setPreferences: endpoint(req => {
+      const scope = personalScope(req);
+      const { marketingConsent } = fields(req, ['marketingConsent']);
+      if (typeof marketingConsent !== 'boolean') throw invalid();
+      return loyalty.setMarketingConsent({ ...scope, marketingConsent });
+    }, true),
     wallet: endpoint(async req => {
       const scope = personalScope(req); fields(req, []);
       const provider = req.params.provider;

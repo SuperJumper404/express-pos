@@ -38,11 +38,11 @@ const buildCustomerCors = ({ prefix = require("../config/prefix"), allowedOrigin
     res.vary("Access-Control-Request-Headers");
     const headers = (req.headers["access-control-request-headers"] || "").toLowerCase().split(",").map(value => value.trim()).filter(Boolean);
     if (!["GET", "HEAD", "POST", "PATCH", "DELETE"].includes(req.headers["access-control-request-method"])
-      || headers.some(value => !["content-type", "x-csrf-token", "authorization", "authentication", "accept"].includes(value))) {
+      || headers.some(value => !["content-type", "x-csrf-token", "x-table-session", "authorization", "authentication", "accept"].includes(value))) {
       return failed(res, "Customer preflight refused", "CUSTOMER_ORIGIN_FORBIDDEN", 403);
     }
     res.set("Access-Control-Allow-Methods", "GET, HEAD, POST, PATCH, DELETE, OPTIONS");
-    res.set("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token, Authorization, Authentication, Accept");
+    res.set("Access-Control-Allow-Headers", "Content-Type, X-CSRF-Token, X-Table-Session, Authorization, Authentication, Accept");
     return res.status(204).end();
   }
   return next();
