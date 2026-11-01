@@ -14,6 +14,7 @@ const buildLoyaltyRouter = ({ controller = require('../controllers/c_loyalty').b
   router.get('/loyalty/members/:memberId', authentication, controller.getStaffMember);
   router.post('/loyalty/lookup', authentication, controller.lookup);
   router.post('/loyalty/kiosk/lookup', authentication, controller.lookupKiosk);
+  router.post('/loyalty/kiosk/preview', authentication, controller.previewKiosk);
   router.post('/loyalty/members/:memberId/adjustments', authentication, controller.adjust);
   router.post('/loyalty/orders/:orderId/attach', authentication, controller.attach);
   router.post('/loyalty/orders/:orderId/reserve', authentication, controller.reserve);

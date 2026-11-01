@@ -77,6 +77,7 @@ const canonicalPayload = (input) => {
       : input.paymentMode,
     ...(input.verifiedCustomer && { customer_account_id: input.verifiedCustomer.customerId }),
     ...(input.loyaltyRewardId && { loyalty_reward_id: input.loyaltyRewardId, loyalty_confirmed: input.loyaltyConfirmed }),
+    ...(input.loyaltyMemberId && { loyalty_member_id: input.loyaltyMemberId, loyalty_expected_discount_cents: input.loyaltyExpectedDiscountCents }),
     ...(input.fulfillmentType === "delivery" && {
       fulfillment_type: "delivery",
       actor_id: input.actorId,
@@ -101,6 +102,7 @@ const resolveCheckoutPaymentState = (paymentMode) => {
     ? paymentMode.trim()
     : "";
   const comparablePaymentMode = normalizedPaymentMode.toLowerCase();
+  if (comparablePaymentMode === 'loyalty_zero_total') return { payment: 'Récompense fidélité', payment_status: 'paid', payment_provider: 'loyalty' };
 
   if (comparablePaymentMode === "stripe") {
     return {
@@ -216,6 +218,8 @@ const normalizeCheckoutRequestBody = (body = {}, { paymentModeOverride } = {}) =
     items,
     expectedTotal: body.expected_total,
     ...(body.loyalty_reward_id !== undefined && { loyaltyRewardId: body.loyalty_reward_id, loyaltyConfirmed: body.loyalty_confirmed }),
+    ...(body.loyalty_member_id !== undefined && { loyaltyMemberId: body.loyalty_member_id }),
+    ...(body.loyalty_expected_discount_cents !== undefined && { loyaltyExpectedDiscountCents: body.loyalty_expected_discount_cents }),
     ...(body.discount_type === undefined
       ? {}
       : { discountType: body.discount_type }),
@@ -308,8 +312,14 @@ const validateCheckoutInput = (input = {}) => {
   const isTakeaway = normalizeBoolean(input.isTakeaway, "is_takeaway");
   const delivery = input.fulfillmentType === "delivery";
   const verifiedCustomer = input.verifiedCustomer;
-  if (input.loyaltyRewardId !== undefined && (!verifiedCustomer || delivery || typeof input.loyaltyRewardId !== 'string'
+  if (input.loyaltyMemberId !== undefined && (verifiedCustomer || delivery || typeof input.loyaltyMemberId !== 'string'
+    || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(input.loyaltyMemberId)
+    || (publicServicePointSession && input.orderSource !== 'borne'))) throw invalidRequest('loyalty_member');
+  if (input.loyaltyRewardId !== undefined && ((!verifiedCustomer && !input.loyaltyMemberId) || delivery || typeof input.loyaltyRewardId !== 'string'
     || !/^[A-Za-z0-9_-]{1,64}$/.test(input.loyaltyRewardId) || input.loyaltyConfirmed !== true)) throw invalidRequest('loyalty_reward');
+  if (input.loyaltyMemberId && input.loyaltyRewardId && (!Number.isSafeInteger(input.loyaltyExpectedDiscountCents)
+    || input.loyaltyExpectedDiscountCents < 0 || input.loyaltyExpectedDiscountCents > 1000000000)) throw invalidRequest('loyalty_expected_discount_cents');
+  if (input.paymentMode.trim().toLowerCase() === 'loyalty_zero_total' && (!input.loyaltyMemberId || !input.loyaltyRewardId)) throw invalidRequest('loyalty_zero_total');
   if (verifiedCustomer && (verifiedCustomer.shopId !== Number(input.shopId)
     || typeof verifiedCustomer.customerId !== "string" || !/^[1-9]\d{0,19}$/.test(verifiedCustomer.customerId)
     || BigInt(verifiedCustomer.customerId) > 18446744073709551615n)) throw invalidRequest("customer_session");
@@ -351,6 +361,7 @@ const validateCheckoutInput = (input = {}) => {
     paymentMode: input.paymentMode.trim().toLowerCase(),
     ...(verifiedCustomer && { verifiedCustomer: { shopId: verifiedCustomer.shopId, customerId: verifiedCustomer.customerId } }),
     ...(input.loyaltyRewardId && { loyaltyRewardId: input.loyaltyRewardId, loyaltyConfirmed: true }),
+    ...(input.loyaltyMemberId && { loyaltyMemberId: input.loyaltyMemberId, loyaltyExpectedDiscountCents: input.loyaltyExpectedDiscountCents }),
     ...(delivery && input.deliveryDetails !== undefined && { deliveryDetails: normalizeDeliveryDetails(input.deliveryDetails) }),
   };
 };
@@ -866,6 +877,7 @@ const buildCheckoutModule = ({
       shopId: checkout.shopId, token: checkout.clientOrderToken, requestHash: payloadHash, connection,
     });
     const transactionWork = async (connection) => {
+      if (checkout.loyaltyMemberId) await queryResult(connection, 'SELECT id FROM shop WHERE id=? FOR UPDATE', [checkout.shopId]);
       if (isDelivery) {
         await queryResult(connection, "SELECT id FROM shop WHERE id=? FOR UPDATE", [checkout.shopId]);
         if (checkout.paymentMode.toLowerCase().startsWith(COUNTER_PAY_BEFORE_PREFIX)) {
@@ -1007,6 +1019,14 @@ const buildCheckoutModule = ({
           "SERVICE_POINT_INVALID",
           "Point de service indisponible.",
         );
+      }
+      if (checkout.loyaltyMemberId) {
+        const cashier = checkout.sessionSubject === 'staff' && actor && Number(actor.status) === 1 && (Number(actor.access) === 0
+          || (Number(actor.access) === 1 && (require('../helpers/staffPermissions').parseModulePermissions(actor.module_permissions, actor.access) || []).includes('cashregister')));
+        const staffKiosk = checkout.sessionSubject === 'staff' && actor && Number(actor.status) === 1 &&
+          (require('../helpers/staffPermissions').parseModulePermissions(actor.module_permissions, actor.access) || []).includes('borne');
+        const kiosk = servicePoint.type === 'kiosk' && ((checkout.sessionSubject === 'service_point' && checkout.orderSource === 'borne') || staffKiosk);
+        if (!cashier && !kiosk) throw new DomainError(403, 'LOYALTY_FORBIDDEN', 'Loyalty checkout access denied');
       }
       const orderResult = await repository.insertOrder({
         order: {
@@ -1153,11 +1173,23 @@ const buildCheckoutModule = ({
 
       if (loyalty && checkout.verifiedCustomer) await loyalty.attachCustomerOrder({ connection,
         shopId: checkout.shopId, orderId, customerId: checkout.verifiedCustomer.customerId });
+      if (checkout.loyaltyMemberId) {
+        if (!loyalty) throw new DomainError(503, 'LOYALTY_UNAVAILABLE', 'Loyalty unavailable');
+        await loyalty.attachIdentifiedOrder({ connection, shopId: checkout.shopId, orderId, memberId: checkout.loyaltyMemberId });
+      }
       if (checkout.loyaltyRewardId) {
         if (!loyalty) throw new DomainError(503, 'LOYALTY_UNAVAILABLE', 'Loyalty unavailable');
         const applied = await loyalty.applyCheckoutReward({ connection, shopId: checkout.shopId, orderId,
-          customerId: checkout.verifiedCustomer.customerId, rewardId: checkout.loyaltyRewardId, confirmed: checkout.loyaltyConfirmed });
+          ...(checkout.loyaltyMemberId ? { memberId: checkout.loyaltyMemberId } : { customerId: checkout.verifiedCustomer.customerId }),
+          rewardId: checkout.loyaltyRewardId, confirmed: checkout.loyaltyConfirmed });
+        if (checkout.loyaltyMemberId && applied.discountCents !== checkout.loyaltyExpectedDiscountCents) {
+          throw new DomainError(409, 'LOYALTY_REQUOTE_REQUIRED', 'Confirm updated loyalty reward');
+        }
         total = applied.totalCents / 100;
+      }
+      if (checkout.paymentMode === 'loyalty_zero_total' && total !== 0) throw invalidRequest('loyalty_zero_total');
+      if (checkout.loyaltyMemberId && checkout.paymentMode === 'stripe_terminal_kiosk' && cents(total) < 50) {
+        throw new DomainError(409, 'LOYALTY_COUNTER_PAYMENT_REQUIRED', 'Use counter payment for this amount');
       }
       if (loyalty && paymentState.payment_status === 'paid') await loyalty.settlePaidOrder({ connection,
         shopId: checkout.shopId, orderId, paymentKey: `counter:${orderId}`, paidCents: Math.round(total * 100) });
@@ -1217,6 +1249,20 @@ const buildCheckoutModule = ({
 
   return {
     createCheckout,
+    async previewLoyaltyCheckout(input) {
+      const checkout = validateCheckoutInput({ ...input, customer: { name: 'Loyalty preview' }, paymentMode: 'paiement au comptoir', clientOrderToken: 'loyalty-preview',
+        loyaltyMemberId: input.loyaltyMemberId || input.memberId, loyaltyRewardId: undefined });
+      return runInTransaction(async connection => {
+        const point = await repository.findServicePoint({ shopId: checkout.shopId, servicePointId: checkout.servicePointId, connection });
+        if (!point || point.type !== 'kiosk' || Number(point.is_active) !== 1) throw new DomainError(403, 'LOYALTY_FORBIDDEN', 'Invalid kiosk');
+        const quote = await quoteOrderItems({ ...checkout, connection });
+        const grossCents = cents(quote.total);
+        const lines = quote.resolvedItems.map(item => ({ productId: item.productId, quantity: item.quantity, unitCents: cents(item.unitPrice), totalCents: cents(item.lineTotal) }));
+        const rewardId = input.loyaltyRewardId || input.rewardId;
+        const reward = await loyalty.previewReward({ connection, shopId: checkout.shopId, memberId: checkout.loyaltyMemberId, rewardId, subtotalCents: grossCents, lines });
+        return { grossCents, discountCents: reward.discountCents, totalCents: grossCents - reward.discountCents, pointsCost: reward.pointsCost, rewardId: rewardId || null, eligible: true };
+      });
+    },
     finalizeReservations,
     releaseExpiredReservations,
   };
@@ -1230,6 +1276,7 @@ module.exports = {
   canonicalPayloadHash,
   checkoutCustomerContext,
   createCheckout: checkoutModule.createCheckout,
+  previewLoyaltyCheckout: checkoutModule.previewLoyaltyCheckout,
   finalizeReservations: checkoutModule.finalizeReservations,
   normalizeCheckoutRequestBody,
   releaseExpiredReservations: checkoutModule.releaseExpiredReservations,

@@ -24,7 +24,8 @@ const personalScope = req => {
 };
 const buildLoyaltyController = ({ loyalty = require('../modules/m_loyalty').buildLoyalty(), wallet,
   access = require('../helpers/middleware/loyaltyAccess').buildLoyaltyAccess(),
-  tableContext = require('../helpers/middleware/loyaltyTableContext').buildLoyaltyTableContext() } = {}) => {
+  tableContext = require('../helpers/middleware/loyaltyTableContext').buildLoyaltyTableContext(),
+  checkout = require('../modules/m_checkout') } = {}) => {
   const endpoint = (work, personal = false) => async (req, res) => {
     res.set('Cache-Control', 'no-store');
     try {
@@ -56,6 +57,12 @@ const buildLoyaltyController = ({ loyalty = require('../modules/m_loyalty').buil
       const { servicePointId, ...input } = fields(req, ['kind', 'value', 'countryCode', 'servicePointId']);
       await access.lookupQuota({ shopId: scope.shopId, actorKey: `kiosk:${scope.servicePointId}`, audience: 'kiosk' });
       return loyalty.lookup({ shopId: scope.shopId, ...input, audience: 'kiosk' });
+    }),
+    previewKiosk: endpoint(async req => {
+      const scope = await access.kioskScope(req);
+      const body = fields(req, ['memberId', 'items', 'isTakeaway', 'expectedTotal', 'rewardId', 'servicePointId']);
+      const normalized = checkout.normalizeCheckoutRequestBody({ items: body.items, expected_total: body.expectedTotal, is_takeaway: body.isTakeaway });
+      return checkout.previewLoyaltyCheckout({ ...normalized, ...scope, sessionSubject: 'service_point', orderSource: 'borne', memberId: body.memberId, rewardId: body.rewardId });
     }),
     adjust: endpoint(req => loyalty.adjust({ ...staffScope(req, true), memberId: req.params.memberId,
       ...fields(req, ['points', 'reason']), actorId: req.id })),
