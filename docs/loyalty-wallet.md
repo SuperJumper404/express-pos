@@ -25,6 +25,8 @@ La personnalisation Apple utilise le nom et les couleurs du programme. Les image
 
 ## Extension caisse, borne et administration
 
+La confirmation de récompense identifiée transporte aussi `loyalty_expected_points_cost` et `loyalty_program_version`, avec adhérent, offre et remise attendue. Le serveur vérifie le coût et la version sous le verrou de la transaction avant réservation ; ces valeurs participent à l'idempotence. Mettre à jour frontend/backend ensemble et recharger les anciens écrans en cache. Une confirmation incomplète est refusée avant tout paiement.
+
 Après les migrations fidélité existantes, appliquer dans l'ordre `20261101120000_loyalty_card_numbers.sql`, `20261101121000_loyalty_marketing_consent.sql`, `20261101122000_loyalty_wallet_assets.sql`, `20261101123000_loyalty_wallet_campaigns.sql` sur une base de développement. Aucun lancement automatique.
 
 L'adhésion exige une session client et une preuve signée de table active du même restaurant (`X-Table-Session`), plus CSRF. Caisse et borne retrouvent uniquement des adhésions existantes, sans OTP et sans fabriquer de session personnelle. Les quotas SQL sont de 30/minute par borne, 60/minute par membre du personnel ; l'identifiant d'acteur est haché.

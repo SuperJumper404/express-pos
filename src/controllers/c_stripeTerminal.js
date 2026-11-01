@@ -5,6 +5,7 @@ const buildStripeTerminalModule = options => buildTerminalStore({ ...options, lo
 const { buildStripeTerminalReaderService, TerminalReaderError } = require("../services/stripeTerminalReaders");
 const { buildStripeTerminalPaymentService, TerminalPaymentError } = require("../services/stripeTerminalPayments");
 const { buildStripeTerminalKioskPaymentService } = require("../services/stripeTerminalKioskPayments");
+const isLoyaltyTerminalError = require('../helpers/loyaltyTerminalError');
 
 let defaultPaymentService;
 const getDefaultPaymentService = () => {
@@ -111,6 +112,8 @@ const pickCheckoutPayload = (body = {}) => {
   const allowed = [
     "customer", "customerID", "phone", "remark", "items", "expected_total",
     "discount_type", "discount_value", "is_takeaway", "client_order_token",
+    "loyalty_member_id", "loyalty_reward_id", "loyalty_confirmed", "loyalty_expected_discount_cents",
+    "loyalty_expected_points_cost", "loyalty_program_version",
   ];
   return allowed.reduce((result, key) => {
     if (body[key] !== undefined) result[key] = body[key];
@@ -149,6 +152,7 @@ const buildStripeTerminalController = ({ readerService, paymentService, kioskPay
       });
       return custom(res, status, "Terminal mis a jour.", null, data);
     } catch (error) {
+      if (isLoyaltyTerminalError(error)) return failed(res, 'La fidélité doit être vérifiée à nouveau.', error.code, error.status);
       const safeError = error instanceof TerminalPaymentError
         ? error : new TerminalPaymentError("TERMINAL_INTERNAL_ERROR");
       return failed(res, safeError.message, safeError.code, safeError.statusCode);

@@ -1,0 +1,10 @@
+const DomainError = require('./domainError');
+const codes = new Set([
+  'LOYALTY_REQUOTE_REQUIRED', 'LOYALTY_INSUFFICIENT_POINTS', 'LOYALTY_REWARD_UNAVAILABLE',
+  'LOYALTY_REWARD_CONDITIONS', 'LOYALTY_NOT_STACKABLE', 'LOYALTY_DISABLED', 'LOYALTY_NOT_FOUND',
+  'LOYALTY_UNAVAILABLE', 'LOYALTY_COUNTER_PAYMENT_REQUIRED', 'LOYALTY_FORBIDDEN',
+  'LOYALTY_PAYMENT_ACTIVE', 'LOYALTY_ALREADY_RESERVED', 'LOYALTY_ORDER_ASSIGNED',
+  'LOYALTY_INVALID', 'LOYALTY_CONFIRMATION_REQUIRED',
+]);
+module.exports = error => error instanceof DomainError && codes.has(error.code)
+  && ((error.status >= 400 && error.status < 500) || error.status === 503);

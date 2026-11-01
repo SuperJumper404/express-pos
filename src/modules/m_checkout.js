@@ -77,7 +77,8 @@ const canonicalPayload = (input) => {
       : input.paymentMode,
     ...(input.verifiedCustomer && { customer_account_id: input.verifiedCustomer.customerId }),
     ...(input.loyaltyRewardId && { loyalty_reward_id: input.loyaltyRewardId, loyalty_confirmed: input.loyaltyConfirmed }),
-    ...(input.loyaltyMemberId && { loyalty_member_id: input.loyaltyMemberId, loyalty_expected_discount_cents: input.loyaltyExpectedDiscountCents }),
+    ...(input.loyaltyMemberId && { loyalty_member_id: input.loyaltyMemberId, loyalty_expected_discount_cents: input.loyaltyExpectedDiscountCents,
+      loyalty_expected_points_cost: input.loyaltyExpectedPointsCost, loyalty_program_version: input.loyaltyProgramVersion }),
     ...(input.fulfillmentType === "delivery" && {
       fulfillment_type: "delivery",
       actor_id: input.actorId,
@@ -220,6 +221,8 @@ const normalizeCheckoutRequestBody = (body = {}, { paymentModeOverride } = {}) =
     ...(body.loyalty_reward_id !== undefined && { loyaltyRewardId: body.loyalty_reward_id, loyaltyConfirmed: body.loyalty_confirmed }),
     ...(body.loyalty_member_id !== undefined && { loyaltyMemberId: body.loyalty_member_id }),
     ...(body.loyalty_expected_discount_cents !== undefined && { loyaltyExpectedDiscountCents: body.loyalty_expected_discount_cents }),
+    ...(body.loyalty_expected_points_cost !== undefined && { loyaltyExpectedPointsCost: body.loyalty_expected_points_cost }),
+    ...(body.loyalty_program_version !== undefined && { loyaltyProgramVersion: body.loyalty_program_version }),
     ...(body.discount_type === undefined
       ? {}
       : { discountType: body.discount_type }),
@@ -319,6 +322,10 @@ const validateCheckoutInput = (input = {}) => {
     || !/^[A-Za-z0-9_-]{1,64}$/.test(input.loyaltyRewardId) || input.loyaltyConfirmed !== true)) throw invalidRequest('loyalty_reward');
   if (input.loyaltyMemberId && input.loyaltyRewardId && (!Number.isSafeInteger(input.loyaltyExpectedDiscountCents)
     || input.loyaltyExpectedDiscountCents < 0 || input.loyaltyExpectedDiscountCents > 1000000000)) throw invalidRequest('loyalty_expected_discount_cents');
+  if (input.loyaltyMemberId && input.loyaltyRewardId && [input.loyaltyExpectedPointsCost, input.loyaltyProgramVersion]
+    .some(value => !Number.isSafeInteger(value) || value < 1 || value > 2147483647)) {
+    throw new DomainError(409, 'LOYALTY_REQUOTE_REQUIRED', 'Confirm updated loyalty reward');
+  }
   if (input.paymentMode.trim().toLowerCase() === 'loyalty_zero_total' && (!input.loyaltyMemberId || !input.loyaltyRewardId)) throw invalidRequest('loyalty_zero_total');
   if (verifiedCustomer && (verifiedCustomer.shopId !== Number(input.shopId)
     || typeof verifiedCustomer.customerId !== "string" || !/^[1-9]\d{0,19}$/.test(verifiedCustomer.customerId)
@@ -361,7 +368,8 @@ const validateCheckoutInput = (input = {}) => {
     paymentMode: input.paymentMode.trim().toLowerCase(),
     ...(verifiedCustomer && { verifiedCustomer: { shopId: verifiedCustomer.shopId, customerId: verifiedCustomer.customerId } }),
     ...(input.loyaltyRewardId && { loyaltyRewardId: input.loyaltyRewardId, loyaltyConfirmed: true }),
-    ...(input.loyaltyMemberId && { loyaltyMemberId: input.loyaltyMemberId, loyaltyExpectedDiscountCents: input.loyaltyExpectedDiscountCents }),
+    ...(input.loyaltyMemberId && { loyaltyMemberId: input.loyaltyMemberId, loyaltyExpectedDiscountCents: input.loyaltyExpectedDiscountCents,
+      loyaltyExpectedPointsCost: input.loyaltyExpectedPointsCost, loyaltyProgramVersion: input.loyaltyProgramVersion }),
     ...(delivery && input.deliveryDetails !== undefined && { deliveryDetails: normalizeDeliveryDetails(input.deliveryDetails) }),
   };
 };
@@ -1181,7 +1189,8 @@ const buildCheckoutModule = ({
         if (!loyalty) throw new DomainError(503, 'LOYALTY_UNAVAILABLE', 'Loyalty unavailable');
         const applied = await loyalty.applyCheckoutReward({ connection, shopId: checkout.shopId, orderId,
           ...(checkout.loyaltyMemberId ? { memberId: checkout.loyaltyMemberId } : { customerId: checkout.verifiedCustomer.customerId }),
-          rewardId: checkout.loyaltyRewardId, confirmed: checkout.loyaltyConfirmed });
+          rewardId: checkout.loyaltyRewardId, confirmed: checkout.loyaltyConfirmed,
+          ...(checkout.loyaltyMemberId && { expectedPointsCost: checkout.loyaltyExpectedPointsCost, expectedProgramVersion: checkout.loyaltyProgramVersion }) });
         if (checkout.loyaltyMemberId && applied.discountCents !== checkout.loyaltyExpectedDiscountCents) {
           throw new DomainError(409, 'LOYALTY_REQUOTE_REQUIRED', 'Confirm updated loyalty reward');
         }
@@ -1260,7 +1269,7 @@ const buildCheckoutModule = ({
         const lines = quote.resolvedItems.map(item => ({ productId: item.productId, quantity: item.quantity, unitCents: cents(item.unitPrice), totalCents: cents(item.lineTotal) }));
         const rewardId = input.loyaltyRewardId || input.rewardId;
         const reward = await loyalty.previewReward({ connection, shopId: checkout.shopId, memberId: checkout.loyaltyMemberId, rewardId, subtotalCents: grossCents, lines });
-        return { grossCents, discountCents: reward.discountCents, totalCents: grossCents - reward.discountCents, pointsCost: reward.pointsCost, rewardId: rewardId || null, eligible: true };
+        return { grossCents, discountCents: reward.discountCents, totalCents: grossCents - reward.discountCents, pointsCost: reward.pointsCost, programVersion: reward.programVersion, rewardId: rewardId || null, eligible: true };
       });
     },
     finalizeReservations,

@@ -110,7 +110,8 @@ async function run() {
     const input = { shopId: 7, sessionSubject: 'service_point', servicePointId: kiosk.insertId, orderSource: 'borne',
       customer: { name: 'Fixture', phone: '0612345678' }, items: [{ productId: 21, quantity: 1, selectedChoiceIds: [] }],
       expectedTotal: 12.5, paymentMode: 'stripe_terminal_kiosk', clientOrderToken: 'loyalty-sql-kiosk',
-      loyaltyMemberId: alice.id, loyaltyRewardId: 'coffee', loyaltyConfirmed: true, loyaltyExpectedDiscountCents: 200 };
+      loyaltyMemberId: alice.id, loyaltyRewardId: 'coffee', loyaltyConfirmed: true, loyaltyExpectedDiscountCents: 200,
+      loyaltyExpectedPointsCost: 30, loyaltyProgramVersion: (await loyalty.getProgram({ shopId: 7 })).version };
     await assert.rejects(checkout.createCheckout({ ...input, loyaltyExpectedDiscountCents: 100 }), { code: 'LOYALTY_REQUOTE_REQUIRED' });
     assert.equal((await readRows('SELECT id FROM orders WHERE client_order_token=?', [input.clientOrderToken])).length, 0);
     const created = await checkout.createCheckout(input);
