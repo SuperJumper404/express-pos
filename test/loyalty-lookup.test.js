@@ -95,3 +95,14 @@ test('kiosk access is limited to active kiosks and lookup quotas reject the 31st
   for (let i = 0; i < 60; i++) await guard.lookupQuota({ shopId: 7, actorKey: 'staff:2', audience: 'staff' });
   await assert.rejects(guard.lookupQuota({ shopId: 7, actorKey: 'staff:2', audience: 'staff' }), { status: 429 });
 });
+test('administrator member search uses bounded server pagination and escaped search without exposing Wallet credentials', async () => {
+  const queries = [];
+  const result = await buildSqlLoyaltyRepository().members({ shopId: 7, page: 2, pageSize: 25, search: '%_', connection: {
+    query: async (sql, params) => { queries.push({ sql, params }); return /COUNT\(\*\)/.test(sql) ? [[{ total: 50 }]]
+      : [[{ id: 'one', name: 'Client', balance: '50', reserved: '10', cardNumber: '0001234567890123', walletRegistered: 1 }]]; },
+  } });
+  assert.equal(result.total, 50); assert.equal(result.items[0].available, 40);
+  assert(queries.some(q => q.params.includes('%!%!_%')));
+  assert(queries.some(q => q.params.at(-2) === 25 && q.params.at(-1) === 25));
+  assert(queries.every(q => !/auth_token|push_token/.test(q.sql)));
+});

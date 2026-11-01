@@ -26,10 +26,10 @@ const buildLoyaltyController = ({ loyalty = require('../modules/m_loyalty').buil
   access = require('../helpers/middleware/loyaltyAccess').buildLoyaltyAccess(),
   tableContext = require('../helpers/middleware/loyaltyTableContext').buildLoyaltyTableContext(),
   checkout = require('../modules/m_checkout') } = {}) => {
-  const endpoint = (work, personal = false) => async (req, res) => {
+  const endpoint = (work, personal = false, allowedQueries = []) => async (req, res) => {
     res.set('Cache-Control', 'no-store');
     try {
-      if (Object.keys(req.query || {}).some(key => !personal || key !== 'shopId')) throw invalid();
+      if (Object.keys(req.query || {}).some(key => personal ? key !== 'shopId' : !allowedQueries.includes(key))) throw invalid();
       if (personal && req.query && req.query.shopId !== undefined && String(req.query.shopId) !== String(personalScope(req).shopId)) throw invalid();
       return custom(res, 200, 'OK', null, await work(req));
     } catch (error) {
@@ -44,7 +44,10 @@ const buildLoyaltyController = ({ loyalty = require('../modules/m_loyalty').buil
       const program = fields(req, ['enabled', 'name', 'pointsPerEuro', 'rounding', 'includeTips', 'excludedProductIds', 'rewards', 'logoUrl', 'backgroundColor', 'foregroundColor']);
       return loyalty.saveProgram({ ...scope, program });
     }),
-    listMembers: endpoint(req => loyalty.listMembers(staffScope(req, true))),
+    listMembers: endpoint(req => {
+      const query = req.query || {};
+      return loyalty.listMembers({ ...staffScope(req, true), page: query.page === undefined ? 1 : Number(query.page), pageSize: query.pageSize === undefined ? 25 : Number(query.pageSize), search: query.search === undefined ? '' : query.search });
+    }, false, ['page', 'pageSize', 'search']),
     getStaffMember: endpoint(req => loyalty.getMember({ ...staffScope(req, true), memberId: req.params.memberId })),
     lookup: endpoint(async req => {
       const scope = staffScope(req, false);
