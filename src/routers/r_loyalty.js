@@ -6,6 +6,7 @@ const buildLoyaltyRouter = ({ controller = require('../controllers/c_loyalty').b
   const { requireCustomerSession, requireCustomerCsrf } = customerMiddleware;
   router.get('/customer/loyalty', requireCustomerSession, controller.getPersonal);
   router.post('/customer/loyalty', requireCustomerSession, requireCustomerCsrf, controller.enroll);
+  router.patch('/customer/loyalty/preferences', requireCustomerSession, requireCustomerCsrf, controller.setPreferences);
   router.post('/customer/loyalty/wallet/:provider', requireCustomerSession, requireCustomerCsrf, controller.wallet);
   router.get('/loyalty/program', authentication, controller.getProgram);
   router.put('/loyalty/program', authentication, controller.saveProgram);

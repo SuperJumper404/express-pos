@@ -40,6 +40,8 @@ const buildSqlLoyaltyRepository = ({ pool = require('../config/dbPool') } = {}) 
   },
   insertMember: ({ id, shopid, customer_id, qr, connection }) => connection.query('INSERT INTO loyalty_members (id,shopid,customer_id,qr,created_at,updated_at) VALUES (?,?,?,?,UTC_TIMESTAMP(),UTC_TIMESTAMP())', [id, shopid, customer_id, qr]),
   setCardNumber: ({ shopId, memberId, cardNumber, connection }) => connection.query('UPDATE loyalty_members SET card_number=? WHERE shopid=? AND id=? AND card_number IS NULL', [cardNumber, shopId, memberId]),
+  setMarketingConsent: ({ shopId, memberId, marketingConsent, connection }) => connection.query(`UPDATE loyalty_members SET marketing_consent=?,marketing_consent_at=UTC_TIMESTAMP(3),
+    marketing_consent_version=marketing_consent_version+1 WHERE shopid=? AND id=?`, [marketingConsent, shopId, memberId]),
   async lookupMembers({ shopId, kind, value, connection }) {
     const [rows] = kind === 'phone' ? await connection.query(`SELECT DISTINCT m.id FROM loyalty_members m
       JOIN customers c ON c.shopid=m.shopid AND c.id=m.customer_id WHERE m.shopid=? AND (
@@ -140,7 +142,7 @@ const buildLoyalty = ({ repository = buildSqlLoyaltyRepository(), runInTransacti
   const view = async (member, connection, audience) => {
     const program = await programFor({ shopId: member.shopid, connection });
     const cardNumber = await service.ensureCardNumber({ connection, shopId: member.shopid, memberId: member.id });
-    return { id: member.id, cardNumber, ...(audience !== 'kiosk' && { qr: member.qr }), balance: member.balance, reserved: member.reserved, available: member.balance - member.reserved,
+    return { id: member.id, cardNumber, ...(audience !== 'kiosk' && { qr: member.qr, marketingConsent: !!Number(member.marketing_consent) }), balance: member.balance, reserved: member.reserved, available: member.balance - member.reserved,
       program, rewards: program.rewards.map(reward => ({ ...reward, available: program.enabled && reward.points <= member.balance - member.reserved
         && (!reward.expiresAt || Date.parse(reward.expiresAt) > clock().getTime()) })),
       ...(audience !== 'kiosk' && { history: await repository.history({ shopId: member.shopid, memberId: member.id, connection }) }) };
@@ -195,7 +197,8 @@ const buildLoyalty = ({ repository = buildSqlLoyaltyRepository(), runInTransacti
       const normalized = normalizeProgram(program);
       await repository.saveProgram({ shopId, program: normalized, connection }); return programFor({ shopId, connection });
     }),
-    enroll: ({ shopId, customerId }) => transaction({ shopId }, async connection => {
+    enroll: ({ shopId, customerId, marketingConsent = false }) => transaction({ shopId }, async connection => {
+      if (typeof marketingConsent !== 'boolean') throw invalid();
       if (!await repository.customer({ shopId, customerId, connection })) throw missing();
       const program = await programFor({ shopId, connection });
       if (!program.enabled) throw conflict('LOYALTY_DISABLED', 'Loyalty program disabled');
@@ -203,8 +206,20 @@ const buildLoyalty = ({ repository = buildSqlLoyaltyRepository(), runInTransacti
       if (!member) {
         member = { id: crypto.randomUUID(), shopid: shopId, customer_id: customerId, qr: crypto.randomBytes(32).toString('hex'), balance: 0, reserved: 0, revision: 1 };
         await repository.insertMember({ ...member, connection });
+        if (marketingConsent) {
+          await repository.setMarketingConsent({ shopId, memberId: member.id, marketingConsent, connection });
+          member.marketing_consent = 1;
+        }
         await repository.enqueue({ shopId, memberId: member.id, revision: member.revision, connection });
       }
+      return view(member, connection);
+    }),
+    setMarketingConsent: ({ shopId, customerId, marketingConsent }) => transaction({ shopId }, async connection => {
+      if (typeof marketingConsent !== 'boolean') throw invalid();
+      const member = await memberFor({ shopId, customerId, connection });
+      await repository.setMarketingConsent({ shopId, memberId: member.id, marketingConsent, connection });
+      member.marketing_consent = Number(marketingConsent);
+      await change(member, connection);
       return view(member, connection);
     }),
     getMember: scope => transaction(scope, async connection => {
