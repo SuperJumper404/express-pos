@@ -27,18 +27,19 @@ const entries = bytes => {
     const key = path.join(folder, 'key.pem'); const cert = path.join(folder, 'cert.pem');
     await run(openssl, ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-subj', '/CN=SmartEat Local Test'], { windowsHide: true });
     const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7xQAAAAASUVORK5CYII=', 'base64');
-    await Promise.all(['icon.png', 'icon@2x.png'].map(name => fs.writeFile(path.join(folder, name), png)));
+    await Promise.all(['icon.png', 'icon@2x.png', 'strip.png', 'strip@2x.png', 'strip@3x.png'].map(name => fs.writeFile(path.join(folder, name), png)));
     const config = { mode: 'development', offersBaseUrl: 'https://example.test', applePassTypeId: 'pass.test.smarteat', appleTeamId: 'TESTTEAM',
       appleCertificatePath: cert, appleKeyPath: key, appleWwdrPath: cert, appleAssetsPath: folder, appleWebServiceUrl: 'https://example.test/api/v1/wallet/apple', opensslPath: openssl };
     const pass = { serial: 'local-test-serial', auth_token: 'b'.repeat(64) };
     const service = buildLoyaltyWallet({ getConfig: () => config, repository: { ensurePass: async () => pass } });
-    const input = { provider: 'apple', shopId: 7, program: { name: 'Local Test', enabled: true, rewards: [] }, member: { id: 'm', qr: 'a'.repeat(64), balance: 120 } };
+    const input = { provider: 'apple', shopId: 7, program: { name: 'Local Test', enabled: true, rewards: [] }, member: { id: 'm', cardNumber: '0001234567890123', qr: 'a'.repeat(64), balance: 120 } };
     const first = await service.issueWallet(input); const second = await service.issueWallet({ ...input, member: { ...input.member, balance: 200 } });
     assert.equal(first.mode, 'development');
     const files = entries(Buffer.from(first.passBase64, 'base64'));
     const json = JSON.parse(files['pass.json']); const updated = JSON.parse(entries(Buffer.from(second.passBase64, 'base64'))['pass.json']);
     assert.equal(json.serialNumber, updated.serialNumber); assert.equal(json.authenticationToken, updated.authenticationToken);
     assert.equal(updated.storeCard.primaryFields[0].value, 200); assert.match(json.logoText, /TEST/);
+    assert(files['strip@3x.png']); assert.equal(json.barcodes[0].altText, '0001234567890123');
     assert.equal(json.barcodes[0].message, input.member.qr); assert.ok(!json.storeCard.backFields[0].value.includes('auth'));
     const manifest = JSON.parse(files['manifest.json']);
     for (const name of Object.keys(manifest)) assert.equal(require('crypto').createHash('sha1').update(files[name]).digest('hex'), manifest[name]);

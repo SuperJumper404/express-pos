@@ -4,6 +4,9 @@ const buildLoyaltyRouter = ({ controller = require('../controllers/c_loyalty').b
   authentication = require('../helpers/middleware/auth').authentication } = {}) => {
   const router = express.Router();
   const { requireCustomerSession, requireCustomerCsrf } = customerMiddleware;
+  const assets = require('../controllers/c_loyaltyAssets').buildLoyaltyAssetsController();
+  router.post('/loyalty/wallet/assets', authentication, assets.publish);
+  router.get('/loyalty/wallet/assets/:version/:name', authentication, assets.preview);
   router.get('/customer/loyalty', requireCustomerSession, controller.getPersonal);
   router.post('/customer/loyalty', requireCustomerSession, requireCustomerCsrf, controller.enroll);
   router.patch('/customer/loyalty/preferences', requireCustomerSession, requireCustomerCsrf, controller.setPreferences);

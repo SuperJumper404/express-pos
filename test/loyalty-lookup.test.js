@@ -71,6 +71,14 @@ test('SQL phone lookup joins verified identities and never searches free contact
   assert.doesNotMatch(queries[0].sql, /contact_phone\s*(?:=|LIKE)/i);
   assert(queries[0].params.includes(7)); assert(queries[0].params.includes('+33612345678'));
 });
+test('assigning a legacy card number publishes a new Wallet revision without changing points', async () => {
+  const queries = [];
+  await buildSqlLoyaltyRepository().setCardNumber({ shopId: 7, memberId: 'one', cardNumber: '0001234567890123', connection: {
+    query: async (sql, params) => { queries.push({ sql, params }); return [{ affectedRows: 1 }]; },
+  } });
+  assert(queries.some(q => /loyalty_wallet_jobs/.test(q.sql)), 'existing Wallet cards must receive their readable number');
+  assert.doesNotMatch(queries[0].sql, /balance\s*=/);
+});
 
 test('kiosk access is limited to active kiosks and lookup quotas reject the 31st kiosk request', async () => {
   let access = {};
