@@ -19,7 +19,7 @@ const buildSqlLoyaltyRepository = ({ pool = require('../config/dbPool') } = {}) 
     if (!row) throw missing();
   },
   async program({ shopId, connection }) {
-    const [[row]] = await connection.query('SELECT config,version FROM loyalty_programs WHERE shopid=?', [shopId]); return row;
+    const [[row]] = await connection.query('SELECT config,version,wallet_asset_version FROM loyalty_programs WHERE shopid=?', [shopId]); return row;
   },
   async saveProgram({ shopId, program, connection }) {
     await connection.query(`INSERT INTO loyalty_programs (shopid,config) VALUES (?,?) ON DUPLICATE KEY UPDATE
@@ -39,7 +39,11 @@ const buildSqlLoyaltyRepository = ({ pool = require('../config/dbPool') } = {}) 
     return row && { ...row, balance: Number(row.balance), reserved: Number(row.reserved), revision: Number(row.revision) };
   },
   insertMember: ({ id, shopid, customer_id, qr, connection }) => connection.query('INSERT INTO loyalty_members (id,shopid,customer_id,qr,created_at,updated_at) VALUES (?,?,?,?,UTC_TIMESTAMP(),UTC_TIMESTAMP())', [id, shopid, customer_id, qr]),
-  setCardNumber: ({ shopId, memberId, cardNumber, connection }) => connection.query('UPDATE loyalty_members SET card_number=? WHERE shopid=? AND id=? AND card_number IS NULL', [cardNumber, shopId, memberId]),
+  async setCardNumber({ shopId, memberId, cardNumber, connection }) {
+    const [result] = await connection.query('UPDATE loyalty_members SET card_number=?,revision=revision+1 WHERE shopid=? AND id=? AND card_number IS NULL', [cardNumber, shopId, memberId]);
+    if (result.affectedRows) await connection.query(`INSERT IGNORE INTO loyalty_wallet_jobs (shopid,member_id,revision,next_attempt_at,created_at)
+      SELECT shopid,id,revision,UTC_TIMESTAMP(),UTC_TIMESTAMP() FROM loyalty_members WHERE shopid=? AND id=?`, [shopId, memberId]);
+  },
   setMarketingConsent: ({ shopId, memberId, marketingConsent, connection }) => connection.query(`UPDATE loyalty_members SET marketing_consent=?,marketing_consent_at=UTC_TIMESTAMP(3),
     marketing_consent_version=marketing_consent_version+1 WHERE shopid=? AND id=?`, [marketingConsent, shopId, memberId]),
   async lookupMembers({ shopId, kind, value, connection }) {
@@ -127,7 +131,7 @@ const buildLoyalty = ({ repository = buildSqlLoyaltyRepository(), runInTransacti
   };
   const programFor = async scope => {
     const row = await repository.program(scope);
-    return { ...normalizeProgram(row ? parse(row.config) : {}), version: row ? row.version : 0 };
+    return { ...normalizeProgram(row ? parse(row.config) : {}), version: row ? row.version : 0, walletAssetVersion: row && row.wallet_asset_version || null };
   };
   const memberFor = async scope => {
     const row = await repository.member(scope); if (!row) throw missing(); return row;

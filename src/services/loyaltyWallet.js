@@ -42,7 +42,7 @@ const buildWalletPayload = ({ program, member, shopId, offersUrl }) => {
   const rewards = (program.rewards || []).filter(reward => (!reward.expiresAt || Date.parse(reward.expiresAt) > Date.now()) && Number.isFinite(reward.points)).sort((a, b) => a.points - b.points);
   const usable = rewards.find(reward => reward.points <= available);
   const next = rewards.find(reward => reward.points > available);
-  return { name: program.name || "SmartEat", active: program.enabled !== false, shopId, balance, available, qr: member.qr, offersUrl: safeUrl(offersUrl),
+  return { name: program.name || "SmartEat", active: program.enabled !== false, shopId, balance, available, qr: member.qr, cardNumber: member.cardNumber || member.card_number || null, walletAssetVersion: program.walletAssetVersion || null, offersUrl: safeUrl(offersUrl),
     offer: usable ? `${usable.name} — ${usable.points} points (conditions dans SmartEat)` : "Découvrez vos récompenses dans SmartEat",
     next: next ? `${next.name} à ${next.points} points` : "Tous les paliers atteints",
     logoUrl: program.logoUrl ? safeUrl(program.logoUrl) : null,
@@ -129,8 +129,8 @@ const buildSqlWalletRepository = ({ pool = require("../config/dbPool") } = {}) =
     const [[row]] = await pool.query("SELECT *,DATE_FORMAT(updated_at,'%Y-%m-%dT%H:%i:%sZ') AS updated_at FROM loyalty_wallet_passes WHERE serial=? AND provider='apple'", [serial]); return row;
   },
   async readMember({ shopid, member_id }) {
-    const [[row]] = await pool.query(`SELECT m.*,p.config FROM loyalty_members m JOIN loyalty_programs p ON p.shopid=m.shopid WHERE m.shopid=? AND m.id=?`, [shopid, member_id]);
-    if (!row) throw unavailable(); return { shopId: row.shopid, member: row, program: typeof row.config === "string" ? JSON.parse(row.config) : row.config };
+    const [[row]] = await pool.query(`SELECT m.*,p.config,p.wallet_asset_version FROM loyalty_members m JOIN loyalty_programs p ON p.shopid=m.shopid WHERE m.shopid=? AND m.id=?`, [shopid, member_id]);
+    if (!row) throw unavailable(); return { shopId: row.shopid, member: row, program: { ...(typeof row.config === "string" ? JSON.parse(row.config) : row.config), walletAssetVersion: row.wallet_asset_version } };
   },
   async register({ serial, deviceId, pushToken }) {
     const [[existing]] = await pool.query("SELECT serial FROM loyalty_wallet_registrations WHERE serial=? AND device_id=?", [serial, deviceId]);
@@ -206,12 +206,14 @@ const buildLoyaltyWallet = ({ getConfig = readConfig, repository, request = json
       organizationName: payload.name, description: `Fidélité ${payload.name}`, logoText: `${config.mode === "development" ? "TEST — " : ""}${payload.name}`, voided: !payload.active,
       backgroundColor: rgb(payload.backgroundColor), foregroundColor: rgb(payload.foregroundColor), labelColor: rgb(payload.foregroundColor),
       webServiceURL: config.appleWebServiceUrl.replace(/\/$/, ""), authenticationToken: pass.auth_token,
-      barcodes: [{ format: "PKBarcodeFormatQR", message: payload.qr, messageEncoding: "iso-8859-1" }],
+      barcodes: [{ format: "PKBarcodeFormatQR", message: payload.qr, messageEncoding: "iso-8859-1", ...(payload.cardNumber ? { altText: payload.cardNumber } : {}) }],
       storeCard: { primaryFields: [{ key: "points", label: "POINTS", value: payload.balance, changeMessage: "Votre solde est de %@ points." }],
-        secondaryFields: [{ key: "offer", label: "RÉCOMPENSE", value: payload.offer }], auxiliaryFields: [{ key: "next", label: "PROCHAIN PALIER", value: payload.next }],
+        secondaryFields: [{ key: "offer", label: "RÉCOMPENSE", value: payload.offer }], auxiliaryFields: [{ key: "next", label: "PROCHAIN PALIER", value: payload.next }, ...(payload.cardNumber ? [{ key: 'card', label: 'CARTE', value: payload.cardNumber }] : [])],
         backFields: [{ key: "offers", label: "Voir mes offres", value: payload.offersUrl }, { key: "conditions", label: "Conditions", value: "Consultez SmartEat pour les conditions et la confirmation d’utilisation des points." }] } };
     const files = { "pass.json": Buffer.from(JSON.stringify(json)) };
-    for (const name of ["icon.png", "icon@2x.png", "icon@3x.png", "logo.png", "logo@2x.png", "logo@3x.png"]) {
+    const artwork = payload.walletAssetVersion ? await require('./loyaltyWalletAssets').buildLoyaltyWalletAssets({ rootPath: config.appleAssetsPath }).readAssets({ shopId: payload.shopId, assetVersion: payload.walletAssetVersion }) : {};
+    for (const name of ["icon.png", "icon@2x.png", "icon@3x.png", "logo.png", "logo@2x.png", "logo@3x.png", "strip.png", "strip@2x.png", "strip@3x.png"]) {
+      if (artwork[name]) { files[name] = artwork[name]; continue; }
       try {
         // Per-shop resources take precedence over global icons. Never fetch arbitrary remote URLs on the signing server.
         try { files[name] = await fs.readFile(path.join(config.appleAssetsPath, String(payload.shopId), name)); }
