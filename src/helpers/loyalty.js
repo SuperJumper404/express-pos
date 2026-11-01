@@ -101,4 +101,15 @@ const allocateDiscount = (lines, discountCents) => {
       unit_price_ht: Number((ht / 100 / quantity).toFixed(2)), unit_vat: Number(((net - ht) / 100 / quantity).toFixed(2)) };
   });
 };
-module.exports = { normalizeProgram, earnedPoints, rewardDiscount, refundRestitution, allocateDiscount, integer, invalid };
+const evaluateLoyaltyReward = ({ program, member, rewardId, subtotalCents, lines, otherDiscountCents = 0, now = Date.now() }) => {
+  const fail = (code, message) => { throw new DomainError(409, code, message); };
+  const reward = program.rewards.find(row => row.id === rewardId);
+  if (!program.enabled || !reward || (reward.expiresAt && Date.parse(reward.expiresAt) <= Number(now))) fail('LOYALTY_REWARD_UNAVAILABLE', 'Reward unavailable');
+  if (!reward.stackable && otherDiscountCents > 0) fail('LOYALTY_NOT_STACKABLE', 'Reward cannot be combined with another discount');
+  if (member.balance - member.reserved < reward.points) fail('LOYALTY_INSUFFICIENT_POINTS', 'Insufficient available points');
+  if (subtotalCents < reward.minPaidCents) fail('LOYALTY_REWARD_CONDITIONS', 'Reward minimum not reached');
+  const discountCents = rewardDiscount({ reward, subtotalCents, lines });
+  if (!discountCents) fail('LOYALTY_REWARD_CONDITIONS', 'Reward does not apply to this basket');
+  return { reward, pointsCost: reward.points, discountCents };
+};
+module.exports = { normalizeProgram, earnedPoints, rewardDiscount, evaluateLoyaltyReward, refundRestitution, allocateDiscount, integer, invalid };

@@ -34,6 +34,7 @@ const pickCheckoutPayload = (body = {}) => {
   const allowed = [
     "customer", "customerID", "phone", "remark", "items", "expected_total",
     "discount_type", "discount_value", "is_takeaway", "client_order_token",
+    "loyalty_member_id", "loyalty_reward_id", "loyalty_confirmed", "loyalty_expected_discount_cents",
   ];
   return allowed.reduce((result, key) => {
     if (body[key] !== undefined) result[key] = body[key];
