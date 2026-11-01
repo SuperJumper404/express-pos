@@ -45,7 +45,7 @@ Pour revenir au Compose d'origine :
 /home/vscodeserver/.smarteat/apple-wallet/staging/compose-without-wallet.sh up -d --no-deps app
 ```
 
-Le workflow `.github/workflows/deploy-staging.yml` est adapté pour employer `compose-wallet.sh` lorsqu'il existe, avec repli sur le fonctionnement précédent ailleurs. **Cette adaptation doit être publiée sur la branche staging avant de relancer le workflow GitHub habituel**, sinon celui-ci remettrait l'image et l'environnement d'origine. La configuration Docker a été appliquée directement sur le serveur ; la publication du workflow est une opération séparée.
+Le workflow `.github/workflows/deploy-staging.yml` est adapté pour employer `compose-wallet.sh` lorsqu'il existe, avec repli sur le fonctionnement précédent ailleurs. L'adaptation est publiée sur la branche staging et son contenu a été relu via l'API GitHub : [commit final `efe81e1`](https://github.com/SuperJumper404/express-pos/commit/efe81e1dc9e58312333d3c831f99c57fc5ff0521). Les prochains déploiements Docker conserveront ainsi l'image, les paramètres et les montages Wallet. La publication a concerné uniquement ce workflow ; le code de la feature fidélité n'a pas été déployé. Aucun déploiement GitHub n'a été déclenché : le workflow utilise un déclenchement manuel.
 
 ## Vérifications effectuées
 
