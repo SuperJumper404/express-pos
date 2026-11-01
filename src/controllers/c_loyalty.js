@@ -22,7 +22,8 @@ const personalScope = req => {
   if (!session || !session.shopId || !session.customerId) throw new DomainError(401, 'CUSTOMER_SESSION_INVALID', 'Customer session required');
   return { shopId: session.shopId, customerId: session.customerId };
 };
-const buildLoyaltyController = ({ loyalty = require('../modules/m_loyalty').buildLoyalty(), wallet } = {}) => {
+const buildLoyaltyController = ({ loyalty = require('../modules/m_loyalty').buildLoyalty(), wallet,
+  access = require('../helpers/middleware/loyaltyAccess').buildLoyaltyAccess() } = {}) => {
   const endpoint = (work, personal = false) => async (req, res) => {
     res.set('Cache-Control', 'no-store');
     try {
@@ -43,7 +44,18 @@ const buildLoyaltyController = ({ loyalty = require('../modules/m_loyalty').buil
     }),
     listMembers: endpoint(req => loyalty.listMembers(staffScope(req, true))),
     getStaffMember: endpoint(req => loyalty.getMember({ ...staffScope(req, true), memberId: req.params.memberId })),
-    lookup: endpoint(req => loyalty.lookup({ ...staffScope(req, false), ...fields(req, ['qr']) })),
+    lookup: endpoint(async req => {
+      const scope = staffScope(req, false);
+      const input = fields(req, ['qr', 'kind', 'value', 'countryCode']);
+      await access.lookupQuota({ ...scope, actorKey: `staff:${req.id}`, audience: 'staff' });
+      return loyalty.lookup({ ...scope, ...input, audience: 'staff' });
+    }),
+    lookupKiosk: endpoint(async req => {
+      const scope = await access.kioskScope(req);
+      const { servicePointId, ...input } = fields(req, ['kind', 'value', 'countryCode', 'servicePointId']);
+      await access.lookupQuota({ shopId: scope.shopId, actorKey: `kiosk:${scope.servicePointId}`, audience: 'kiosk' });
+      return loyalty.lookup({ shopId: scope.shopId, ...input, audience: 'kiosk' });
+    }),
     adjust: endpoint(req => loyalty.adjust({ ...staffScope(req, true), memberId: req.params.memberId,
       ...fields(req, ['points', 'reason']), actorId: req.id })),
     attach: endpoint(req => loyalty.attach({ ...staffScope(req, false), orderId: req.params.orderId, ...fields(req, ['qr']) })),

@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { normalizeLoyaltyLookup, generateCardNumber } = require('../helpers/loyaltyIdentity');
 const DomainError = require('../helpers/domainError');
 const { normalizeProgram, earnedPoints, rewardDiscount, refundRestitution, allocateDiscount, integer, invalid } = require('../helpers/loyalty');
 const parse = value => typeof value === 'string' ? JSON.parse(value) : value;
@@ -38,6 +39,15 @@ const buildSqlLoyaltyRepository = ({ pool = require('../config/dbPool') } = {}) 
     return row && { ...row, balance: Number(row.balance), reserved: Number(row.reserved), revision: Number(row.revision) };
   },
   insertMember: ({ id, shopid, customer_id, qr, connection }) => connection.query('INSERT INTO loyalty_members (id,shopid,customer_id,qr,created_at,updated_at) VALUES (?,?,?,?,UTC_TIMESTAMP(),UTC_TIMESTAMP())', [id, shopid, customer_id, qr]),
+  setCardNumber: ({ shopId, memberId, cardNumber, connection }) => connection.query('UPDATE loyalty_members SET card_number=? WHERE shopid=? AND id=? AND card_number IS NULL', [cardNumber, shopId, memberId]),
+  async lookupMembers({ shopId, kind, value, connection }) {
+    const [rows] = kind === 'phone' ? await connection.query(`SELECT DISTINCT m.id FROM loyalty_members m
+      JOIN customers c ON c.shopid=m.shopid AND c.id=m.customer_id WHERE m.shopid=? AND (
+        EXISTS(SELECT 1 FROM customer_identities i WHERE i.shopid=c.shopid AND i.customer_id=c.id AND i.channel IN ('sms','whatsapp') AND i.destination=? AND i.verified_at IS NOT NULL)
+        OR EXISTS(SELECT 1 FROM customer_account_identities i WHERE i.account_id=c.global_customer_id AND i.channel='phone' AND i.destination=? AND i.verified_at IS NOT NULL)) LIMIT 2`, [shopId, value, value])
+      : await connection.query(`SELECT id FROM loyalty_members WHERE shopid=? AND ${kind === 'card' ? 'card_number' : 'qr'}=? LIMIT 2`, [shopId, value]);
+    return rows;
+  },
   saveMember: ({ id, shopid, balance, reserved, revision, connection }) => connection.query(
     'UPDATE loyalty_members SET balance=?,reserved=?,revision=?,updated_at=UTC_TIMESTAMP() WHERE shopid=? AND id=?', [balance, reserved, revision, shopid, id]),
   async history({ shopId, memberId, connection }) {
@@ -127,12 +137,13 @@ const buildLoyalty = ({ repository = buildSqlLoyaltyRepository(), runInTransacti
     await repository.saveMember({ ...member, connection });
     await repository.enqueue({ shopId: member.shopid, memberId: member.id, revision: member.revision, connection });
   };
-  const view = async (member, connection) => {
+  const view = async (member, connection, audience) => {
     const program = await programFor({ shopId: member.shopid, connection });
-    return { id: member.id, qr: member.qr, balance: member.balance, reserved: member.reserved, available: member.balance - member.reserved,
+    const cardNumber = await service.ensureCardNumber({ connection, shopId: member.shopid, memberId: member.id });
+    return { id: member.id, cardNumber, ...(audience !== 'kiosk' && { qr: member.qr }), balance: member.balance, reserved: member.reserved, available: member.balance - member.reserved,
       program, rewards: program.rewards.map(reward => ({ ...reward, available: program.enabled && reward.points <= member.balance - member.reserved
         && (!reward.expiresAt || Date.parse(reward.expiresAt) > clock().getTime()) })),
-      history: await repository.history({ shopId: member.shopid, memberId: member.id, connection }) };
+      ...(audience !== 'kiosk' && { history: await repository.history({ shopId: member.shopid, memberId: member.id, connection }) }) };
   };
   const orderFor = async scope => {
     orderValid(scope.orderId);
@@ -169,6 +180,16 @@ const buildLoyalty = ({ repository = buildSqlLoyaltyRepository(), runInTransacti
     return { released: true };
   };
   const service = {
+    async ensureCardNumber({ connection, shopId, memberId }) {
+      const member = await memberFor({ connection, shopId, memberId });
+      if (typeof member.card_number === 'string' && /^\d{16}$/.test(member.card_number)) return member.card_number;
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const cardNumber = generateCardNumber();
+        try { await repository.setCardNumber({ connection, shopId, memberId, cardNumber }); member.card_number = cardNumber; return cardNumber; }
+        catch (error) { if (error.code !== 'ER_DUP_ENTRY') throw error; }
+      }
+      throw new DomainError(503, 'LOYALTY_UNAVAILABLE', 'Unable to allocate card number');
+    },
     getProgram: scope => transaction(scope, connection => programFor({ ...scope, connection })),
     saveProgram: ({ shopId, program }) => transaction({ shopId }, async connection => {
       const normalized = normalizeProgram(program);
@@ -191,9 +212,13 @@ const buildLoyalty = ({ repository = buildSqlLoyaltyRepository(), runInTransacti
       return member ? view(member, connection) : scope.customerId ? { member: null, program: await programFor({ ...scope, connection }) } : Promise.reject(missing());
     }),
     listMembers: scope => transaction(scope, connection => repository.members({ ...scope, connection })),
-    lookup: ({ shopId, qr }) => transaction({ shopId }, async connection => {
-      if (typeof qr !== 'string' || !/^[a-f0-9]{64}$/.test(qr)) throw missing();
-      return view(await memberFor({ shopId, qr, connection }), connection);
+    lookup: ({ shopId, audience, ...input }) => transaction({ shopId }, async connection => {
+      const lookup = normalizeLoyaltyLookup(input);
+      if (lookup.kind === 'qr') return view(await memberFor({ shopId, qr: lookup.value, connection }), connection, audience);
+      const matches = await repository.lookupMembers({ shopId, ...lookup, connection });
+      if (!matches.length) throw missing();
+      if (matches.length > 1) throw conflict('LOYALTY_LOOKUP_AMBIGUOUS', 'Multiple memberships match this contact');
+      return view(await memberFor({ shopId, memberId: matches[0].id, connection }), connection, audience);
     }),
     adjust: ({ shopId, memberId, points, reason, actorId }) => transaction({ shopId }, async connection => {
       integer(points, -1000000000); if (!points || typeof reason !== 'string' || !reason.trim() || reason.length > 1000 || /[\x00-\x1f\x7f]/.test(reason)) throw invalid();

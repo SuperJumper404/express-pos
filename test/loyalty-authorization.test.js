@@ -2,7 +2,7 @@ const assert = require('assert');
 const { buildLoyaltyController } = require('../src/controllers/c_loyalty');
 const calls = [];
 const loyalty = new Proxy({}, { get: (_, method) => async input => { calls.push({ method, input }); return { ok: true }; } });
-const controller = buildLoyaltyController({ loyalty });
+const controller = buildLoyaltyController({ loyalty, access: { lookupQuota: async () => {} } });
 const response = () => ({ statusCode: null, payload: null, set() {}, status(value) { this.statusCode = value; return this; }, json(value) { this.payload = value; return this; } });
 const admin = { sessionSubject: 'staff', id: 1, shopid: 2, currentUser: { id: 1, shopid: 2, access: 0, status: 1 }, body: {}, query: {}, params: {} };
 (async () => {
