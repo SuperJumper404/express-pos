@@ -1,5 +1,6 @@
 const {
-  terminalCardReceiptDetails,
+  resolveTerminalCardTicket,
+  parseTerminalCardReceiptDetails,
   serializeTerminalCardReceiptDetails,
 } = require("../helpers/stripeTerminalCardTicket");
 
@@ -15,7 +16,7 @@ const retryTerminalTransaction = async (run, work) => {
   }
 };
 
-const buildStripeTerminalWebhookHandler = ({ terminalStore }) => async (event) => {
+const buildStripeTerminalWebhookHandler = ({ terminalStore, stripe }) => async (event) => {
   // Reader actions describe collection, not settlement. They never release or
   // finalize a payment; polling and the authoritative PI event reconcile it.
   if (event.type.startsWith("terminal.reader.")) return { handled: true };
@@ -41,11 +42,12 @@ const buildStripeTerminalWebhookHandler = ({ terminalStore }) => async (event) =
         throw new Error("Terminal payment mismatch");
       }
       const finalize = payment.payment_kind === "standalone" ? store.finalizeStandalonePaymentSucceeded : store.finalizePaymentSucceeded;
+      const cardTicket = await resolveTerminalCardTicket(payment, intent, stripe);
       const result = await finalize({
         shopId, paymentId, stripePaymentIntentId: intent.id,
         stripeChargeId: typeof intent.latest_charge === "string" ? intent.latest_charge : (intent.latest_charge || {}).id || null,
         cardReceiptDetails: serializeTerminalCardReceiptDetails(
-          terminalCardReceiptDetails(typeof intent.latest_charge === "object" ? intent.latest_charge : null),
+          parseTerminalCardReceiptDetails(cardTicket),
         ),
         timestamp: new Date(event.created * 1000),
       });

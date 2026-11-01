@@ -4,7 +4,10 @@ const { buildTerminalPaymentHistoryModule, TerminalPaymentHistoryError } = requi
 
 let defaultHistoryStore;
 const getDefaultHistoryStore = () => {
-  if (!defaultHistoryStore) defaultHistoryStore = buildTerminalPaymentHistoryModule({ connection: require("../config/dbPool") });
+  if (!defaultHistoryStore) defaultHistoryStore = buildTerminalPaymentHistoryModule({
+    connection: require("../config/dbPool"),
+    stripe: { get paymentIntents() { return require("../config/stripe").getStripe().paymentIntents; } },
+  });
   return defaultHistoryStore;
 };
 const canReadHistory = req => {
@@ -33,6 +36,7 @@ const buildTerminalPaymentHistoryController = ({ historyStore } = {}) => {
   };
   return {
     listEntries: handle("listEntries", queryParameters),
+    getCardTicket: handle("getCardTicket", req => ({ paymentId: req.params.id })),
     listAttachmentCandidates: handle("listAttachmentCandidates", req => ({ ...queryParameters(req), includeActive: (req.query || {}).includeActive })),
     getAttachments: handle("getAttachments", req => ({ paymentId: req.params.id })),
     addAttachments: handle("addAttachments", req => ({ paymentId: req.params.id, archiveIds: (req.body || {}).archiveIds, orderIds: (req.body || {}).orderIds })),

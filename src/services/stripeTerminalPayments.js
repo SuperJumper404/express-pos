@@ -7,7 +7,8 @@ const {
 } = require("../helpers/stripeTerminal");
 const {
   buildTerminalCardTicket,
-  terminalCardReceiptDetails,
+  resolveTerminalCardTicket,
+  parseTerminalCardReceiptDetails,
   serializeTerminalCardReceiptDetails,
 } = require("../helpers/stripeTerminalCardTicket");
 
@@ -133,12 +134,13 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
   const reconcile = async (session, intent, store) => {
     assertIntentMatches(session, intent);
     if (intent.status === "succeeded") {
+      const cardTicket = await resolveTerminalCardTicket(session, intent, stripe);
       const finalize = session.payment_kind === "standalone" ? store.finalizeStandalonePaymentSucceeded : store.finalizePaymentSucceeded;
       await finalize({
         shopId: session.shopid, paymentId: session.id, stripePaymentIntentId: intent.id,
         stripeChargeId: typeof intent.latest_charge === "string" ? intent.latest_charge : (intent.latest_charge || {}).id || null,
         cardReceiptDetails: serializeTerminalCardReceiptDetails(
-          terminalCardReceiptDetails(typeof intent.latest_charge === "object" ? intent.latest_charge : null),
+          parseTerminalCardReceiptDetails(cardTicket),
         ),
         timestamp: new Date(),
       });

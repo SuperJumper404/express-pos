@@ -1,5 +1,6 @@
 const { standalonePaymentDto } = require("../helpers/standaloneTerminalPayment");
 const { toCents } = require("../helpers/deliveryMoney");
+const { resolveTerminalCardTicket } = require("../helpers/stripeTerminalCardTicket");
 
 const ERRORS = {
   TERMINAL_INVALID_INPUT: [422, "Parametres de l'historique invalides."],
@@ -74,7 +75,7 @@ const archiveProjection = `SELECT a.*, CAST(a.delivery_id AS CHAR) AS delivery_i
   LEFT JOIN stripe_terminal_payments terminal_payment ON terminal_payment.id = a.stripe_terminal_payment_id
     AND terminal_payment.shopid = a.shopid`;
 
-const buildTerminalPaymentHistoryModule = ({ connection, withTransaction, deliveryStore } = {}) => {
+const buildTerminalPaymentHistoryModule = ({ connection, withTransaction, deliveryStore, stripe } = {}) => {
   if (!connection || typeof connection.query !== "function") throw new Error("A database connection is required");
   const query = (sql, values, db = connection) => queryWith(db, sql, values);
   const transaction = work => (withTransaction || require("../helpers/withTransaction").createTransactionRunner(connection))(work);
@@ -101,6 +102,16 @@ const buildTerminalPaymentHistoryModule = ({ connection, withTransaction, delive
     })) };
   };
   const getAttachments = async input => attachmentResponse(positiveId(input.shopId), positiveId(input.paymentId));
+  const getCardTicket = async input => {
+    const shopId = positiveId(input.shopId);
+    const paymentId = positiveId(input.paymentId);
+    const rows = await query(`SELECT p.* FROM stripe_terminal_payments p
+      WHERE p.shopid = ? AND p.id = ? AND p.status = 'succeeded' LIMIT 1`, [shopId, paymentId]);
+    const session = rows[0];
+    if (!session || Number(session.shopid) !== shopId || Number(session.id) !== paymentId
+      || session.status !== 'succeeded') fail("TERMINAL_PAYMENT_NOT_FOUND");
+    return resolveTerminalCardTicket(session, null, stripe);
+  };
   const addAttachments = async input => {
     const shopId = positiveId(input.shopId);
     const paymentId = positiveId(input.paymentId);
@@ -233,7 +244,7 @@ const buildTerminalPaymentHistoryModule = ({ connection, withTransaction, delive
       amountCents: archiveAmountCents(row.subtotal), createdAt: dateString(row.created),
       tableName: row.service_point_name || null, customer: row.customer || null })), total: Number(totalRows[0].total) };
   };
-  return { listEntries, listAttachmentCandidates, getAttachments, addAttachments, removeAttachment };
+  return { listEntries, listAttachmentCandidates, getAttachments, getCardTicket, addAttachments, removeAttachment };
 };
 
 module.exports = { buildTerminalPaymentHistoryModule, TerminalPaymentHistoryError };
