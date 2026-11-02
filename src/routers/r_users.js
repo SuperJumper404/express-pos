@@ -1,3 +1,4 @@
+const {supportProfile,supportLogout}=require('../helpers/platformSupport').buildSupportHandlers();
 const {
   registerWithStaffCredentials,
   loginWithStaffCredentials,
@@ -18,10 +19,10 @@ const express = require("express");
 const routers = express.Router();
 
 routers
-  .get("/user/me", authentication, profileMe)
+  .get("/user/me", authentication, supportProfile, profileMe)
   .post("/register", authentication, registerWithStaffCredentials)
   .post("/login", loginWithStaffCredentials)
-  .post("/logout", authentication, logout)
+  .post("/logout", authentication, supportLogout, logout)
   .get("/activate/:token/:email/:position/:access", activation)
   .get("/users", authentication, authAdmin, getAllUser)
   .get("/user/:id/staff-credentials", authentication, authAdmin, getStaffCredentials)
