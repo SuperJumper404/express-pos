@@ -33,7 +33,7 @@ const readConfig = () => ({
   googleOrigins: (process.env.GOOGLE_WALLET_ORIGINS || "").split(",").map(value => value.trim()).filter(Boolean),
 });
 
-const buildWalletPayload = ({ program, member, shopId, offersUrl }) => {
+const buildWalletPayload = ({ program, member, shopId, shopName, offersUrl }) => {
   if (!program || !member || !Number.isInteger(shopId) || shopId < 1 || !Number.isSafeInteger(Number(member.balance)) || typeof member.qr !== "string") throw unavailable();
   const balance = Number(member.balance);
   const reserved = Number(member.reserved || 0);
@@ -42,7 +42,8 @@ const buildWalletPayload = ({ program, member, shopId, offersUrl }) => {
   const rewards = (program.rewards || []).filter(reward => (!reward.expiresAt || Date.parse(reward.expiresAt) > Date.now()) && Number.isFinite(reward.points)).sort((a, b) => a.points - b.points);
   const usable = rewards.find(reward => reward.points <= available);
   const next = rewards.find(reward => reward.points > available);
-  return { name: program.name || "SmartEat", active: program.enabled !== false, shopId, balance, available, qr: member.qr, cardNumber: member.cardNumber || member.card_number || null, walletAssetVersion: program.walletAssetVersion || null,
+  return { name: program.name || "SmartEat", restaurantName: typeof shopName === 'string' && shopName.trim() ? shopName.trim() : program.name || 'SmartEat',
+    active: program.enabled !== false, shopId, balance, available, qr: member.qr, cardNumber: member.cardNumber || member.card_number || null, walletAssetVersion: program.walletAssetVersion || null,
     walletMessage: Number(member.marketingConsent || member.marketing_consent) === 1 ? member.walletMessage || member.wallet_message || '' : '', offersUrl: safeUrl(offersUrl),
     offer: usable ? `${usable.name} — ${usable.points} points (conditions dans SmartEat)` : "Découvrez vos récompenses dans SmartEat",
     next: next ? `${next.name} à ${next.points} points` : "Tous les paliers atteints",
@@ -130,8 +131,9 @@ const buildSqlWalletRepository = ({ pool = require("../config/dbPool") } = {}) =
     const [[row]] = await pool.query("SELECT *,DATE_FORMAT(updated_at,'%Y-%m-%dT%H:%i:%sZ') AS updated_at FROM loyalty_wallet_passes WHERE serial=? AND provider='apple'", [serial]); return row;
   },
   async readMember({ shopid, member_id }) {
-    const [[row]] = await pool.query(`SELECT m.*,p.config,p.wallet_asset_version FROM loyalty_members m JOIN loyalty_programs p ON p.shopid=m.shopid WHERE m.shopid=? AND m.id=?`, [shopid, member_id]);
-    if (!row) throw unavailable(); return { shopId: row.shopid, member: row, program: { ...(typeof row.config === "string" ? JSON.parse(row.config) : row.config), walletAssetVersion: row.wallet_asset_version } };
+    const [[row]] = await pool.query(`SELECT m.*,p.config,p.wallet_asset_version,s.shop_name FROM loyalty_members m
+      JOIN loyalty_programs p ON p.shopid=m.shopid JOIN shop s ON s.id=m.shopid WHERE m.shopid=? AND m.id=?`, [shopid, member_id]);
+    if (!row) throw unavailable(); return { shopId: row.shopid, shopName: row.shop_name, member: row, program: { ...(typeof row.config === "string" ? JSON.parse(row.config) : row.config), walletAssetVersion: row.wallet_asset_version } };
   },
   async register({ serial, deviceId, pushToken }) {
     const [[existing]] = await pool.query("SELECT serial FROM loyalty_wallet_registrations WHERE serial=? AND device_id=?", [serial, deviceId]);
@@ -204,7 +206,7 @@ const buildLoyaltyWallet = ({ getConfig = readConfig, repository, request = json
     safeUrl(config.appleWebServiceUrl);
     const rgb = hex => `rgb(${[1, 3, 5].map(index => parseInt(hex.slice(index, index + 2), 16)).join(", ")})`;
     const json = { formatVersion: 1, passTypeIdentifier: config.applePassTypeId, serialNumber: pass.serial, teamIdentifier: config.appleTeamId,
-      organizationName: payload.name, description: `Fidélité ${payload.name}`, logoText: `${config.mode === "development" ? "TEST — " : ""}${payload.name}`, voided: !payload.active,
+      organizationName: payload.restaurantName, description: `Fidélité ${payload.name}`, logoText: `${config.mode === "development" ? "TEST — " : ""}${payload.name}`, voided: !payload.active,
       backgroundColor: rgb(payload.backgroundColor), foregroundColor: rgb(payload.foregroundColor), labelColor: rgb(payload.foregroundColor),
       webServiceURL: config.appleWebServiceUrl.replace(/\/$/, ""), authenticationToken: pass.auth_token,
       barcodes: [{ format: "PKBarcodeFormatQR", message: payload.qr, messageEncoding: "iso-8859-1", ...(payload.cardNumber ? { altText: payload.cardNumber } : {}) }],
@@ -237,11 +239,11 @@ const buildLoyaltyWallet = ({ getConfig = readConfig, repository, request = json
     } catch (_) { throw unavailable("WALLET_SIGNING_FAILED"); }
     finally { await fs.rm(folder, { recursive: true, force: true }); }
   };
-  const issueWallet = async ({ provider, program, member, shopId }) => {
+  const issueWallet = async ({ provider, program, member, shopId, shopName }) => {
     if (!["apple", "google"].includes(provider)) throw new DomainError(400, "WALLET_PROVIDER_INVALID", "Fournisseur Wallet invalide.");
     const config = getConfig(); configured(config, provider);
     const pass = await repo().ensurePass({ provider, member, shopId });
-    const latest = typeof repo().readMember === 'function' ? await repo().readMember(pass) : { program, member, shopId };
+    const latest = typeof repo().readMember === 'function' ? await repo().readMember(pass) : { program, member, shopId, shopName };
     const payload = buildWalletPayload({ ...latest, offersUrl: offers(config, shopId) });
     if (provider === "apple") {
       const bytes = await applePass({ config, payload, pass });

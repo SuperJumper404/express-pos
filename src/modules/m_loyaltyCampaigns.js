@@ -44,12 +44,15 @@ const buildLoyaltyCampaigns = ({ repository = buildSqlCampaignRepository(), runI
   getConfig = require('../services/loyaltyWallet').readConfig, clock = () => new Date() } = {}) => {
   const transaction = (shopId, work) => { integer(shopId, 1, 2147483647); return runInTransaction(async connection => { await repository.lockShop({ shopId, connection }); return work(connection); }); };
   return {
-    createDraft({ shopId, actorId, requestId, message, target }) {
+    createDraft({ shopId, actorId, requestId, title = '', message, target }) {
       integer(actorId, 1, 2147483647);
-      if (!uuid(requestId) || typeof message !== 'string' || !message.trim() || message.trim().length > 200 || /[\x00-\x08\x0b-\x1f\x7f]/.test(message)
+      if (!uuid(requestId) || typeof title !== 'string' || title.trim().length > 80 || /[\x00-\x1f\x7f]/.test(title)
+        || typeof message !== 'string' || !message.trim() || message.trim().length > 200 || /[\x00-\x08\x0b-\x1f\x7f]/.test(message)
         || !target || !['all', 'member'].includes(target.type) || Object.keys(target).some(key => !['type', 'memberId'].includes(key))
         || (target.type === 'member' ? !uuid(target.memberId) : target.memberId !== undefined)) return Promise.reject(invalid());
-      message = message.trim(); const targetMemberId = target.type === 'member' ? target.memberId : null;
+      message = title.trim() ? `${title.trim()}\n${message.trim()}` : message.trim();
+      if (message.length > 200) return Promise.reject(invalid());
+      const targetMemberId = target.type === 'member' ? target.memberId : null;
       return transaction(shopId, async connection => {
         const existing = await repository.findRequest({ shopId, requestId, connection });
         if (existing) {

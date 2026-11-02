@@ -1,6 +1,6 @@
 const assert = require('assert/strict');
 const crypto = require('crypto');
-const { buildWalletPayload, buildLoyaltyWallet, createZip, signJwt, invalidPushToken } = require('../src/services/loyaltyWallet');
+const { buildWalletPayload, buildLoyaltyWallet, buildSqlWalletRepository, createZip, signJwt, invalidPushToken } = require('../src/services/loyaltyWallet');
 
 const input = { shopId: 7, member: { id: 'member-1', qr: 'a'.repeat(64), balance: 120 },
   program: { name: 'Restaurant', enabled: true, logoUrl: 'https://example.com/logo.png', backgroundColor: '#123456', foregroundColor: '#ffffff', rewards: [
@@ -9,6 +9,13 @@ const input = { shopId: 7, member: { id: 'member-1', qr: 'a'.repeat(64), balance
 
 (async () => {
   const payload = buildWalletPayload(input);
+  assert.equal(buildWalletPayload({ ...input, shopName: 'Le Bistrot', program: { ...input.program, name: 'Club fidélité' } }).restaurantName, 'Le Bistrot');
+  const scoped = buildSqlWalletRepository({ pool: { query: async (sql, values) => {
+    assert.match(sql, /JOIN shop/); assert.deepEqual(values.slice(1), ['member']);
+    return [[{ shopid: values[0], shop_name: values[0] === 7 ? 'Le Bistrot' : 'La Cantine', config: JSON.stringify(input.program), wallet_asset_version: null }]];
+  } } });
+  assert.equal((await scoped.readMember({ shopid: 7, member_id: 'member' })).shopName, 'Le Bistrot');
+  assert.equal((await scoped.readMember({ shopid: 8, member_id: 'member' })).shopName, 'La Cantine');
   assert.equal(payload.balance, 120);
   assert.equal(buildWalletPayload({ ...input, member: { ...input.member, marketing_consent: 1, wallet_message: 'Votre offre du jour' } }).walletMessage, 'Votre offre du jour');
   assert.equal(buildWalletPayload({ ...input, member: { ...input.member, marketing_consent: 0, wallet_message: 'Votre offre du jour' } }).walletMessage, '');

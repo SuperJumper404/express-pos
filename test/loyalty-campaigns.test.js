@@ -62,3 +62,35 @@ test('disabled Apple configuration and an empty eligible audience never announce
   assert.equal(preview.recipientCount, 0);
   await assert.rejects(empty.service.send({ shopId: 7, campaignId: preview.id, confirmed: true }), { code: 'LOYALTY_CAMPAIGN_EMPTY' });
 });
+
+test('a campaign freezes its title with the message and a changed title cannot reuse its request id', async () => {
+  const f = fixture(); const input = { shopId: 7, actorId: 2, requestId, title: 'Nouvelle offre', message: 'Un dessert offert.', target: { type: 'all' } };
+  const draft = await f.service.createDraft(input);
+  assert.equal(draft.message, 'Nouvelle offre\nUn dessert offert.');
+  assert.equal((await f.service.createDraft(input)).id, draft.id);
+  await assert.rejects(f.service.createDraft({ ...input, title: 'Autre offre' }), { code: 'LOYALTY_CAMPAIGN_CONFLICT' });
+  assert.equal(f.rows.length, 1); assert.equal(f.queued(), 0);
+});
+
+test('campaign titles are single-line and title plus body obeys the existing 200-character limit', async () => {
+  const input = { shopId: 7, actorId: 2, requestId, title: 'Offre', message: 'Du jour', target: { type: 'all' } };
+  for (const title of [null, 7, 'x'.repeat(81), 'A\nB', 'A\rB', 'A\tB', 'A\0B']) {
+    const f = fixture(); await assert.rejects(f.service.createDraft({ ...input, title }), { code: 'LOYALTY_INVALID' }); assert.equal(f.rows.length, 0);
+  }
+  const f = fixture();
+  await assert.rejects(f.service.createDraft({ ...input, title: 'x'.repeat(80), message: 'y'.repeat(120) }), { code: 'LOYALTY_INVALID' });
+  assert.equal(f.rows.length, 0);
+  assert.equal((await f.service.createDraft({ ...input, title: 'x'.repeat(80), message: 'y'.repeat(119) })).message.length, 200);
+  const legacy = fixture(); assert.equal((await legacy.service.createDraft({ ...input, title: undefined, message: 'z'.repeat(200) })).message.length, 200);
+});
+
+test('campaign controller accepts the title while retaining administrator and body field checks', async () => {
+  const { buildLoyaltyCampaignsController } = require('../src/controllers/c_loyaltyCampaigns'); const calls = [];
+  const controller = buildLoyaltyCampaignsController({ campaigns: { createDraft: input => { calls.push(input); return { message: input.title + '\n' + input.message }; } } });
+  const req = { sessionSubject: 'staff', id: 2, shopid: 7, currentUser: { id: 2, shopid: 7, status: 1, access: 0 }, query: {},
+    body: { requestId, title: 'Offre', message: 'Du jour', target: { type: 'all' } } };
+  const res = () => ({ set() {}, status(value) { this.statusCode = value; return this; }, json(value) { this.body = value; return this; } });
+  let response = res(); await controller.create(req, response); assert.equal(response.statusCode, 200); assert.equal(calls[0].title, 'Offre');
+  response = res(); await controller.create({ ...req, currentUser: { ...req.currentUser, access: 1 } }, response); assert.equal(response.statusCode, 403);
+  response = res(); await controller.create({ ...req, body: { ...req.body, shopId: 8 } }, response); assert.equal(response.statusCode, 422); assert.equal(calls.length, 1);
+});

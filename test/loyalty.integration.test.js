@@ -33,6 +33,9 @@ async function run() {
     await loyalty.saveProgram({ shopId: 8, program: { enabled: true, name: 'Fixture 8', pointsPerEuro: 10, rewards } });
     const alice = await loyalty.enroll({ shopId: 7, customerId: '51' });
     const elsewhere = await loyalty.enroll({ shopId: 8, customerId: '52' });
+    const walletRepository = require('../src/services/loyaltyWallet').buildSqlWalletRepository({ pool });
+    assert.equal((await walletRepository.readMember({ shopid: 7, member_id: alice.id })).shopName, 'Delivery fixture 7');
+    assert.equal((await walletRepository.readMember({ shopid: 8, member_id: elsewhere.id })).shopName, 'Delivery fixture 8');
     assert.notEqual(alice.id, elsewhere.id);
     assert.notEqual(alice.qr, elsewhere.qr);
     const readded = await loyalty.enroll({ shopId: 7, customerId: '51' });
@@ -138,7 +141,8 @@ async function run() {
     await pool.query("INSERT INTO loyalty_wallet_registrations (serial,device_id,push_token) VALUES (?,'fixture-device','fixture-push')", [serial]);
     const { buildLoyaltyCampaigns, buildSqlCampaignRepository } = require('../src/modules/m_loyaltyCampaigns');
     const campaigns = buildLoyaltyCampaigns({ repository: buildSqlCampaignRepository({ pool }), runInTransaction });
-    const draft = await campaigns.createDraft({ shopId: 7, actorId: 10, requestId: '00000000-0000-4000-8000-000000000098', message: 'Fixture only', target: { type: 'all' } });
+    const draft = await campaigns.createDraft({ shopId: 7, actorId: 10, requestId: '00000000-0000-4000-8000-000000000098', title: 'Fixture title', message: 'Fixture only', target: { type: 'all' } });
+    assert.equal(draft.message, 'Fixture title\nFixture only');
     assert.equal(draft.recipientCount, 1);
     await runInTransaction(connection => buildSqlCampaignRepository({ pool }).queue({ shopId: 7, campaignId: draft.id, now, connection }));
     await loyalty.setMarketingConsent({ shopId: 7, customerId: '51', marketingConsent: false });

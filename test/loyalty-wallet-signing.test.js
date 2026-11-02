@@ -38,6 +38,10 @@ const entries = bytes => {
     const files = entries(Buffer.from(first.passBase64, 'base64'));
     const json = JSON.parse(files['pass.json']); const updated = JSON.parse(entries(Buffer.from(second.passBase64, 'base64'))['pass.json']);
     assert.equal(json.serialNumber, updated.serialNumber); assert.equal(json.authenticationToken, updated.authenticationToken);
+    const named = JSON.parse(entries(Buffer.from((await service.issueWallet({ ...input, shopName: 'Le Bistrot', program: { ...input.program, name: 'Club gourmand' },
+      member: { ...input.member, marketingConsent: true, walletMessage: 'Nouvelle offre\nUn dessert offert.' } })).passBase64, 'base64'))['pass.json']);
+    assert.equal(named.organizationName, 'Le Bistrot'); assert.match(named.logoText, /Club gourmand/);
+    assert.equal(named.storeCard.backFields.find(field => field.key === 'message').value, 'Nouvelle offre\nUn dessert offert.');
     assert.equal(updated.storeCard.primaryFields[0].value, 200); assert.match(json.logoText, /TEST/);
     assert(files['strip@3x.png']); assert.equal(json.barcodes[0].altText, '0001234567890123');
     assert.equal(json.storeCard.backFields.find(field => field.key === 'message').value, '');
