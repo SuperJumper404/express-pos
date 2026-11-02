@@ -5,7 +5,8 @@ const { inflateSync } = require('zlib');
 const DomainError = require('../helpers/domainError');
 const { normalizeProgram } = require('../helpers/loyalty');
 const invalid = () => new DomainError(422, 'LOYALTY_IMAGE_INVALID', 'Use complete PNG artwork variants in the expected dimensions');
-const names = { logo: ['logo.png', 160, 50], logo2x: ['logo@2x.png', 320, 100], logo3x: ['logo@3x.png', 480, 150],
+const names = { icon: ['icon.png', 38, 38], icon2x: ['icon@2x.png', 76, 76], icon3x: ['icon@3x.png', 114, 114],
+  logo: ['logo.png', 160, 50], logo2x: ['logo@2x.png', 320, 100], logo3x: ['logo@3x.png', 480, 150],
   strip: ['strip.png', 375, 144], strip2x: ['strip@2x.png', 750, 288], strip3x: ['strip@3x.png', 1125, 432] };
 const versionValid = value => typeof value === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
 const crc32 = bytes => { let crc = 0xffffffff; for (const byte of bytes) { crc ^= byte; for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0); } return (crc ^ 0xffffffff) >>> 0; };
@@ -74,7 +75,7 @@ const buildLoyaltyWalletAssets = ({ rootPath = process.env.APPLE_WALLET_ASSETS_P
   };
   return { readAssets, async publish({ shopId, files }) {
     if (!files || !Object.keys(files).length || Object.keys(files).some(name => !names[name])) throw invalid();
-    for (const group of ['logo', 'strip']) {
+    for (const group of ['icon', 'logo', 'strip']) {
       const present = [group, `${group}2x`, `${group}3x`].filter(name => files[name]);
       if (present.length && present.length !== 3) throw invalid();
     }
@@ -88,7 +89,8 @@ const buildLoyaltyWalletAssets = ({ rootPath = process.env.APPLE_WALLET_ASSETS_P
     // Keep an unreferenced directory on an uncertain SQL commit: never remove potentially published images.
     await repository.publish({ shopId, assetVersion });
     const preview = name => `/baseurl/api/v1/loyalty/wallet/assets/${assetVersion}/${name}`;
-    return { assetVersion, logoPreviewUrl: combined['logo.png'] ? preview('logo.png') : null, stripPreviewUrl: combined['strip.png'] ? preview('strip.png') : null };
+    return { assetVersion, iconPreviewUrl: combined['icon.png'] ? preview('icon.png') : null,
+      logoPreviewUrl: combined['logo.png'] ? preview('logo.png') : null, stripPreviewUrl: combined['strip.png'] ? preview('strip.png') : null };
   } };
 };
 module.exports = { buildLoyaltyWalletAssets, validateWalletPng, buildSqlAssetsRepository };

@@ -2,8 +2,8 @@ const multer = require('multer');
 const { staffScope } = require('./c_loyalty');
 const { custom, failed } = require('../helpers/response');
 const { buildLoyaltyWalletAssets } = require('../services/loyaltyWalletAssets');
-const fields = ['logo', 'logo2x', 'logo3x', 'strip', 'strip2x', 'strip3x'];
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024, files: 6, fields: 0 } }).fields(fields.map(name => ({ name, maxCount: 1 })));
+const fields = ['icon', 'icon2x', 'icon3x', 'logo', 'logo2x', 'logo3x', 'strip', 'strip2x', 'strip3x'];
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024, files: fields.length, fields: 0 } }).fields(fields.map(name => ({ name, maxCount: 1 })));
 const buildLoyaltyAssetsController = ({ assets = buildLoyaltyWalletAssets() } = {}) => ({
   publish(req, res) {
     res.set('Cache-Control', 'no-store');
@@ -20,7 +20,7 @@ const buildLoyaltyAssetsController = ({ assets = buildLoyaltyWalletAssets() } = 
     res.set('Cache-Control', 'no-store');
     try {
       const scope = staffScope(req, true);
-      if (!/^(?:logo|strip)(?:@2x|@3x)?\.png$/.test(req.params.name)) return res.sendStatus(404);
+      if (!/^(?:icon|logo|strip)(?:@2x|@3x)?\.png$/.test(req.params.name)) return res.sendStatus(404);
       const files = await assets.readAssets({ ...scope, assetVersion: req.params.version });
       if (!files[req.params.name]) return res.sendStatus(404);
       return res.type('image/png').send(files[req.params.name]);

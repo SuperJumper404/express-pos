@@ -52,6 +52,27 @@ const entries = bytes => {
     await fs.writeFile(path.join(folder, 'signature'), files.signature); await fs.writeFile(path.join(folder, 'manifest.json'), files['manifest.json']);
     const verified = await run(openssl, ['smime', '-verify', '-inform', 'DER', '-in', path.join(folder, 'signature'), '-content', path.join(folder, 'manifest.json'), '-noverify'], { windowsHide: true, encoding: 'buffer' });
     assert.deepEqual(verified.stdout, files['manifest.json']);
+    const assetVersion = '00000000-0000-4000-8000-000000000007';
+    const artworkFolder = path.join(folder, '7', assetVersion); await fs.mkdir(artworkFolder, { recursive: true });
+    // A valid PNG with a different ancillary text chunk distinguishes published artwork from the fallback.
+    const text = Buffer.from('tEXtRestaurant\0notification icon');
+    let crc = 0xffffffff; for (const byte of text) { crc ^= byte; for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0); }
+    const chunk = Buffer.alloc(text.length + 8); chunk.writeUInt32BE(text.length - 4); text.copy(chunk, 4); chunk.writeUInt32BE((crc ^ 0xffffffff) >>> 0, chunk.length - 4);
+    const customIcon = Buffer.concat([png.subarray(0, -12), chunk, png.subarray(-12)]);
+    for (const name of ['icon.png', 'icon@2x.png', 'icon@3x.png']) await fs.writeFile(path.join(artworkFolder, name), customIcon);
+    const poolPath = require.resolve('../src/config/dbPool'); const previousPool = require.cache[poolPath];
+    require.cache[poolPath] = { id: poolPath, filename: poolPath, loaded: true, exports: { query: async (sql, params) => {
+      assert.match(sql, /SELECT version FROM loyalty_wallet_assets/); assert.deepEqual(params, [7, assetVersion]); return [[{ version: assetVersion }]];
+    } } };
+    try {
+      const customized = entries(Buffer.from((await service.issueWallet({ ...input, program: { ...input.program, walletAssetVersion: assetVersion } })).passBase64, 'base64'));
+      for (const name of ['icon.png', 'icon@2x.png', 'icon@3x.png']) assert.deepEqual(customized[name], customIcon, 'published restaurant icon takes precedence over default');
+      const customizedManifest = JSON.parse(customized['manifest.json']);
+      for (const name of Object.keys(customizedManifest)) assert.equal(require('crypto').createHash('sha1').update(customized[name]).digest('hex'), customizedManifest[name]);
+      await fs.writeFile(path.join(folder, 'signature'), customized.signature); await fs.writeFile(path.join(folder, 'manifest.json'), customized['manifest.json']);
+      const customVerified = await run(openssl, ['smime', '-verify', '-inform', 'DER', '-in', path.join(folder, 'signature'), '-content', path.join(folder, 'manifest.json'), '-noverify'], { windowsHide: true, encoding: 'buffer' });
+      assert.deepEqual(customVerified.stdout, customized['manifest.json']);
+    } finally { if (previousPool) require.cache[poolPath] = previousPool; else delete require.cache[poolPath]; }
     console.log('loyalty wallet signing: real local OpenSSL PKCS7 signature verified; manifest, stable serial/token and test label passed (not an Apple certificate acceptance test)');
   } finally { await fs.rm(folder, { recursive: true, force: true }); }
 })().catch(error => { console.error(error.message); process.exitCode = 1; });
