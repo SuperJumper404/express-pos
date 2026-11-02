@@ -12,6 +12,21 @@ const response = () => ({ headers: {}, set(k, v) { this.headers[k] = v; return t
 const sessions = () => buildLoyaltyPhoneSession({ secret: 's'.repeat(64), allowedOrigins: [origin] });
 const req = (extra = {}) => ({ query: { shopId: '7' }, body: {}, headers: { origin, 'x-table-session': 'table-7' }, secure: true, hostname: 'api-staging.smarteat.fr', ip: '127.0.0.1', ...extra });
 
+test('the legacy email customer endpoint cannot create a new membership after phone-only enrolment is enabled', async () => {
+  let enrolled = false;
+  const controller = require('../src/controllers/c_loyalty').buildLoyaltyController({ loyalty: { enroll: async () => { enrolled = true; return { id: memberId }; } }, tableContext: { read: async () => ({ servicePointId: 3 }) } });
+  const res = response(); await controller.enroll({ ...req(), customerSession: { shopId: 7, customerId: '10' } }, res);
+  assert.equal(res.statusCode, 422); assert.equal(res.body.error, 'LOYALTY_PHONE_REQUIRED'); assert.equal(enrolled, false);
+});
+
+test('an unsupported cookie connection is refused before creating a phone membership', async () => {
+  let enrolled = false;
+  const controller = controllers.buildLoyaltyPhoneController({ sessions: sessions(), allowedOrigins: [origin], tableContext: { read: async () => ({ servicePointId: 3 }) },
+    access: { lookupQuota: async () => {} }, loyalty: { enrollPhone: async () => { enrolled = true; return { member: { id: memberId }, customerId: '10' }; } } });
+  const res = response(); await controller.enroll(req({ secure: false, body: { phone: '0612345678' } }), res);
+  assert.equal(res.statusCode, 503); assert.equal(enrolled, false);
+});
+
 test('table phone routes open a card without customer login, protect Wallet and preserve existing consent', async () => {
   assert.equal(typeof controllers.buildLoyaltyPhoneController, 'function');
   const member = { id: memberId, balance: 50, marketingConsent: false, program: { enabled: true } }; const calls = [];

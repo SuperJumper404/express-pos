@@ -1,7 +1,7 @@
 const DomainError = require('../helpers/domainError');
 const { invalid } = require('../helpers/loyalty');
 const { custom, failed } = require('../helpers/response');
-const { buildLoyaltyPhoneSession, rawLoyaltyPhoneToken, setLoyaltyPhoneCookie } = require('../helpers/loyaltyPhoneSession');
+const { buildLoyaltyPhoneSession, rawLoyaltyPhoneToken, setLoyaltyPhoneCookie, cookiePolicy } = require('../helpers/loyaltyPhoneSession');
 const shopFor = req => {
   const query = req.query || {};
   if (Object.keys(query).some(key => key !== 'shopId') || typeof query.shopId !== 'string' || !/^[1-9]\d{0,9}$/.test(query.shopId) || Number(query.shopId) > 2147483647) throw invalid();
@@ -30,7 +30,11 @@ const buildLoyaltyPhoneController = ({ loyalty = require('../modules/m_loyalty')
   };
   const endpoint = work => async (req, res) => {
     res.set('Cache-Control', 'no-store');
-    try { return custom(res, 200, 'OK', null, await work(req, res, shopFor(req))); }
+    try {
+      const shopId = shopFor(req);
+      if (!cookiePolicy(req, shopId)) throw new DomainError(503, 'LOYALTY_UNAVAILABLE', 'Secure loyalty session unavailable');
+      return custom(res, 200, 'OK', null, await work(req, res, shopId));
+    }
     catch (error) { return error instanceof DomainError ? failed(res, error.message, error.code, error.status) : failed(res, 'Loyalty unavailable', 'LOYALTY_UNAVAILABLE', 503); }
   };
   return {
@@ -57,7 +61,7 @@ const buildLoyaltyPhoneController = ({ loyalty = require('../modules/m_loyalty')
       if (typeof marketingConsent !== 'boolean') throw invalid();
       await memberFor(shopId, session);
       const member = await loyalty.setMarketingConsent({ shopId, customerId: session.customerId, marketingConsent });
-      return { member, program: member.program, session: sessions.describe(session), canEnroll: false };
+      return { member, program: member.program, session: sessions.describe(session) };
     }),
     wallet: endpoint(async (req, res, shopId) => {
       const session = mutateSession(req, shopId); fields(req, []);

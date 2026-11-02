@@ -33,17 +33,17 @@ test('direct account and Wallet links cannot enroll but existing memberships rem
   assert.equal(res.statusCode, 200); assert.equal(res.body.data.balance, 50);
 });
 
-test('table enrollment forwards optional consent explicitly and preferences need no table context', async () => {
+test('legacy account enrollment requests a phone and existing preferences need no table context', async () => {
   const received = [];
   const controller = buildLoyaltyController({ loyalty: {
     enroll: async input => { received.push(input); return { id: 'member' }; },
     setMarketingConsent: async input => { received.push(input); return { id: 'member', marketingConsent: input.marketingConsent }; },
   }, tableContext: { read: async ({ token }) => token === 'table' ? { shopId: 7, servicePointId: 3 } : null } });
   const res = response(); await controller.enroll({ ...personal, headers: { 'x-table-session': 'table' } }, res);
-  assert.equal(res.statusCode, 200); assert.equal(received[0].marketingConsent, false);
+  assert.equal(res.statusCode, 422); assert.equal(res.body.error, 'LOYALTY_PHONE_REQUIRED'); assert.equal(received.length, 0);
   assert.equal(typeof controller.setPreferences, 'function');
   const pref = response(); await controller.setPreferences({ ...personal, body: { marketingConsent: false } }, pref);
-  assert.equal(pref.statusCode, 200); assert.equal(received[1].marketingConsent, false);
+  assert.equal(pref.statusCode, 200); assert.equal(received[0].marketingConsent, false);
   const invalid = response(); await controller.setPreferences({ ...personal, body: { marketingConsent: 'yes' } }, invalid);
   assert.equal(invalid.statusCode, 422);
 });

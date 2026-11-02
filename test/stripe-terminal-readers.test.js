@@ -592,7 +592,7 @@ test("concurrent registrations across service instances create one tracked reade
   assert.strictEqual(db.calls.filter((entry) => entry.sql.includes("GET_LOCK")).length, 2);
 });
 
-test("router binds all six reader endpoints with auth and preserves web/connect bindings", () => {
+test("router binds all six reader endpoints with auth and preserves web/connect bindings", async () => {
   const stripePath = require.resolve("../src/controllers/c_stripe");
   const editingPath = require.resolve("../src/controllers/c_orderEditing");
   const routerPath = require.resolve("../src/routers/r_stripe");
@@ -620,7 +620,13 @@ test("router binds all six reader endpoints with auth and preserves web/connect 
     const connect = routers.stack.find((layer) => layer.route.path === "/stripe/connect/status").route;
     assert.deepStrictEqual(connect.stack.map((layer) => layer.handle), [authentication, authAdmin, legacy.getConnectStatus]);
     const web = routers.stack.find((layer) => layer.route.path === "/stripe/payment-intents/qr-table").route;
-    assert.deepStrictEqual(web.stack.map((layer) => layer.handle), [authentication, customerMiddleware.attachOptionalCustomerSession, customerMiddleware.requireCustomerCsrfIfPresent, legacy.createQrTablePaymentIntent]);
+    assert.equal(web.stack.length, 4);
+    assert.equal(web.stack[0].handle, authentication);
+    assert.equal(web.stack[2].handle, customerMiddleware.requireCustomerCsrfIfPresent);
+    assert.equal(web.stack[3].handle, legacy.createQrTablePaymentIntent);
+    const anonymous = { body: {}, headers: {}, shopid: 7 }; let continued = false;
+    await web.stack[1].handle(anonymous, { set() {} }, () => { continued = true; });
+    assert.equal(continued, true); assert.equal(anonymous.customerSession, null);
     assert.strictEqual(webhookRouter.stack[0].route.stack[0].handle, legacy.handleWebhook);
   } finally {
     [stripePath, editingPath, routerPath].forEach((path, index) => {

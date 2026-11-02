@@ -84,7 +84,7 @@ const buildLoyaltyController = ({ loyalty = require('../modules/m_loyalty').buil
       if (!await tableContext.read({ shopId: scope.shopId, token: req.headers && req.headers['x-table-session'] })) {
         throw new DomainError(403, 'LOYALTY_TABLE_REQUIRED', 'Scan a table QR to join loyalty');
       }
-      return loyalty.enroll({ ...scope, marketingConsent });
+      throw new DomainError(422, 'LOYALTY_PHONE_REQUIRED', 'Use your phone number to join loyalty');
     }, true),
     setPreferences: endpoint(req => {
       const scope = personalScope(req);
