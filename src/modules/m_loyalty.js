@@ -38,7 +38,11 @@ const buildSqlLoyaltyRepository = ({ pool = require('../config/dbPool') } = {}) 
     const [[row]] = await connection.query(`SELECT *, CAST(customer_id AS CHAR) AS customer_id FROM loyalty_members WHERE shopid=? AND ${column}=? FOR UPDATE`, [shopId, memberId || customerId || qr]);
     return row && { ...row, balance: Number(row.balance), reserved: Number(row.reserved), revision: Number(row.revision) };
   },
-  insertMember: ({ id, shopid, customer_id, qr, connection }) => connection.query('INSERT INTO loyalty_members (id,shopid,customer_id,qr,created_at,updated_at) VALUES (?,?,?,?,UTC_TIMESTAMP(),UTC_TIMESTAMP())', [id, shopid, customer_id, qr]),
+  insertMember: ({ id, shopid, customer_id, qr, phone_e164 = null, connection }) => connection.query('INSERT INTO loyalty_members (id,shopid,customer_id,qr,phone_e164,created_at,updated_at) VALUES (?,?,?,?,?,UTC_TIMESTAMP(),UTC_TIMESTAMP())', [id, shopid, customer_id, qr, phone_e164]),
+  async createPhoneCustomer({ shopId, phone, connection }) {
+    await connection.query('INSERT INTO customers (shopid,contact_phone) VALUES (?,?)', [shopId, phone]);
+    const [[row]] = await connection.query('SELECT CAST(LAST_INSERT_ID() AS CHAR) AS id'); return row.id;
+  },
   async setCardNumber({ shopId, memberId, cardNumber, connection }) {
     const [result] = await connection.query('UPDATE loyalty_members SET card_number=?,revision=revision+1 WHERE shopid=? AND id=? AND card_number IS NULL', [cardNumber, shopId, memberId]);
     if (result.affectedRows) await connection.query(`INSERT IGNORE INTO loyalty_wallet_jobs (shopid,member_id,revision,next_attempt_at,created_at)
@@ -49,8 +53,8 @@ const buildSqlLoyaltyRepository = ({ pool = require('../config/dbPool') } = {}) 
   async lookupMembers({ shopId, kind, value, connection }) {
     const [rows] = kind === 'phone' ? await connection.query(`SELECT DISTINCT m.id FROM loyalty_members m
       JOIN customers c ON c.shopid=m.shopid AND c.id=m.customer_id WHERE m.shopid=? AND (
-        EXISTS(SELECT 1 FROM customer_identities i WHERE i.shopid=c.shopid AND i.customer_id=c.id AND i.channel IN ('sms','whatsapp') AND i.destination=? AND i.verified_at IS NOT NULL)
-        OR EXISTS(SELECT 1 FROM customer_account_identities i WHERE i.account_id=c.global_customer_id AND i.channel='phone' AND i.destination=? AND i.verified_at IS NOT NULL)) LIMIT 2`, [shopId, value, value])
+        m.phone_e164=? OR EXISTS(SELECT 1 FROM customer_identities i WHERE i.shopid=c.shopid AND i.customer_id=c.id AND i.channel IN ('sms','whatsapp') AND i.destination=? AND i.verified_at IS NOT NULL)
+        OR EXISTS(SELECT 1 FROM customer_account_identities i WHERE i.account_id=c.global_customer_id AND i.channel='phone' AND i.destination=? AND i.verified_at IS NOT NULL)) LIMIT 2`, [shopId, value, value, value])
       : await connection.query(`SELECT id FROM loyalty_members WHERE shopid=? AND ${kind === 'card' ? 'card_number' : 'qr'}=? LIMIT 2`, [shopId, value]);
     return rows;
   },
@@ -208,6 +212,25 @@ const buildLoyalty = ({ repository = buildSqlLoyaltyRepository(), runInTransacti
     saveProgram: ({ shopId, program }) => transaction({ shopId }, async connection => {
       const normalized = normalizeProgram(program);
       await repository.saveProgram({ shopId, program: normalized, connection }); return programFor({ shopId, connection });
+    }),
+    enrollPhone: ({ shopId, phone, countryCode = 'FR', marketingConsent = false }) => transaction({ shopId }, async connection => {
+      if (typeof marketingConsent !== 'boolean') throw invalid();
+      const { value } = normalizeLoyaltyLookup({ kind: 'phone', value: phone, countryCode });
+      const matches = await repository.lookupMembers({ shopId, kind: 'phone', value, connection });
+      if (matches.length > 1) throw conflict('LOYALTY_LOOKUP_AMBIGUOUS', 'Multiple memberships match this contact');
+      let member = matches.length ? await memberFor({ shopId, memberId: matches[0].id, connection }) : null;
+      if (!member) {
+        if (!(await programFor({ shopId, connection })).enabled) throw conflict('LOYALTY_DISABLED', 'Loyalty program disabled');
+        const customerId = await repository.createPhoneCustomer({ shopId, phone: value, connection });
+        member = { id: crypto.randomUUID(), shopid: shopId, customer_id: customerId, phone_e164: value,
+          qr: crypto.randomBytes(32).toString('hex'), balance: 0, reserved: 0, revision: 1 };
+        await repository.insertMember({ ...member, connection });
+        if (marketingConsent) {
+          await repository.setMarketingConsent({ shopId, memberId: member.id, marketingConsent, connection }); member.marketing_consent = 1;
+        }
+        await repository.enqueue({ shopId, memberId: member.id, revision: member.revision, connection });
+      }
+      return { member: await view(member, connection), customerId: String(member.customer_id) };
     }),
     enroll: ({ shopId, customerId, marketingConsent = false }) => transaction({ shopId }, async connection => {
       if (typeof marketingConsent !== 'boolean') throw invalid();

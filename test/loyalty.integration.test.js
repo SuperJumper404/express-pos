@@ -42,6 +42,17 @@ async function run() {
     await pool.query("INSERT INTO customer_account_identities (channel,destination,account_id,verified_at) VALUES ('phone','+33612345678',?,UTC_TIMESTAMP())", [globalId]);
     assert.equal((await loyalty.lookup({ shopId: 7, kind: 'phone', value: '0612345678', countryCode: 'FR' })).id, alice.id);
     assert.equal((await loyalty.lookup({ shopId: 8, kind: 'phone', value: '+33612345678' })).id, elsewhere.id);
+    const reopenedLegacy = await loyalty.enrollPhone({ shopId: 7, phone: '0612345678', marketingConsent: true });
+    assert.equal(reopenedLegacy.member.id, alice.id); assert.equal(reopenedLegacy.member.marketingConsent, false);
+    const [phoneFirst, phoneAgain] = await Promise.all(['06 23 45 67 89', '+33623456789'].map(phone => loyalty.enrollPhone({ shopId: 7, phone })));
+    assert.equal(phoneFirst.member.id, phoneAgain.member.id, 'concurrent normalized phone enrolment creates one member');
+    assert.equal((await loyalty.lookup({ shopId: 7, kind: 'phone', value: '0623456789', audience: 'kiosk' })).id, phoneFirst.member.id);
+    const otherPhone = await loyalty.enrollPhone({ shopId: 8, phone: '0623456789' });
+    assert.notEqual(otherPhone.member.id, phoneFirst.member.id);
+    const [[phoneOwner]] = await pool.query('SELECT contact_phone,contact_email,global_customer_id FROM customers WHERE shopid=7 AND id=?', [phoneFirst.customerId]);
+    assert.equal(phoneOwner.contact_phone, '+33623456789'); assert.equal(phoneOwner.contact_email, ''); assert.equal(phoneOwner.global_customer_id, null);
+    const [[phoneIdentities]] = await pool.query('SELECT COUNT(*) AS total FROM customer_identities WHERE shopid=7 AND customer_id=?', [phoneFirst.customerId]);
+    assert.equal(Number(phoneIdentities.total), 0, 'declared phone must not manufacture a verified identity');
     await pool.query('UPDATE loyalty_members SET card_number=NULL WHERE id=?', [alice.id]);
     const { backfillCardNumbers } = require('../scripts/backfill-loyalty-card-numbers');
     assert.equal((await backfillCardNumbers({ pool })).updated, 1);
