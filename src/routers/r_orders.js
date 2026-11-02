@@ -3,6 +3,8 @@ const orderEditing = require("../controllers/c_orderEditing");
 const cashClosures = require("../controllers/c_cashClosures");
 const { authentication, authorizeCashRegister } = require("../helpers/middleware/auth");
 const { attachOptionalCustomerSession, requireCustomerCsrfIfPresent } = require("../helpers/middleware/customerAuth");
+const { buildLoyaltyPhoneCheckout } = require('../helpers/middleware/loyaltyPhoneCheckout');
+const attachCheckoutCustomerSession = buildLoyaltyPhoneCheckout({ attachOptionalCustomerSession });
 const express = require("express");
 const routers = express.Router();
 
@@ -11,7 +13,7 @@ routers
   .get("/orders/:id/edit", authentication, orderEditing.getEditableOrder)
   .patch("/orders/:id/items", authentication, orderEditing.amendOrder)
   .get("/detailorder/:id", authentication, orders.detailOrder)
-  .post("/orders/checkout", authentication, attachOptionalCustomerSession, requireCustomerCsrfIfPresent, orders.checkout)
+  .post("/orders/checkout", authentication, attachCheckoutCustomerSession, requireCustomerCsrfIfPresent, orders.checkout)
   // Legacy split-write endpoints. New checkout clients must use /orders/checkout.
   .post("/orders", authentication, orders.addOrder)
   .post("/detailorder", authentication, orders.addDetailOrder)

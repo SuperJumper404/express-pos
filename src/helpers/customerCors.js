@@ -7,6 +7,7 @@ const hasCustomerCookie = req => {
   const parsed = cookies(req);
   return Object.prototype.hasOwnProperty.call(parsed, "__Host-smarteat_customer") || Object.prototype.hasOwnProperty.call(parsed, "smarteat_customer");
 };
+const hasLoyaltyCookie = req => Object.keys(cookies(req)).some(name => /^(?:__Host-)?smarteat_loyalty_[1-9]\d{0,9}$/.test(name));
 const relativePath = (req, prefix) => {
   // Use Express's parsed pathname, including absolute-form request targets.
   const path = req.path || "/";
@@ -18,7 +19,7 @@ const isCustomerCorsRequest = (req, prefix = require("../config/prefix")) => {
   const path = relativePath(req, prefix);
   return isPersonalPath(path) || ((/^\/(?:orders\/checkout|stripe\/payment-intents\/qr-table)\/?$/i.test(path) ||
     /^\/deliveries\/[1-9]\d{0,19}\/tracking-token\/?$/i.test(path)) &&
-    (hasCustomerCookie(req) || /(?:^|,)\s*x-csrf-token\s*(?:,|$)/i.test(req.headers["access-control-request-headers"] || "")));
+    (hasCustomerCookie(req) || hasLoyaltyCookie(req) || /(?:^|,)\s*x-csrf-token\s*(?:,|$)/i.test(req.headers["access-control-request-headers"] || "")));
 };
 const buildCustomerCors = ({ prefix = require("../config/prefix"), allowedOrigins } = {}) => (req, res, next) => {
   if (!isCustomerCorsRequest(req, prefix)) return next();

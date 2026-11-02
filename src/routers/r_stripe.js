@@ -4,6 +4,8 @@ const stripeTerminal = require("../controllers/c_stripeTerminal");
 const terminalHistory = require("../controllers/c_terminalPaymentHistory");
 const orderEditing = require("../controllers/c_orderEditing");
 const { attachOptionalCustomerSession, requireCustomerCsrfIfPresent } = require("../helpers/middleware/customerAuth");
+const { buildLoyaltyPhoneCheckout } = require('../helpers/middleware/loyaltyPhoneCheckout');
+const attachCheckoutCustomerSession = buildLoyaltyPhoneCheckout({ attachOptionalCustomerSession });
 const {
   authentication,
   authAdmin,
@@ -50,7 +52,7 @@ routers
   .post(
     "/stripe/payment-intents/qr-table",
     authentication,
-    attachOptionalCustomerSession,
+    attachCheckoutCustomerSession,
     requireCustomerCsrfIfPresent,
     stripe.createQrTablePaymentIntent,
   )

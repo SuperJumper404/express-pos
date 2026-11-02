@@ -5,10 +5,10 @@ const { buildLoyalty } = require('../src/modules/m_loyalty');
 const { normalizeProgram } = require('../src/helpers/loyalty');
 const memberId = '00000000-0000-4000-8000-000000000001';
 
-function fixture(value = 200) {
+function fixture(value = 200, { phoneCustomer = false } = {}) {
   let state = { member: { id: memberId, shopid: 7, customer_id: '10', qr: 'a'.repeat(64), card_number: '0001234567890123', balance: 50, reserved: 0, revision: 1 }, orders: [], details: [], loyaltyOrders: [], ledger: [] };
   let tail = Promise.resolve();
-  const connection = { query: async () => [[]] };
+  const connection = { query: async sql => [phoneCustomer && /SELECT CAST\(id AS CHAR\).*FROM customers/.test(sql) ? [{ id: '10' }] : []] };
   const transact = work => {
     const pending = tail.then(async () => { const before = structuredClone(state); try { return await work(connection); } catch (e) { state = before; throw e; } });
     tail = pending.catch(() => {}); return pending;

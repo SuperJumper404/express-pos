@@ -76,6 +76,8 @@ const canonicalPayload = (input) => {
       ? input.paymentMode.trim().toLowerCase()
       : input.paymentMode,
     ...(input.verifiedCustomer && { customer_account_id: input.verifiedCustomer.customerId }),
+    ...(input.verifiedCustomer && input.verifiedCustomer.loyaltyPhone && input.loyaltyRewardId && {
+      loyalty_expected_points_cost: input.loyaltyExpectedPointsCost, loyalty_program_version: input.loyaltyProgramVersion }),
     ...(input.loyaltyRewardId && { loyalty_reward_id: input.loyaltyRewardId, loyalty_confirmed: input.loyaltyConfirmed }),
     ...(input.loyaltyMemberId && { loyalty_member_id: input.loyaltyMemberId, loyalty_expected_discount_cents: input.loyaltyExpectedDiscountCents,
       loyalty_expected_points_cost: input.loyaltyExpectedPointsCost, loyalty_program_version: input.loyaltyProgramVersion }),
@@ -145,6 +147,10 @@ const invalidRequest = (field) => new DomainError(
 );
 
 const checkoutCustomerContext = req => {
+  const phone = req.loyaltyCustomerContext;
+  if (phone && phone.shopId === Number(req.shopid) && req.sessionSubject === 'service_point' && req.orderSource === 'table_qr') {
+    return { shopId: phone.shopId, customerId: phone.customerId, loyaltyPhone: true };
+  }
   const session = req.customerSession;
   return session && session.subject === "customer" && session.shopId === req.shopid
     ? { shopId: session.shopId, customerId: session.customerId } : undefined;
@@ -322,7 +328,7 @@ const validateCheckoutInput = (input = {}) => {
     || !/^[A-Za-z0-9_-]{1,64}$/.test(input.loyaltyRewardId) || input.loyaltyConfirmed !== true)) throw invalidRequest('loyalty_reward');
   if (input.loyaltyMemberId && input.loyaltyRewardId && (!Number.isSafeInteger(input.loyaltyExpectedDiscountCents)
     || input.loyaltyExpectedDiscountCents < 0 || input.loyaltyExpectedDiscountCents > 1000000000)) throw invalidRequest('loyalty_expected_discount_cents');
-  if (input.loyaltyMemberId && input.loyaltyRewardId && [input.loyaltyExpectedPointsCost, input.loyaltyProgramVersion]
+  if ((input.loyaltyMemberId || (verifiedCustomer && verifiedCustomer.loyaltyPhone)) && input.loyaltyRewardId && [input.loyaltyExpectedPointsCost, input.loyaltyProgramVersion]
     .some(value => !Number.isSafeInteger(value) || value < 1 || value > 2147483647)) {
     throw new DomainError(409, 'LOYALTY_REQUOTE_REQUIRED', 'Confirm updated loyalty reward');
   }
@@ -330,6 +336,7 @@ const validateCheckoutInput = (input = {}) => {
   if (verifiedCustomer && (verifiedCustomer.shopId !== Number(input.shopId)
     || typeof verifiedCustomer.customerId !== "string" || !/^[1-9]\d{0,19}$/.test(verifiedCustomer.customerId)
     || BigInt(verifiedCustomer.customerId) > 18446744073709551615n)) throw invalidRequest("customer_session");
+  if (verifiedCustomer && verifiedCustomer.loyaltyPhone && (!publicServicePointSession || input.orderSource !== 'table_qr' || delivery)) throw invalidRequest('loyalty_phone');
   if (input.fulfillmentType !== undefined && !["dine_in", "takeaway", "delivery"].includes(input.fulfillmentType)) throw invalidRequest("fulfillment_type");
   if (delivery) {
     for (const key of ["deliveryQuoteToken", "addressResolutionToken"]) {
@@ -366,7 +373,8 @@ const validateCheckoutInput = (input = {}) => {
     }),
     clientOrderToken: input.clientOrderToken.trim(),
     paymentMode: input.paymentMode.trim().toLowerCase(),
-    ...(verifiedCustomer && { verifiedCustomer: { shopId: verifiedCustomer.shopId, customerId: verifiedCustomer.customerId } }),
+    ...(verifiedCustomer && { verifiedCustomer: { shopId: verifiedCustomer.shopId, customerId: verifiedCustomer.customerId, ...(verifiedCustomer.loyaltyPhone && { loyaltyPhone: true }) } }),
+    ...(verifiedCustomer && verifiedCustomer.loyaltyPhone && input.loyaltyRewardId && { loyaltyExpectedPointsCost: input.loyaltyExpectedPointsCost, loyaltyProgramVersion: input.loyaltyProgramVersion }),
     ...(input.loyaltyRewardId && { loyaltyRewardId: input.loyaltyRewardId, loyaltyConfirmed: true }),
     ...(input.loyaltyMemberId && { loyaltyMemberId: input.loyaltyMemberId, loyaltyExpectedDiscountCents: input.loyaltyExpectedDiscountCents,
       loyaltyExpectedPointsCost: input.loyaltyExpectedPointsCost, loyaltyProgramVersion: input.loyaltyProgramVersion }),
@@ -1190,7 +1198,7 @@ const buildCheckoutModule = ({
         const applied = await loyalty.applyCheckoutReward({ connection, shopId: checkout.shopId, orderId,
           ...(checkout.loyaltyMemberId ? { memberId: checkout.loyaltyMemberId } : { customerId: checkout.verifiedCustomer.customerId }),
           rewardId: checkout.loyaltyRewardId, confirmed: checkout.loyaltyConfirmed,
-          ...(checkout.loyaltyMemberId && { expectedPointsCost: checkout.loyaltyExpectedPointsCost, expectedProgramVersion: checkout.loyaltyProgramVersion }) });
+          ...((checkout.loyaltyMemberId || (checkout.verifiedCustomer && checkout.verifiedCustomer.loyaltyPhone)) && { expectedPointsCost: checkout.loyaltyExpectedPointsCost, expectedProgramVersion: checkout.loyaltyProgramVersion }) });
         if (checkout.loyaltyMemberId && applied.discountCents !== checkout.loyaltyExpectedDiscountCents) {
           throw new DomainError(409, 'LOYALTY_REQUOTE_REQUIRED', 'Confirm updated loyalty reward');
         }
