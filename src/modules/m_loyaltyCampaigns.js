@@ -46,7 +46,7 @@ const buildLoyaltyCampaigns = ({ repository = buildSqlCampaignRepository(), runI
   return {
     createDraft({ shopId, actorId, requestId, title = '', message, target }) {
       integer(actorId, 1, 2147483647);
-      if (!uuid(requestId) || typeof title !== 'string' || title.trim().length > 80 || /[\x00-\x1f\x7f]/.test(title)
+      if (!uuid(requestId) || typeof title !== 'string' || title.trim().length > 80 || /[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(title)
         || typeof message !== 'string' || !message.trim() || message.trim().length > 200 || /[\x00-\x08\x0b-\x1f\x7f]/.test(message)
         || !target || !['all', 'member'].includes(target.type) || Object.keys(target).some(key => !['type', 'memberId'].includes(key))
         || (target.type === 'member' ? !uuid(target.memberId) : target.memberId !== undefined)) return Promise.reject(invalid());

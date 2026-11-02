@@ -74,7 +74,7 @@ test('a campaign freezes its title with the message and a changed title cannot r
 
 test('campaign titles are single-line and title plus body obeys the existing 200-character limit', async () => {
   const input = { shopId: 7, actorId: 2, requestId, title: 'Offre', message: 'Du jour', target: { type: 'all' } };
-  for (const title of [null, 7, 'x'.repeat(81), 'A\nB', 'A\rB', 'A\tB', 'A\0B']) {
+  for (const title of [null, 7, 'x'.repeat(81), 'A\nB', 'A\rB', 'A\tB', 'A\0B', 'A\u0085B', 'A\u009fB', 'A\u2028B', 'A\u2029B']) {
     const f = fixture(); await assert.rejects(f.service.createDraft({ ...input, title }), { code: 'LOYALTY_INVALID' }); assert.equal(f.rows.length, 0);
   }
   const f = fixture();
