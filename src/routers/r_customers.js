@@ -7,6 +7,12 @@ const buildCustomersRouter = ({ controller = require("../controllers/c_customers
   authentication = require("../helpers/middleware/auth").authentication } = {}) => {
   const router = express.Router();
   const { requireCustomerSession, requireCustomerCsrf } = customerMiddleware;
+  const directory = require('../controllers/c_clientDirectory').buildClientDirectoryController();
+  router.get('/clients', authentication, directory.list);
+  router.get('/clients/export', authentication, directory.exportCsv);
+  router.get('/clients/:id', authentication, directory.detail);
+  router.post('/clients/reconcile', authentication, directory.reconcile);
+  router.post('/clients/contacts/:contactKey/link', authentication, directory.linkContact);
   router.get("/customer-auth/channels", customerAuthController.channels);
   router.post("/customer-auth/challenges", customerAuthController.requestChallenge);
   router.post("/customer-auth/verify", customerAuthController.verify);
