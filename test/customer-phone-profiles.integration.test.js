@@ -41,7 +41,7 @@ test('MySQL phone resolution: concurrency, canonical aliases, tenants, no member
     for (const table of ['loyalty_members','loyalty_ledger','customer_identities','customer_account_identities','customer_accounts','customer_sessions']) assert.equal(after[table], baseline[table], `${table} unchanged by resolution`);
     assert.equal(after.customers, baseline.customers + 1); assert.equal(after.customer_directory_contacts, 1); assert.equal(after.customer_directory_events, 1);
     const [[stored]] = await pool.query('SELECT name,contact_phone,contact_email,global_customer_id FROM customers WHERE id=?', [profile.id]);
-    assert.deepEqual(stored, { name: 'Concurrent guest', contact_phone: '+33612345678', contact_email: '', global_customer_id: null });
+    assert.deepEqual({ ...stored }, { name: 'Concurrent guest', contact_phone: '+33612345678', contact_email: '', global_customer_id: null });
     const other = await service.resolve({ shopId: 8, phone: '0612345678' });
     assert.notEqual(other.customer.id, profile.id);
     assert.equal(await service.getSummary({ shopId: 8, customerId: profile.id }), null);
@@ -112,11 +112,11 @@ test('MySQL old checkout snapshots preserve concurrently committed imported-sour
     };
     const service = buildCustomerPhoneService({ repository: buildSqlCustomerPhoneRepository({ pool }), runInTransaction: transaction });
     const scenarios = [
-      { table: 'customer_addresses', column: 'customer_id', phone: '+33690123456' },
-      { table: 'orders', column: 'customer_account_id', phone: '+33691234567' },
-      { table: 'orders', column: 'customer_profile_id', phone: '+33692345678' },
-      { table: 'archives', column: 'customer_account_id', phone: '+33693456789' },
-      { table: 'archives', column: 'customer_profile_id', phone: '+33694567890' },
+      { table: 'customer_addresses', column: 'customer_id', phone: '+33610123456' },
+      { table: 'orders', column: 'customer_account_id', phone: '+33611234567' },
+      { table: 'orders', column: 'customer_profile_id', phone: '+33612345670' },
+      { table: 'archives', column: 'customer_account_id', phone: '+33613456789' },
+      { table: 'archives', column: 'customer_profile_id', phone: '+33614567890' },
     ];
     for (const [index, scenario] of scenarios.entries()) {
       const source = String(2001 + index * 2), target = String(2002 + index * 2), contactKey = hash(scenario.phone);
@@ -139,7 +139,7 @@ test('MySQL old checkout snapshots preserve concurrently committed imported-sour
         assert.equal(result.customer, null); assert.equal(result.created, false);
       });
       const [binding] = await readRows('SELECT CAST(customer_id AS CHAR) AS customer_id,match_kind FROM customer_directory_contacts WHERE shopid=7 AND contact_key=?', [contactKey]);
-      assert.deepEqual(binding, { customer_id: source, match_kind: 'import' });
+      assert.deepEqual({ ...binding }, { customer_id: source, match_kind: 'import' });
       assert.equal((await readRows('SELECT id FROM customer_directory_events WHERE shopid=7 AND contact_key=?', [contactKey])).length, 0);
     }
   });
