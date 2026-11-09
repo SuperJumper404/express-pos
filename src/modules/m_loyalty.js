@@ -14,6 +14,10 @@ const eventValid = value => {
 };
 
 const buildSqlLoyaltyRepository = ({ pool = require('../config/dbPool') } = {}) => ({
+  resolvePhoneProfile: scope => {
+    const phone = require('./m_customerPhone');
+    return phone.buildCustomerPhoneService({ repository: phone.buildSqlCustomerPhoneRepository({ pool }) }).resolve(scope);
+  },
   async lockShop({ shopId, connection }) {
     const [[row]] = await connection.query('SELECT id FROM shop WHERE id=? FOR UPDATE', [shopId]);
     if (!row) throw missing();
@@ -39,10 +43,6 @@ const buildSqlLoyaltyRepository = ({ pool = require('../config/dbPool') } = {}) 
     return row && { ...row, balance: Number(row.balance), reserved: Number(row.reserved), revision: Number(row.revision) };
   },
   insertMember: ({ id, shopid, customer_id, qr, phone_e164 = null, connection }) => connection.query('INSERT INTO loyalty_members (id,shopid,customer_id,qr,phone_e164,created_at,updated_at) VALUES (?,?,?,?,?,UTC_TIMESTAMP(),UTC_TIMESTAMP())', [id, shopid, customer_id, qr, phone_e164]),
-  async createPhoneCustomer({ shopId, phone, connection }) {
-    await connection.query('INSERT INTO customers (shopid,contact_phone) VALUES (?,?)', [shopId, phone]);
-    const [[row]] = await connection.query('SELECT CAST(LAST_INSERT_ID() AS CHAR) AS id'); return row.id;
-  },
   async setCardNumber({ shopId, memberId, cardNumber, connection }) {
     const [result] = await connection.query('UPDATE loyalty_members SET card_number=?,revision=revision+1 WHERE shopid=? AND id=? AND card_number IS NULL', [cardNumber, shopId, memberId]);
     if (result.affectedRows) await connection.query(`INSERT IGNORE INTO loyalty_wallet_jobs (shopid,member_id,revision,next_attempt_at,created_at)
@@ -91,7 +91,7 @@ const buildSqlLoyaltyRepository = ({ pool = require('../config/dbPool') } = {}) 
     [JSON.stringify(rule_snapshot), reward_snapshot ? JSON.stringify(reward_snapshot) : null, points_cost, discount_cents, paid_cents, refunded_cents, restored_points, status,
       reservation_expires_at ? sqlTime(reservation_expires_at) : null, shopid, order_id]),
   async sourceOrder({ shopId, orderId, connection }) {
-    const [[row]] = await connection.query('SELECT *,CAST(customer_account_id AS CHAR) AS customer_account_id FROM orders WHERE shopid=? AND id=? FOR UPDATE', [shopId, orderId]); return row;
+    const [[row]] = await connection.query('SELECT *,CAST(customer_account_id AS CHAR) AS customer_account_id,CAST(customer_profile_id AS CHAR) AS customer_profile_id FROM orders WHERE shopid=? AND id=? FOR UPDATE', [shopId, orderId]); return row;
   },
   async lines({ shopId, orderId, connection }) {
     const [rows] = await connection.query(`SELECT d.productid AS productId,d.qty AS quantity,d.price,d.total FROM orderdetail d
@@ -132,6 +132,7 @@ const buildSqlLoyaltyRepository = ({ pool = require('../config/dbPool') } = {}) 
 });
 
 const buildLoyalty = ({ repository = buildSqlLoyaltyRepository(), runInTransaction = require('../helpers/withTransaction').withTransaction,
+  customerPhone = typeof repository.resolvePhoneProfile === 'function' ? { resolve: scope => repository.resolvePhoneProfile(scope) } : null,
   clock = () => new Date() } = {}) => {
   const transaction = (scope, work) => {
     scopeValid(scope);
@@ -216,12 +217,17 @@ const buildLoyalty = ({ repository = buildSqlLoyaltyRepository(), runInTransacti
     enrollPhone: ({ shopId, phone, countryCode = 'FR', marketingConsent = false }) => transaction({ shopId }, async connection => {
       if (typeof marketingConsent !== 'boolean') throw invalid();
       const { value } = normalizeLoyaltyLookup({ kind: 'phone', value: phone, countryCode });
+      if (!customerPhone) throw new DomainError(503, 'LOYALTY_UNAVAILABLE', 'Phone profile resolver unavailable');
+      const profile = await customerPhone.resolve({ shopId, phone: value, countryCode, connection });
+      if (profile.status !== 'resolved' || !profile.customer) throw conflict('LOYALTY_LOOKUP_AMBIGUOUS', 'Multiple profiles match this contact');
       const matches = await repository.lookupMembers({ shopId, kind: 'phone', value, connection });
       if (matches.length > 1) throw conflict('LOYALTY_LOOKUP_AMBIGUOUS', 'Multiple memberships match this contact');
       let member = matches.length ? await memberFor({ shopId, memberId: matches[0].id, connection }) : null;
+      if (member && String(member.customer_id) !== String(profile.customer.id)) throw conflict('LOYALTY_LOOKUP_AMBIGUOUS', 'Membership does not match the contact profile');
+      if (!member) member = await repository.member({ shopId, customerId: profile.customer.id, connection });
       if (!member) {
         if (!(await programFor({ shopId, connection })).enabled) throw conflict('LOYALTY_DISABLED', 'Loyalty program disabled');
-        const customerId = await repository.createPhoneCustomer({ shopId, phone: value, connection });
+        const customerId = profile.customer.id;
         member = { id: crypto.randomUUID(), shopid: shopId, customer_id: customerId, phone_e164: value,
           qr: crypto.randomBytes(32).toString('hex'), balance: 0, reserved: 0, revision: 1 };
         await repository.insertMember({ ...member, connection });
@@ -296,6 +302,15 @@ const buildLoyalty = ({ repository = buildSqlLoyaltyRepository(), runInTransacti
       scopeValid({ shopId });
       const source = await repository.sourceOrder({ shopId, orderId: orderValid(orderId), connection });
       if (!source || String(source.customer_account_id) !== String(customerId)) throw missing();
+      const member = await repository.member({ shopId, customerId, connection });
+      if (!member || !(await programFor({ shopId, connection })).enabled) return null;
+      return attachTo({ shopId, orderId, member, connection });
+    },
+    async attachProfileOrder({ connection, shopId, orderId, customerId }) {
+      if (!connection) throw invalid(); scopeValid({ shopId });
+      const source = await repository.sourceOrder({ shopId, orderId: orderValid(orderId), connection });
+      if (!source || String(source.customer_profile_id) !== String(customerId)
+        || (source.customer_account_id && String(source.customer_account_id) !== String(customerId))) throw missing();
       const member = await repository.member({ shopId, customerId, connection });
       if (!member || !(await programFor({ shopId, connection })).enabled) return null;
       return attachTo({ shopId, orderId, member, connection });
@@ -405,6 +420,7 @@ const buildLoyalty = ({ repository = buildSqlLoyaltyRepository(), runInTransacti
       if (!order) {
         const source = await repository.sourceOrder({ shopId, orderId, connection });
         if (source && source.customer_account_id) await service.attachCustomerOrder({ connection, shopId, orderId, customerId: String(source.customer_account_id) });
+        else if (source && source.customer_profile_id) await service.attachProfileOrder({ connection, shopId, orderId, customerId: String(source.customer_profile_id) });
         order = await repository.order({ shopId, orderId, connection });
       }
       if (!order || order.status === 'paid') return { credited: false };

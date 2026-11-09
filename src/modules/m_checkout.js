@@ -656,6 +656,7 @@ const buildCheckoutModule = ({
   deliveryQuotes = buildDeliveryQuotes(),
   deliveryOrders = buildDeliveryOrders({ clock: now }),
   loyalty = repository === sqlRepository ? require('./m_loyalty').buildLoyalty() : null,
+  customerPhone = repository === sqlRepository ? require('./m_customerPhone').buildCustomerPhoneService() : null,
 } = {}) => {
   const runWithConnection = (connection, work) => (
     connection ? work(connection) : runInTransaction(work)
@@ -925,14 +926,12 @@ const buildCheckoutModule = ({
         return replayResult(existing);
       }
 
-      if (checkout.verifiedCustomer) {
-        // Follow personal address/session producers' Shop -> customer lock order.
+      if (checkout.verifiedCustomer && isDelivery) {
         await queryResult(connection, "SELECT id FROM shop WHERE id=? FOR SHARE", [checkout.shopId]);
         const [owner] = await queryResult(connection, "SELECT CAST(id AS CHAR) AS id FROM customers WHERE shopid=? AND id=? FOR SHARE",
           [checkout.shopId, checkout.verifiedCustomer.customerId]);
         if (!owner) throw invalidRequest("customer_session");
       }
-
       let deliveryPricing;
       let deliveryActor;
       if (isDelivery) {
@@ -1044,6 +1043,24 @@ const buildCheckoutModule = ({
         const kiosk = servicePoint.type === 'kiosk' && ((checkout.sessionSubject === 'service_point' && checkout.orderSource === 'borne') || staffKiosk);
         if (!cashier && !kiosk) throw new DomainError(403, 'LOYALTY_FORBIDDEN', 'Loyalty checkout access denied');
       }
+      const staffPermissions = actor && require('../helpers/staffPermissions').parseModulePermissions(actor.module_permissions, actor.access);
+      const profileCashier = checkout.sessionSubject === 'staff' && actor && Number(actor.status) === 1 && isOrderTakerAccess(actor.access)
+        && (Number(actor.access) === 0 || (staffPermissions || []).some(key => ['orders', 'cashregister'].includes(key)))
+        && servicePoint.type !== 'kiosk' && checkout.orderSource !== 'borne';
+      const profileTable = checkout.sessionSubject === 'service_point' && checkout.orderSource === 'table_qr' && servicePoint.type === 'table';
+      const phoneProfile = customerPhone && !isDelivery && (profileCashier || profileTable)
+        ? await customerPhone.resolveForCheckout({ shopId: checkout.shopId, phone: checkout.customer.phone,
+          name: checkout.customer.name, connection }) : null;
+      if (phoneProfile && checkout.verifiedCustomer && String(phoneProfile.customer.id) !== String(checkout.verifiedCustomer.customerId)) {
+        throw new DomainError(409, 'CUSTOMER_PHONE_CONTEXT_CHANGED', 'The phone no longer matches the customer context');
+      }
+      if (checkout.verifiedCustomer && !isDelivery) {
+        // Resolve first: its Shop -> customer lock order must precede identity locks.
+        await queryResult(connection, "SELECT id FROM shop WHERE id=? FOR SHARE", [checkout.shopId]);
+        const [owner] = await queryResult(connection, "SELECT CAST(id AS CHAR) AS id FROM customers WHERE shopid=? AND id=? FOR SHARE",
+          [checkout.shopId, checkout.verifiedCustomer.customerId]);
+        if (!owner) throw invalidRequest("customer_session");
+      }
       const orderResult = await repository.insertOrder({
         order: {
           shopid: checkout.shopId,
@@ -1072,6 +1089,7 @@ const buildCheckoutModule = ({
           client_order_token: checkout.clientOrderToken,
           client_order_payload_hash: payloadHash,
           ...(checkout.verifiedCustomer && { customer_account_id: checkout.verifiedCustomer.customerId }),
+          ...(phoneProfile && { customer_profile_id: phoneProfile.customer.id }),
         },
         connection,
       });
@@ -1189,6 +1207,8 @@ const buildCheckoutModule = ({
 
       if (loyalty && checkout.verifiedCustomer) await loyalty.attachCustomerOrder({ connection,
         shopId: checkout.shopId, orderId, customerId: checkout.verifiedCustomer.customerId });
+      else if (loyalty && phoneProfile) await loyalty.attachProfileOrder({ connection,
+        shopId: checkout.shopId, orderId, customerId: phoneProfile.customer.id });
       if (checkout.loyaltyMemberId) {
         if (!loyalty) throw new DomainError(503, 'LOYALTY_UNAVAILABLE', 'Loyalty unavailable');
         await loyalty.attachIdentifiedOrder({ connection, shopId: checkout.shopId, orderId, memberId: checkout.loyaltyMemberId });

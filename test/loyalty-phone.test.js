@@ -20,7 +20,14 @@ function fixture() {
     enqueue: async input => { jobs.push(input); }, history: async () => [],
   };
   const runInTransaction = work => { const pending = queue.then(() => work({})); queue = pending.catch(() => {}); return pending; };
-  return { members, customers, jobs, program, repository, service: buildLoyalty({ repository, runInTransaction }) };
+  const resolutions = [];
+  const customerPhone = { resolve: async ({ shopId, phone, connection }) => {
+    resolutions.push({ shopId, phone, connection });
+    let customer = customers.find(row => row.shopId === shopId && row.phone === phone);
+    if (!customer) { customer = { id: String(customers.length + 1), shopId, phone }; customers.push(customer); }
+    return { status: 'resolved', customer, phone };
+  } };
+  return { members, customers, jobs, program, repository, customerPhone, resolutions, service: buildLoyalty({ repository, customerPhone, runInTransaction }) };
 }
 
 test('phone-only enrolment creates one card for normalized concurrent numbers and is searchable at POS', async () => {
@@ -60,4 +67,29 @@ test('loyalty session is scoped, expires, rejects forgery and cannot authenticat
   const general = require('../src/helpers/customerSession').buildCustomerSession({ repository: { read: () => { throw new Error('must not read a general account'); } } });
   assert.equal(await general.read({ rawToken: issued.rawToken, shopId: 7 }), null);
   now = new Date('2026-12-03T00:00:00Z'); assert.equal(sessions.read({ rawToken: issued.rawToken, shopId: 7 }), null);
+});
+
+test('explicit phone enrollment reuses an existing unverified profile before creating its card', async () => {
+  const f = fixture();
+  f.customers.push({ id: '9007199254740993', shopId: 7, phone: '+33612345678' });
+  f.repository.createPhoneCustomer = async () => { throw new Error('must use canonical profile resolver'); };
+  const result = await f.service.enrollPhone({ shopId: 7, phone: '0612345678' });
+  assert.equal(result.customerId, '9007199254740993'); assert.equal(f.customers.length, 1);
+  assert.equal(f.members[0].customer_id, result.customerId); assert.equal(f.resolutions.length, 1);
+  assert.ok(f.resolutions[0].connection); assert.equal(f.members[0].marketing_consent, undefined);
+});
+
+test('phone enrollment reuses an existing profile card even when legacy member phone lookup misses it', async () => {
+  const f = fixture();
+  f.customers.push({ id: '42', shopId: 7, phone: '+33612345678' });
+  f.members.push({ id: 'existing', shopid: 7, customer_id: '42', card_number: '0001234567890123', balance: 85, reserved: 5, revision: 1 });
+  const result = await f.service.enrollPhone({ shopId: 7, phone: '0612345678', marketingConsent: true });
+  assert.equal(result.member.id, 'existing'); assert.equal(result.member.balance, 85); assert.equal(f.members.length, 1);
+  assert.equal(f.members[0].marketing_consent, undefined); assert.equal(f.jobs.length, 0);
+});
+
+test('ambiguous canonical profile enrollment creates no membership', async () => {
+  const f = fixture(); f.customerPhone.resolve = async () => ({ status: 'ambiguous', customer: null });
+  await assert.rejects(f.service.enrollPhone({ shopId: 7, phone: '0612345678' }), { code: 'LOYALTY_LOOKUP_AMBIGUOUS' });
+  assert.equal(f.members.length, 0); assert.equal(f.customers.length, 0);
 });

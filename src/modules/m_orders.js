@@ -45,7 +45,8 @@ const archiveSqlRepository = {
     return queryResult(
       connection,
       `SELECT orders.*, CAST(delivery_id AS CHAR) AS delivery_id,
-              CAST(customer_account_id AS CHAR) AS customer_account_id FROM orders
+              CAST(customer_account_id AS CHAR) AS customer_account_id,
+              CAST(customer_profile_id AS CHAR) AS customer_profile_id FROM orders
        WHERE id = ?${shopClause}
        LIMIT 1 FOR UPDATE`,
       params,
@@ -115,6 +116,7 @@ const archiveSqlRepository = {
             orderdetail.total_vat AS total_vat,
             CAST(orders.delivery_id AS CHAR) AS delivery_id,
             CAST(orders.customer_account_id AS CHAR) AS customer_account_id,
+            CAST(orders.customer_profile_id AS CHAR) AS customer_profile_id,
             (SELECT p.reader_label FROM stripe_terminal_payments p
              WHERE p.id = orders.stripe_terminal_payment_id AND p.shopid = orders.shopid
                AND p.status = 'succeeded') AS terminal_reader_label
@@ -153,6 +155,7 @@ const archiveSqlRepository = {
             archivesdetail.total_vat AS total_vat,
             CAST(archives.delivery_id AS CHAR) AS delivery_id,
             CAST(archives.customer_account_id AS CHAR) AS customer_account_id,
+            CAST(archives.customer_profile_id AS CHAR) AS customer_profile_id,
             (SELECT p.reader_label FROM stripe_terminal_payments p
              WHERE p.id = archives.stripe_terminal_payment_id AND p.shopid = archives.shopid
                AND p.status = 'succeeded') AS terminal_reader_label
@@ -229,6 +232,7 @@ const ARCHIVE_ORDER_FIELDS = [
   "is_takeaway",
   "delivery_id",
   "customer_account_id",
+  "customer_profile_id",
   "fulfillment_type",
 ];
 
@@ -616,7 +620,12 @@ const buildOrderArchiveModule = ({
 
   const mDetailArchivedOrderByToken = async (token) => {
     const rows = await repository.findArchivedOrderDetailsByToken({ token });
-    return hydrateArchivedDetails(rows);
+    const details = await hydrateArchivedDetails(rows);
+    return details.map(row => {
+      const result = { ...row };
+      delete result.customer_profile_id;
+      return result;
+    });
   };
 
   return {
