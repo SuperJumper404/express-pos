@@ -57,20 +57,14 @@ jobs:
                 fi
               done
               df -h /home/smarteatprod/smarteat
+              for source_file in /home/smarteatprod/smarteat/backend/src/routers/r_users.js /home/smarteatprod/smarteat/backend/src/helpers/platformSupport.js /home/smarteatprod/smarteat/frontend/static/backoffice-access.html; do
+                if [ -f "$source_file" ]; then sha256sum "$source_file"; fi
+              done
               for wallet in /home/smarteatprod/.smarteat/apple-wallet/production/compose-wallet.sh /home/smarteatprod/.smarteat/apple-wallet/prod/compose-wallet.sh; do
                 if [ -x "$wallet" ]; then echo "Wallet Compose wrapper: $wallet"; fi
               done
               if docker ps --format '{{.Names}}' | grep -qx express_pos_app_production; then
-                docker exec -i express_pos_app_production node <<'NODE'
-            const mysql = require('mysql2/promise');
-            (async () => {
-              const c = await mysql.createConnection(process.env.DATABASE_URL);
-              const [versions] = await c.query('SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 4');
-              const [tables] = await c.query("SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name IN ('customers','loyalty_members','customer_directory_contacts')");
-              console.log(JSON.stringify({ schemaVersions: versions.map(r => r.version), featureTables: tables.map(r => r.table_name || r.TABLE_NAME) }));
-              await c.end();
-            })().catch(e => { console.error('Production database preflight:', e.code || 'unavailable'); process.exitCode = 1; });
-            NODE
+                docker exec express_pos_app_production node -e 'const mysql=require("mysql2/promise");(async()=>{const c=await mysql.createConnection(process.env.DATABASE_URL);const [v]=await c.query("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 4");const [t]=await c.query("SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name IN (?,?,?)",["customers","loyalty_members","customer_directory_contacts"]);console.log(JSON.stringify({schemaVersions:v.map(r=>r.version),featureTables:t.map(r=>r.table_name||r.TABLE_NAME)}));await c.end()})().catch(e=>{console.error("Production database preflight:",e.code||"unavailable");process.exitCode=1})'
                 docker inspect express_pos_app_production --format '{{range .Mounts}}{{.Type}} {{.Source}} -> {{.Destination}}{{println}}{{end}}'
               else
                 echo 'Production app container not present under the expected name.'
