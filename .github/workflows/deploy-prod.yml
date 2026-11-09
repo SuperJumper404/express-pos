@@ -14,6 +14,14 @@ on:
         options:
           - compose
           - pm2
+      operation:
+        description: "Vérification seule ou déploiement"
+        required: false
+        default: deploy
+        type: choice
+        options:
+          - deploy
+          - preflight
 
 jobs:
   deploy-compose:
@@ -37,6 +45,39 @@ jobs:
             REPO_URL=https://github.com/SuperJumper404/express-pos.git
             COMPOSE_FILE=compose.yml
 
+            OPERATION='${{ inputs.operation || 'deploy' }}'
+            if [ "$OPERATION" = preflight ]; then
+              echo 'Production Docker inventory'
+              docker ps --format '{{.Names}} | {{.Image}} | {{.Status}} | {{.Ports}}'
+              for project in backend frontend; do
+                project_dir=/home/smarteatprod/smarteat/$project
+                if [ -d "$project_dir/.git" ]; then
+                  echo "$project commit: $(git -C "$project_dir" rev-parse HEAD)"
+                  git -C "$project_dir" status --short
+                fi
+              done
+              df -h /home/smarteatprod/smarteat
+              for wallet in /home/smarteatprod/.smarteat/apple-wallet/production/compose-wallet.sh /home/smarteatprod/.smarteat/apple-wallet/prod/compose-wallet.sh; do
+                if [ -x "$wallet" ]; then echo "Wallet Compose wrapper: $wallet"; fi
+              done
+              if docker ps --format '{{.Names}}' | grep -qx express_pos_app_production; then
+                docker exec -i express_pos_app_production node <<'NODE'
+            const mysql = require('mysql2/promise');
+            (async () => {
+              const c = await mysql.createConnection(process.env.DATABASE_URL);
+              const [versions] = await c.query('SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 4');
+              const [tables] = await c.query("SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name IN ('customers','loyalty_members','customer_directory_contacts')");
+              console.log(JSON.stringify({ schemaVersions: versions.map(r => r.version), featureTables: tables.map(r => r.table_name || r.TABLE_NAME) }));
+              await c.end();
+            })().catch(e => { console.error('Production database preflight:', e.code || 'unavailable'); process.exitCode = 1; });
+            NODE
+                docker inspect express_pos_app_production --format '{{range .Mounts}}{{.Type}} {{.Source}} -> {{.Destination}}{{println}}{{end}}'
+              else
+                echo 'Production app container not present under the expected name.'
+              fi
+              exit 0
+            fi
+
             rm -rf "$APP_DIR"
             git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
 
@@ -58,7 +99,7 @@ jobs:
             docker compose --env-file .env.production -f "$COMPOSE_FILE" ps
 
   deploy-pm2:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'pm2' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'pm2' && inputs.operation != 'preflight' }}
     runs-on: smarteat-runner-backend
 
     steps:
