@@ -1,0 +1,38 @@
+name: Customer Phone Validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/clients-docker-staging-20261106
+
+permissions:
+  contents: read
+
+jobs:
+  mysql-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      mysql:
+        image: mysql:8.0.33
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+          MYSQL_ROOT_HOST: '%'
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot --silent"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    env:
+      DELIVERY_TEST_DATABASE_URL: mysql://root:@127.0.0.1:3306/disposable_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci --include=dev
+      - run: npm run test:phone-clients
+      - run: node test/customer-phone-profiles.integration.test.js
+      - run: node test/customer-phone-checkout.integration.test.js
