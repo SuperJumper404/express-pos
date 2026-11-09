@@ -278,10 +278,21 @@ test("start cancels a stale cancelable active reader payment before reserving a 
   assert.strictEqual(result.status, "processing");
 });
 
-test("polling expires a cash-register terminal payment after twelve seconds", async () => {
+test("cash-register payment stays collectible after the previous card wait limit", async () => {
   const f = fixture();
   await f.service.startPayment(input);
-  f.state.sessions[0].card_wait_started_at = new Date(Date.now() - 12001).toISOString();
+  f.state.sessions[0].card_wait_started_at = new Date(Date.now() - 20000).toISOString();
+  const result = await f.service.getPaymentStatus({ shopId: 7, cashierUserId: 11, paymentId: 41 });
+  assert.strictEqual(result.status, 'processing');
+  await f.service.maintainPayment(f.state.sessions[0]);
+  assert.strictEqual(f.state.sessions[0].status, 'processing');
+  assert(!f.state.calls.some(call => call.name === 'cancel-action'));
+});
+
+test("polling expires a cash-register terminal payment after sixty seconds", async () => {
+  const f = fixture();
+  await f.service.startPayment(input);
+  f.state.sessions[0].card_wait_started_at = new Date(Date.now() - 60001).toISOString();
   f.state.intent.status = "requires_payment_method";
   f.state.remote.action = {
     type: "process_payment_intent",

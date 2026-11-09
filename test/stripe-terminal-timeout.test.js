@@ -3,10 +3,11 @@ const { buildStripeTerminalModule } = require('../src/modules/m_stripeTerminal')
 
 (async () => {
   const { cardWaitExpired } = require('../src/helpers/terminalCardWait');
-  assert.strictEqual(cardWaitExpired({ card_wait_started_at: new Date(0) }, 11999), false);
-  assert.strictEqual(cardWaitExpired({ card_wait_started_at: new Date(0) }, 12000), true);
+  assert.strictEqual(cardWaitExpired({ card_wait_started_at: new Date(0) }, 12000), false, 'The previous twelve-second limit no longer cancels card collection');
+  assert.strictEqual(cardWaitExpired({ card_wait_started_at: new Date(0) }, 59999), false);
+  assert.strictEqual(cardWaitExpired({ card_wait_started_at: new Date(0) }, 60000), true);
   for (const started of [null, undefined, 'invalid']) {
-    assert.strictEqual(cardWaitExpired({ card_wait_started_at: started }, 12000), false);
+    assert.strictEqual(cardWaitExpired({ card_wait_started_at: started }, 60000), false);
   }
   const { standalonePaymentDto } = require('../src/helpers/standaloneTerminalPayment');
   assert.strictEqual(standalonePaymentDto({ id: 41, terminal_reader_id: 21, reader_label: 'Comptoir',
@@ -21,9 +22,9 @@ const { buildStripeTerminalModule } = require('../src/modules/m_stripeTerminal')
     idempotencyKey: 'attempt', connectedAccountId: 'acct', amountCents: 500, applicationFeeAmount: 1 });
   assert.match(calls[1].sql, /reader_label/);
   assert.match(calls[1].sql, /r\.label/);
-  await store.listExpiredCardWaitPayments({ now: new Date(12000) });
+  await store.listExpiredCardWaitPayments({ now: new Date(60000) });
   assert.match(calls[2].sql, /card_wait_started_at <= \?/);
-  assert.deepStrictEqual(calls[2].params, [new Date(0), new Date(-18000)]);
+  assert.deepStrictEqual(calls[2].params, [new Date(0), new Date(30000)]);
   const { buildStripeTerminalMaintenance } = require('../src/services/stripeTerminalMaintenance');
   const maintained = [];
   const run = buildStripeTerminalMaintenance({ terminalStore: { listExpiredCardWaitPayments: async () => [

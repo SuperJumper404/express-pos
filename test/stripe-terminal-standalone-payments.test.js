@@ -79,15 +79,22 @@ const fixture = () => {
 };
 
 (async () => {
+  const extendedCardWait = fixture(); await extendedCardWait.service.startStandalonePayment(input);
+  extendedCardWait.state.sessions[0].card_wait_started_at = new Date(Date.now() - 20000).toISOString();
+  const waitingStatus = await extendedCardWait.service.getPaymentStatus({ shopId: 7, cashierUserId: 11, paymentId: 41, paymentKind: 'standalone' });
+  assert.strictEqual(waitingStatus.status, 'processing');
+  await extendedCardWait.service.maintainPayment(extendedCardWait.state.sessions[0]);
+  assert.strictEqual(extendedCardWait.state.sessions[0].status, 'processing');
+  assert(!extendedCardWait.state.calls.includes('cancel-action'));
   // The server must enforce the card wait even with no polling browser.
   const timeout = fixture(); await timeout.service.startStandalonePayment(input);
   assert(timeout.state.sessions[0].card_wait_started_at, 'Persist the reader handoff start');
-  timeout.state.sessions[0].card_wait_started_at = new Date(Date.now() - 12001).toISOString();
+  timeout.state.sessions[0].card_wait_started_at = new Date(Date.now() - 60001).toISOString();
   await timeout.service.maintainPayment(timeout.state.sessions[0]);
   assert.strictEqual(timeout.state.sessions[0].status, 'canceled');
   assert(timeout.state.calls.includes('cancel-action'));
   const authorizing = fixture(); await authorizing.service.startStandalonePayment(input);
-  authorizing.state.sessions[0].card_wait_started_at = new Date(Date.now() - 12001).toISOString();
+  authorizing.state.sessions[0].card_wait_started_at = new Date(Date.now() - 60001).toISOString();
   authorizing.state.intents.values().next().value.status = 'processing';
   await authorizing.service.maintainPayment(authorizing.state.sessions[0]);
   assert.strictEqual(authorizing.state.sessions[0].status, 'processing');
@@ -96,7 +103,7 @@ const fixture = () => {
   await authorizing.service.maintainPayment(authorizing.state.sessions[0]);
   assert.strictEqual(authorizing.state.sessions[0].status, 'succeeded');
   const racedAuthorization = fixture(); await racedAuthorization.service.startStandalonePayment(input);
-  racedAuthorization.state.sessions[0].card_wait_started_at = new Date(Date.now() - 12001).toISOString();
+  racedAuthorization.state.sessions[0].card_wait_started_at = new Date(Date.now() - 60001).toISOString();
   const cancelAction = racedAuthorization.stripe.terminal.readers.cancelAction;
   racedAuthorization.stripe.terminal.readers.cancelAction = async () => {
     racedAuthorization.state.intents.values().next().value.status = 'processing';

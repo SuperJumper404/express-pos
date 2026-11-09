@@ -1,4 +1,4 @@
-const CARD_WAIT_TIMEOUT_MS = 12 * 1000;
+const CARD_WAIT_TIMEOUT_MS = 60 * 1000;
 const STALE_CREATION_TIMEOUT_MS = 30 * 1000;
 
 const cardWaitExpired = (session, now = Date.now()) => {

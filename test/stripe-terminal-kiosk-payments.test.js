@@ -516,10 +516,21 @@ test("cleans a stale kiosk preparation without a Stripe intent before starting a
   assert.strictEqual(result.status, "processing");
 });
 
-test("polling expires a kiosk terminal payment after twelve seconds", async () => {
+test("kiosk payment stays collectible after the previous card wait limit", async () => {
   const f = fixture();
   await f.service.startPayment({ shopId: 7, servicePointId: 4, checkoutPayload });
-  f.state.sessions[0].card_wait_started_at = new Date(Date.now() - 12001).toISOString();
+  f.state.sessions[0].card_wait_started_at = new Date(Date.now() - 20000).toISOString();
+  const result = await f.service.getPaymentStatus({ shopId: 7, servicePointId: 4, paymentId: 41 });
+  assert.strictEqual(result.status, 'processing');
+  await f.service.maintainPayment(f.state.sessions[0]);
+  assert.strictEqual(f.state.sessions[0].status, 'processing');
+  assert(!f.state.calls.some(call => call.name === 'cancel-action'));
+});
+
+test("polling expires a kiosk terminal payment after sixty seconds", async () => {
+  const f = fixture();
+  await f.service.startPayment({ shopId: 7, servicePointId: 4, checkoutPayload });
+  f.state.sessions[0].card_wait_started_at = new Date(Date.now() - 60001).toISOString();
   f.state.intent.status = "requires_payment_method";
   f.state.remote.action = {
     type: "process_payment_intent",
@@ -666,11 +677,11 @@ test("kiosk failure polling keeps a card authorization reserved when cancellatio
   assert.strictEqual(f.state.orders[0].payment_provider, 'stripe_terminal');
 });
 
-test("server card wait maintenance cancels an unanswered kiosk payment after twelve seconds", async () => {
+test("server card wait maintenance cancels an unanswered kiosk payment after sixty seconds", async () => {
   const f = fixture();
   await f.service.startPayment({ shopId: 7, servicePointId: 4, checkoutPayload });
   assert(f.state.sessions[0].card_wait_started_at);
-  f.state.sessions[0].card_wait_started_at = new Date(Date.now() - 12001).toISOString();
+  f.state.sessions[0].card_wait_started_at = new Date(Date.now() - 60001).toISOString();
   await f.service.maintainPayment(f.state.sessions[0]);
   assert.strictEqual(f.state.sessions[0].status, 'canceled');
   assert.deepStrictEqual(f.state.orders, []);
