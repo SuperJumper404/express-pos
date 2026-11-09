@@ -37,7 +37,7 @@ function buildClientDirectory({ shopId, customers = [], identities = [], members
   const groups = new Map();
   const bound = [];
   for (const order of visibleArchives) {
-    if (order.customer_account_id != null) { bound.push(order); continue; }
+    if (order.customer_account_id != null || order.customer_profile_id != null) { bound.push(order); continue; }
     const phoneKey = clientPhoneKey(order.phone);
     if (!phoneKey) continue;
     const key = contactKey(phoneKey);
@@ -60,7 +60,7 @@ function buildClientDirectory({ shopId, customers = [], identities = [], members
   const aliases = new Map();
   const protectedProfile = key => verified.has(key) || cards.has(key) || Number((profiles.get(key) || {}).has_addresses) > 0
     || Number((profiles.get(key) || {}).has_linked_orders) > 0
-    || bound.some(order => id(order.customer_account_id) === key);
+    || bound.some(order => id(order.customer_account_id ?? order.customer_profile_id) === key);
   for (const group of groups.values()) {
     const link = storedLinks.get(group.contactKey);
     const source = link && id(link.source_customer_id);
@@ -104,7 +104,7 @@ function buildClientDirectory({ shopId, customers = [], identities = [], members
     }
   };
   for (const order of bound) {
-    const owner = id(order.customer_account_id);
+    const owner = id(order.customer_account_id ?? order.customer_profile_id);
     // An explicit foreign/missing owner is never reassigned by phone.
     if (profiles.has(owner)) addOrder(rowFor(aliases.get(owner) || owner), order);
   }

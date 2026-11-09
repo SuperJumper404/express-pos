@@ -2,12 +2,14 @@ const express = require("express");
 
 const buildCustomersRouter = ({ controller = require("../controllers/c_customers").buildCustomersController(),
   customerAuthController = require("../controllers/c_customers").buildCustomerAuthController(),
+  phoneController = require('../controllers/c_customerPhone').buildCustomerPhoneController(),
   personalController = require("../controllers/c_customers").buildPersonalCustomersController(),
   customerMiddleware = require("../helpers/middleware/customerAuth"),
   authentication = require("../helpers/middleware/auth").authentication } = {}) => {
   const router = express.Router();
   const { requireCustomerSession, requireCustomerCsrf } = customerMiddleware;
   const directory = require('../controllers/c_clientDirectory').buildClientDirectoryController();
+  router.post('/clients/resolve-phone', (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); }, authentication, phoneController.resolve);
   router.get('/clients', authentication, directory.list);
   router.get('/clients/export', authentication, directory.exportCsv);
   router.get('/clients/:id', authentication, directory.detail);

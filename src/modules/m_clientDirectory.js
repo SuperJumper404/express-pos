@@ -11,13 +11,14 @@ const buildSqlClientDirectoryRepository = ({ pool = require('../config/dbPool') 
   async loadSources({ shopId, connection = pool }) {
     const [customers] = await connection.query(`SELECT CAST(c.id AS CHAR) AS id,c.shopid,c.name,c.contact_phone,c.contact_email,
       EXISTS(SELECT 1 FROM customer_addresses a WHERE a.shopid=c.shopid AND a.customer_id=c.id) AS has_addresses,
-      EXISTS(SELECT 1 FROM orders o WHERE o.shopid=c.shopid AND o.customer_account_id=c.id) AS has_linked_orders
+      EXISTS(SELECT 1 FROM orders o WHERE o.shopid=c.shopid AND (o.customer_account_id=c.id OR o.customer_profile_id=c.id))
+        OR EXISTS(SELECT 1 FROM archives a WHERE a.shopid=c.shopid AND (a.customer_account_id=c.id OR a.customer_profile_id=c.id)) AS has_linked_orders
       FROM customers c WHERE c.shopid=?`, [shopId]);
     const [identities] = await connection.query(`SELECT shopid,CAST(customer_id AS CHAR) AS customer_id,channel,destination,verified_at
       FROM customer_identities WHERE shopid=? AND verified_at IS NOT NULL`, [shopId]);
-    const [members] = await connection.query(`SELECT id,shopid,CAST(customer_id AS CHAR) AS customer_id,balance,reserved
+    const [members] = await connection.query(`SELECT id,shopid,CAST(customer_id AS CHAR) AS customer_id,card_number,balance,reserved
       FROM loyalty_members WHERE shopid=?`, [shopId]);
-    const [archives] = await connection.query(`SELECT id,shopid,ordernumber,customer,phone,subtotal,created,CAST(customer_account_id AS CHAR) AS customer_account_id
+    const [archives] = await connection.query(`SELECT id,shopid,ordernumber,customer,phone,subtotal,created,CAST(customer_account_id AS CHAR) AS customer_account_id,CAST(customer_profile_id AS CHAR) AS customer_profile_id
       FROM archives WHERE shopid=? AND COALESCE(hidden_from_history,0)=0`, [shopId]);
     let links = [], linksReady = true;
     try {

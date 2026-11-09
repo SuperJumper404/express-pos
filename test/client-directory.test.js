@@ -73,3 +73,14 @@ test('non-admin directory omits every loyalty field and filters respect the full
   assert.ok(clientDirectoryCsv(result.rows).includes("'=SUM(1)"), 'spreadsheet formula text is escaped');
   assert.equal(Object.hasOwn(build({ ...input, canManageLoyalty: false }).rows[0], 'loyalty'), false);
 });
+
+test('internal profile ownership groups orders, protects aliases and never overrides authenticated ownership', () => {
+  const result = build({ customers: [customer('1'), customer('2')], archives: [archive(1, { customer_profile_id: '1' }), archive(2, { customer_account_id: '2', customer_profile_id: '1' }), archive(3, { customer_profile_id: '999' })] });
+  assert.equal(result.rows.find(row => row.id === '1').orderCount, 1);
+  assert.equal(result.rows.find(row => row.id === '2').orderCount, 1);
+  assert.equal(result.contacts.length, 0);
+  const key = build({ archives: [archive(1)] }).contacts[0].contactKey;
+  const protectedResult = build({ customers: [customer('1'), customer('2')], archives: [archive(1, { customer_profile_id: '1' })], identities: [identity('2', '+33612345678')], links: [{ shopid: 7, contact_key: key, customer_id: '1', source_customer_id: '1', match_kind: 'import' }] });
+  assert.equal(protectedResult.rows.length, 2);
+  assert.equal(protectedResult.contacts[0].status, 'ambiguous');
+});
