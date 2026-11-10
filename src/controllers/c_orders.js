@@ -590,6 +590,8 @@ exports.orderByToken = async (req, res) => {
   }
 };
 
+const { mGetStandaloneReportPayments, standalonePaymentSummary, standaloneReportEntries } = require('../modules/m_terminalReports');
+
 exports.metrics = async (req, res) => {
 
   const shopId = req.shopid || req.query.shopid; // Sécurité
@@ -606,28 +608,33 @@ exports.metrics = async (req, res) => {
   }
 
   const allOrders = await mAllArchivedOrdersWithDetails(shopId, from, to);
+  const standalone = await mGetStandaloneReportPayments({ shopId, from, to });
+  const standaloneSummary = standalonePaymentSummary(standalone);
+  const receiptEntries = [...allOrders, ...standaloneReportEntries(standalone)];
   let metrics = {
     totalRevenue: Number(
       allOrders
         .reduce((total, current) => {
           return total + moneyOrZero(current.subtotal); // ou current.prix_total selon ton champ
-        }, 0)
+        }, standaloneSummary.total)
         .toFixed(2),
     ),
     totalOrders: allOrders.length,
+    standalonePaymentsCount: standaloneSummary.count,
+    standalonePaymentsRevenue: standaloneSummary.total,
   };
 
   metrics.averageOrder =
     metrics.totalOrders > 0
-      ? Number((metrics.totalRevenue / metrics.totalOrders).toFixed(2))
+      ? Number((allOrders.reduce((total, order) => total + moneyOrZero(order.subtotal), 0) / metrics.totalOrders).toFixed(2))
       : 0;
 
   metrics.averageOrderPreparationTime =
     getAverageOrderPreparationTime(allOrders);
 
-  metrics.paymentsSummary = getPaymentsSummary(allOrders);
+  metrics.paymentsSummary = getPaymentsSummary(receiptEntries);
   metrics.revenueByDayAndPayment = buildRevenueByDayAndPayment(
-    allOrders,
+    receiptEntries,
     from,
     to,
   );

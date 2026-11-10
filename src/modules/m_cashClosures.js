@@ -2,6 +2,8 @@ const pool = require("../config/dbPool");
 const { withTransaction } = require("../helpers/withTransaction");
 const { buildCashClosureSnapshot } = require("../helpers/cashClosure");
 const { buildCourierCashSummary, cashPostingTime } = require("./m_courierCash");
+const { mGetStandaloneReportPayments } = require('./m_terminalReports');
+const { validateCashDeclaration, buildCashReconciliation } = require('../helpers/cashReconciliation');
 
 const queryResult = async (sql, params = [], connection = pool) => {
   const [result] = await connection.query(sql, params);
@@ -26,6 +28,8 @@ const normalizeClosureRow = (row) => {
     payments_summary: parseJson(row.payments_summary, []),
     vat_summary: parseJson(row.vat_summary, []),
     courier_cash: parseJson(row.courier_cash, null),
+    standalone_terminal_summary: parseJson(row.standalone_terminal_summary, null),
+    reconciliation: parseJson(row.reconciliation, null),
   };
 };
 
@@ -155,25 +159,36 @@ const buildCurrentSnapshot = async ({ shopId, now, connection = pool }) => {
     connection,
   });
   const courierCash = await buildCourierCashSummary({ shopId, openedAt, closedAt, archivedOrders, connection });
+  const standalonePayments = await mGetStandaloneReportPayments({ shopId, unclosed: true, closedAt, connection });
 
-  return buildCashClosureSnapshot({
+  const snapshot = buildCashClosureSnapshot({
     lastClosure,
     archivedOrders,
     detailRows,
     now: closedAt,
     courierCash,
+    standalonePayments,
   });
+  return { ...snapshot, last_closure_id: lastClosure ? lastClosure.id : null,
+    reconciliation: buildCashReconciliation(snapshot), standalone_payment_ids: standalonePayments.map(row => row.id) };
 };
 
 const mGetCurrentCashClosure = (shopId) => runInTransaction(async connection => {
   await lockShopForCashClosure(shopId, connection);
-  return buildCurrentSnapshot({ shopId, connection });
+  const { standalone_payment_ids, ...snapshot } = await buildCurrentSnapshot({ shopId, connection });
+  return snapshot;
 });
 
-const mCloseCurrentCashClosure = ({ shopId, userId }) =>
+const mCloseCurrentCashClosure = ({ shopId, userId, declaration, expectedLastClosureId }) =>
   runInTransaction(async (connection) => {
+    validateCashDeclaration(declaration);
     await lockShopForCashClosure(shopId, connection);
-    await getLastClosureForUpdate(shopId, connection);
+    const previous = await getLastClosureForUpdate(shopId, connection);
+    if (expectedLastClosureId !== undefined && String(expectedLastClosureId || '') !== String(previous ? previous.id : '')) {
+      const error = new Error('La caisse a déjà été clôturée. Actualisez le rapport avant de recommencer.');
+      error.statusCode = 409;
+      throw error;
+    }
     const closureNumber = await getNextClosureNumber(shopId, connection);
     const now = clock ? cashPostingTime(await clock({ connection })) : await getDatabaseNow(shopId, connection);
     const snapshot = await buildCurrentSnapshot({
@@ -182,7 +197,7 @@ const mCloseCurrentCashClosure = ({ shopId, userId }) =>
       connection,
     });
 
-    if (snapshot.orders_count <= 0 && snapshot.courier_cash.remittances_count <= 0 && snapshot.courier_cash.adjustments_count <= 0 && snapshot.courier_cash.refunds_count <= 0) {
+    if (snapshot.orders_count <= 0 && snapshot.standalone_terminal_summary.count <= 0 && snapshot.courier_cash.remittances_count <= 0 && snapshot.courier_cash.adjustments_count <= 0 && snapshot.courier_cash.refunds_count <= 0) {
       const error = new Error("La periode ne contient aucune commande a cloturer.");
       error.statusCode = 400;
       throw error;
@@ -199,7 +214,9 @@ const mCloseCurrentCashClosure = ({ shopId, userId }) =>
            total_revenue = ?,
            payments_summary = ?,
            vat_summary = ?,
-           courier_cash = ?`,
+           courier_cash = ?,
+           standalone_terminal_summary = ?,
+           reconciliation = ?`,
       [
         shopId,
         closureNumber,
@@ -211,9 +228,19 @@ const mCloseCurrentCashClosure = ({ shopId, userId }) =>
         JSON.stringify(snapshot.payments_summary),
         JSON.stringify(snapshot.vat_summary),
         JSON.stringify(snapshot.courier_cash),
+        JSON.stringify(snapshot.standalone_terminal_summary),
+        JSON.stringify(buildCashReconciliation(snapshot, declaration)),
       ],
       connection
     );
+
+    if (snapshot.standalone_payment_ids.length) {
+      const claimed = await queryResult(`UPDATE stripe_terminal_payments SET cash_closure_id = ?
+        WHERE shopid = ? AND id IN (?) AND payment_kind = 'standalone'
+          AND status = 'succeeded' AND cash_closure_id IS NULL`,
+      [result.insertId, shopId, snapshot.standalone_payment_ids], connection);
+      if (claimed.affectedRows !== snapshot.standalone_payment_ids.length) throw new Error('Les paiements TPE de la clôture ont changé. Réessayez.');
+    }
 
     const rows = await queryResult(
       "SELECT * FROM cash_closures WHERE id = ? AND shopid = ? LIMIT 1",
