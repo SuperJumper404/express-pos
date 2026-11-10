@@ -1,0 +1,8 @@
+services:
+  app:
+    environment:
+      APPLE_WALLET_ASSETS_PATH: /var/lib/smarteat/apple-wallet
+    volumes:
+      - type: bind
+        source: ${WALLET_ARTWORK_HOST_PATH:?Define the absolute persistent Wallet artwork directory}
+        target: /var/lib/smarteat/apple-wallet
