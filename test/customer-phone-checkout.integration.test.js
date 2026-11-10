@@ -45,8 +45,16 @@ test('SQL cashier/table phone attribution, payment once, enrollment reuse, archi
       const after = await counts(); assert.equal(after.customers, before.customers + 1);
       for (const table of ['loyalty_members', 'loyalty_ledger', 'customer_identities', 'customer_accounts', 'customer_sessions']) assert.equal(after[table], before[table], table);
       // Once the response is lost, later phone reassignment must not affect its replay.
-      await pool.query("UPDATE customers SET contact_phone='' WHERE id=?", [guestOrder.profileId]);
-      await pool.query('DELETE FROM customer_directory_contacts WHERE shopid=7 AND customer_id=?', [guestOrder.profileId]);
+      await transaction(async connection => {
+        await connection.query("UPDATE customers SET contact_phone='' WHERE shopid=7 AND id=?", [guestOrder.profileId]);
+        // Disposable fixture only: remove audit children before their FK-protected mapping.
+        const [events] = await connection.query(`DELETE e FROM customer_directory_events e
+          JOIN customer_directory_contacts c ON c.shopid=e.shopid AND c.contact_key=e.contact_key
+          WHERE c.shopid=7 AND c.customer_id=?`, [guestOrder.profileId]);
+        assert.equal(events.affectedRows, 1, 'the original resolution created one mapping audit');
+        const [contacts] = await connection.query('DELETE FROM customer_directory_contacts WHERE shopid=7 AND customer_id=?', [guestOrder.profileId]);
+        assert.equal(contacts.affectedRows, 1, 'the phone is unbound before its accepted checkout is replayed');
+      });
       assert.equal((await checkout.createCheckout(base)).idempotent_replay, true);
       assert.deepEqual(await counts(), after);
       assert.equal((await readRows('SELECT CAST(customer_profile_id AS CHAR) AS id FROM orders WHERE id=?', [guest.orderId]))[0].id, guestOrder.profileId);
