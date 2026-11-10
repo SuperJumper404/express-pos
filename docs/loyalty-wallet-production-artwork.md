@@ -45,10 +45,11 @@ Le modèle ne contient aucune clé, aucun certificat et aucun secret.
   d'import administrateur.
 - Source applicative exécutée inchangée : `e52806b7cccb449e227f1c227f433a2e9c3653df`.
 
-Cette correction permet de publier les visuels. La signature des cartes Apple
-reste désactivée en production : les certificats et les paramètres de création
-des cartes devront être installés séparément. Aucune carte client, campagne,
-notification, récompense ou écriture de points n'a été créée par la correction.
+Cette première correction permettait de publier les visuels, avec la signature
+Apple encore désactivée. Les certificats ont ensuite été installés et la
+signature activée : voir [Apple Wallet en production Docker](loyalty-wallet-production-docker.md).
+Aucune carte client, campagne, notification, récompense ou écriture de points
+n'a été créée par la correction du stockage.
 
 ## Retour arrière
 
