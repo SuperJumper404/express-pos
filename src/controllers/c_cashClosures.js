@@ -20,6 +20,9 @@ exports.closeCashClosure = async (req, res) => {
     const data = await mCloseCurrentCashClosure({
       shopId: req.shopid,
       userId: req.id,
+      declaration: req.body && ('declared_cash_cents' in req.body || 'declared_card_cents' in req.body)
+        ? { declared_cash_cents: req.body.declared_cash_cents, declared_card_cents: req.body.declared_card_cents } : undefined,
+      expectedLastClosureId: req.body && req.body.expected_last_closure_id,
     });
     return custom(res, 201, "Ticket Z cree.", null, data);
   } catch (error) {

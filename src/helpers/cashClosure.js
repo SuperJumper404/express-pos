@@ -5,6 +5,7 @@ const moneyOrZero = (value) => {
 
 const roundMoney = (value) => Number(moneyOrZero(value).toFixed(2));
 const { normalizePaymentMethod } = require("./paymentMethod");
+const { standalonePaymentSummary } = require('../modules/m_terminalReports');
 
 const TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z)?$/;
 
@@ -114,6 +115,7 @@ const buildCashClosureSnapshot = ({
   detailRows = [],
   now,
   courierCash,
+  standalonePayments,
 }) => {
   const periodOrders = filterArchivedOrdersForPeriod({
     lastClosure,
@@ -130,6 +132,19 @@ const buildCashClosureSnapshot = ({
     bounds.opened_at = courierCash.first_event_at;
   }
 
+  const standalone = standalonePaymentSummary(standalonePayments);
+  if (!(lastClosure && lastClosure.closed_at) && standalone.count) {
+    const first = standalonePayments.map(row => timestampOrNull(row.confirmed_at)).filter(Boolean)
+      .sort((left, right) => timestampSortKey(left).localeCompare(timestampSortKey(right)))[0];
+    if (first && (!bounds.opened_at || timestampSortKey(first) < timestampSortKey(bounds.opened_at))) bounds.opened_at = first;
+  }
+  const payments = buildPaymentSummary(periodOrders);
+  if (standalone.count) {
+    let terminal = payments.find(row => row.payment === 'TPE Stripe');
+    if (!terminal) { terminal = { payment: 'TPE Stripe', orders_count: 0, total: 0 }; payments.push(terminal); }
+    terminal.total = roundMoney(terminal.total + standalone.total);
+  }
+
   return {
     ...bounds,
     orders_count: periodOrders.length,
@@ -137,10 +152,11 @@ const buildCashClosureSnapshot = ({
       periodOrders.reduce(
         (total, order) => total + moneyOrZero(order && order.subtotal),
         0
-      )
+      ) + standalone.total
     ),
-    payments_summary: buildPaymentSummary(periodOrders),
+    payments_summary: payments,
     vat_summary: buildVatSummary(detailRows),
+    ...(standalonePayments ? { standalone_terminal_summary: standalone } : {}),
     ...(courierCash ? { courier_cash: courierCash } : {}),
   };
 };
