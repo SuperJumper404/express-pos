@@ -49,7 +49,10 @@ jobs:
             docker inspect express_pos_db_staging >/dev/null
             DATABASE_NAME=$(docker exec express_pos_app_staging node -p 'new URL(process.env.DATABASE_URL).pathname.slice(1)')
             test -n "$DATABASE_NAME"
-            docker exec -e BACKUP_DATABASE="$DATABASE_NAME" express_pos_db_staging sh -c 'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --routines --triggers --databases "$BACKUP_DATABASE"' > "$BACKUP_DIR/database.sql"
+            docker exec express_pos_app_staging node -e 'const u=new URL(process.env.DATABASE_URL);const q=value=>JSON.stringify(decodeURIComponent(value));process.stdout.write("[client]\nuser="+q(u.username)+"\npassword="+q(u.password)+"\nhost="+JSON.stringify(u.hostname)+"\nport="+(u.port||3306)+"\n")' > "$BACKUP_DIR/database-client.cnf"
+            test -s "$BACKUP_DIR/database-client.cnf"
+            docker run --rm --network container:express_pos_app_staging -v "$BACKUP_DIR/database-client.cnf:/run/database-client.cnf:ro" mysql:8.0.33 mysqldump --defaults-extra-file=/run/database-client.cnf --single-transaction --routines --triggers --databases "$DATABASE_NAME" > "$BACKUP_DIR/database.sql"
+            rm -f "$BACKUP_DIR/database-client.cnf"
             test -s "$BACKUP_DIR/database.sql"
             gzip "$BACKUP_DIR/database.sql"
             echo "STAGING_BACKUP_PATH=$BACKUP_DIR"
