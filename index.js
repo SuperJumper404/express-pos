@@ -109,7 +109,9 @@ app.get(`${prefix}/testapi`, (req, res) => {
 console.log("Public Image Path:", envPUBLICIMAGEPATH);
 app.use(
   "/api/v1/imgproducts",
-  express.static(path.join(envPUBLICIMAGEPATH, "products")),
+  express.static(path.join(envPUBLICIMAGEPATH, "products"), {
+    maxAge: "7d",
+  }),
 );
 app.use(
   "/api/v1/imgcategories",
