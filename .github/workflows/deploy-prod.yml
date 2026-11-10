@@ -36,7 +36,7 @@ jobs:
           username: smarteatprod
           password: root
           port: 22
-          script_stop: true
+          script_stop: false
           script: |
             set -e
 
@@ -72,6 +72,23 @@ jobs:
               exit 0
             fi
 
+            umask 077
+            BACKUP_DIR=/home/smarteatprod/smarteat-backups/backend-$(date -u +%Y%m%d-%H%M%S)-$$
+            mkdir -p "$BACKUP_DIR"
+            test "$APP_DIR" = /home/smarteatprod/smarteat/backend
+            if [ -d "$APP_DIR" ]; then
+              git -C "$APP_DIR" rev-parse HEAD > "$BACKUP_DIR/previous.sha"
+              if [ -f "$APP_DIR/.env.production" ]; then cp "$APP_DIR/.env.production" "$BACKUP_DIR/runtime.env.production"; fi
+              tar -czf "$BACKUP_DIR/source.tar.gz" --exclude=node_modules --exclude=.git -C "$APP_DIR" .
+            fi
+            docker inspect express_pos_db_production >/dev/null
+            DATABASE_NAME=$(docker exec express_pos_app_production node -p 'new URL(process.env.DATABASE_URL).pathname.slice(1)')
+            test -n "$DATABASE_NAME"
+            docker exec -e BACKUP_DATABASE="$DATABASE_NAME" express_pos_db_production sh -c 'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --routines --triggers --databases "$BACKUP_DATABASE"' > "$BACKUP_DIR/database.sql"
+            test -s "$BACKUP_DIR/database.sql"
+            gzip "$BACKUP_DIR/database.sql"
+            echo "PRODUCTION_BACKUP_PATH=$BACKUP_DIR"
+
             rm -rf "$APP_DIR"
             git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
 
@@ -86,11 +103,29 @@ jobs:
               node:20-alpine \
               npx --yes @dotenvx/dotenvx decrypt -f .env.production
             ! grep -q "encrypted:" .env.production
+            if [ -s "$BACKUP_DIR/runtime.env.production" ]; then
+              cp "$BACKUP_DIR/runtime.env.production" .env.production
+              ! grep -q "encrypted:" .env.production
+            fi
 
-            docker compose --env-file .env.production -f "$COMPOSE_FILE" down --remove-orphans || true
-            docker compose --env-file .env.production -f "$COMPOSE_FILE" up -d --force-recreate
-
-            docker compose --env-file .env.production -f "$COMPOSE_FILE" ps
+            WALLET_COMPOSE=/home/smarteatprod/.smarteat/apple-wallet/production/compose-wallet.sh
+            if [ ! -x "$WALLET_COMPOSE" ] && [ -x /home/smarteatprod/.smarteat/apple-wallet/prod/compose-wallet.sh ]; then
+              WALLET_COMPOSE=/home/smarteatprod/.smarteat/apple-wallet/prod/compose-wallet.sh
+            fi
+            compose_production() {
+              if [ -x "$WALLET_COMPOSE" ]; then "$WALLET_COMPOSE" "$@";
+              else docker compose --env-file .env.production -f "$COMPOSE_FILE" "$@"; fi
+            }
+            compose_production up -d --no-deps --force-recreate app
+            compose_production ps
+            ready=0
+            for attempt in $(seq 1 90); do
+              if curl --silent --fail --max-time 3 http://127.0.0.1:5005/baseurl/api/v1/testapi -o /dev/null; then ready=1; break; fi
+              sleep 2
+            done
+            test "$ready" = 1
+            docker exec express_pos_app_production node -e 'const assert=require("node:assert/strict");const mysql=require("mysql2/promise");(async()=>{const c=await mysql.createConnection(process.env.DATABASE_URL);const [v]=await c.query("SELECT version FROM schema_migrations WHERE version IN (?,?)",["20261106120000","20261109120000"]);assert.equal(v.length,2);const [cols]=await c.query("SELECT column_name FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name IN (?,?) AND column_name=?",["orders","archives","customer_profile_id"]);assert.equal(cols.length,2);assert.equal(require("./src/helpers/terminalCardWait").CARD_WAIT_TIMEOUT_MS,60000);const [[u]]=await c.query("SELECT id,shopid FROM users WHERE access=0 AND status=1 ORDER BY id LIMIT 1");if(u){const token=require("jsonwebtoken").sign({id:u.id,shopid:u.shopid,subject_type:"staff"},require("./src/helpers/env").envJWTKEY,{expiresIn:"60s"});const headers={Authorization:"Bearer "+token};const r=await fetch("http://127.0.0.1:5005/baseurl/api/v1/clients?pageSize=1",{headers});assert.equal(r.status,200);const invalid=await fetch("http://127.0.0.1:5005/baseurl/api/v1/clients/resolve-phone",{method:"POST",headers:{...headers,"Content-Type":"application/json"},body:JSON.stringify({phone:"invalid"})});assert.equal(invalid.status,422);}await c.end();console.log("Production schema, directory, phone validation and 60-second Terminal wait verified.")})().catch(e=>{console.error("Production readiness:",e.code||e.message);process.exitCode=1})'
+            echo "PRODUCTION_BACKEND_COMMIT=$(git rev-parse HEAD)"
 
   deploy-pm2:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'pm2' && inputs.operation != 'preflight' }}
