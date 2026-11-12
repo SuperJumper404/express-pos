@@ -36,3 +36,4 @@ jobs:
       - run: npm run test:phone-clients
       - run: node test/customer-phone-profiles.integration.test.js
       - run: node test/customer-phone-checkout.integration.test.js
+      - run: node test/history-settlement.integration.test.js

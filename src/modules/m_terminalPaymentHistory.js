@@ -51,6 +51,7 @@ const queryWith = async (connection, sql, values = []) => {
   return (await connection.query(sql, values))[0];
 };
 const visible = "COALESCE(a.hidden_from_history, 0) = 0";
+const historyText = expression => `CONVERT(${expression} USING utf8mb4) COLLATE utf8mb4_unicode_ci`;
 const archiveJoins = "LEFT JOIN service_points sp ON sp.id = a.service_point_id AND sp.shopid = a.shopid";
 const paymentDisplayJoins = `LEFT JOIN users cashier ON cashier.id = p.cashier_user_id AND cashier.shopid = p.shopid
   LEFT JOIN stripe_terminal_readers reader ON reader.id = p.terminal_reader_id AND reader.shopid = p.shopid`;
@@ -175,18 +176,21 @@ const buildTerminalPaymentHistoryModule = ({ connection, withTransaction, delive
         AND CONCAT_WS(' ', 'Encaissement table', s.table_reference, child.ordernumber,
           child.customer, child.taken_by_name, child.prepared_by_name) LIKE ?)` : "";
     if (search) values.push(`%${search}%`);
-    const union = `SELECT a.id, 'order' AS entry_type, COALESCE(a.archived_at, a.created) AS event_at,
-      CAST(a.ordernumber AS CHAR) AS reference, sp.name AS table_name, a.customer,
-      a.taken_by_name, a.prepared_by_name, a.subtotal AS amount, a.payment_status, CAST(a.status AS CHAR) AS entry_status
+    const union = `SELECT a.id, ${historyText("'order'")} AS entry_type, COALESCE(a.archived_at, a.created) AS event_at,
+      ${historyText("CAST(a.ordernumber AS CHAR)")} AS reference, ${historyText("sp.name")} AS table_name,
+      ${historyText("a.customer")} AS customer, ${historyText("a.taken_by_name")} AS taken_by_name,
+      ${historyText("a.prepared_by_name")} AS prepared_by_name, a.subtotal AS amount,
+      ${historyText("a.payment_status")} AS payment_status, ${historyText("CAST(a.status AS CHAR)")} AS entry_status
       FROM archives a ${archiveJoins} WHERE a.shopid = ? AND ${visible}
         AND a.cash_register_settlement_id IS NULL ${archiveSearch}
       UNION ALL
-      SELECT p.id, 'terminal_payment', COALESCE(p.confirmed_at, p.created_at), CONCAT('TPE #', p.id),
-      NULL, NULL, cashier.username, NULL, p.amount_cents / 100, p.status, p.status
+      SELECT p.id, ${historyText("'terminal_payment'")}, COALESCE(p.confirmed_at, p.created_at), ${historyText("CONCAT('TPE #', p.id)")},
+      NULL, NULL, ${historyText("cashier.username")}, NULL, p.amount_cents / 100,
+      ${historyText("p.status")}, ${historyText("p.status")}
       FROM stripe_terminal_payments p ${paymentDisplayJoins} WHERE p.shopid = ? AND p.payment_kind = 'standalone' ${paymentSearch}
       UNION ALL
-      SELECT s.id, 'settlement', s.created_at, CONCAT('Encaissement table ', s.table_reference),
-      s.table_reference, NULL, NULL, NULL, s.total_amount, 'paid', '3'
+      SELECT s.id, ${historyText("'settlement'")}, s.created_at, ${historyText("CONCAT('Encaissement table ', s.table_reference)")},
+      ${historyText("s.table_reference")}, NULL, NULL, NULL, s.total_amount, ${historyText("'paid'")}, ${historyText("'3'")}
       FROM cash_register_settlements s WHERE s.shopid = ?
         AND EXISTS (SELECT 1 FROM archives child WHERE child.shopid = s.shopid
           AND child.cash_register_settlement_id = s.id AND COALESCE(child.hidden_from_history, 0) = 0)

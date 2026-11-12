@@ -173,7 +173,7 @@ test("history paginates one SQL union and preserves colliding IDs as separate ro
   for (const call of calls) {
     assert.doesNotMatch(call.sql, /a\.username\b/, "archives have no username column");
   }
-  assert.match(pageQuery.sql, /sp\.name AS table_name/);
+  assert.match(pageQuery.sql, /CONVERT\(sp\.name USING utf8mb4\) COLLATE utf8mb4_unicode_ci AS table_name/);
 });
 
 test("standalone history displays cashier and reader with tenant-scoped search and cashier sorting", async () => {
@@ -196,7 +196,7 @@ test("standalone history displays cashier and reader with tenant-scoped search a
     assert.match(call.sql, /LEFT JOIN stripe_terminal_readers reader ON reader.id = p.terminal_reader_id AND reader.shopid = p.shopid/);
   }
   const pageQuery = calls.find(c => /UNION ALL/.test(c.sql) && !/COUNT\(\*\) AS total/.test(c.sql));
-  assert.match(pageQuery.sql, /NULL, NULL, cashier.username, NULL, p.amount_cents/);
+  assert.match(pageQuery.sql, /NULL, NULL, CONVERT\(cashier.username USING utf8mb4\) COLLATE utf8mb4_unicode_ci, NULL, p.amount_cents/);
   assert.match(pageQuery.sql, /cashier.username, reader.label\) LIKE \?/);
   assert.match(pageQuery.sql, /ORDER BY taken_by_name ASC, event_at DESC, entry_type ASC, id DESC/);
   assert(!pageQuery.sql.includes("Camille"));
