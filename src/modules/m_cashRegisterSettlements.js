@@ -178,7 +178,7 @@ const buildCashRegisterSettlementModule = ({ connection = pool } = {}) => {
        FOR UPDATE`,
       [shopId, orderIds],
     ),
-    listEligibleTableOrders: async ({ shopId, servicePointId, customerId }) => {
+    listEligibleTableOrders: async ({ shopId, servicePointId, customerId, forUpdate = true }) => {
       const tableClause = servicePointId == null
         ? "orders.service_point_id IS NULL AND orders.customerID = ?"
         : "orders.service_point_id = ?";
@@ -197,7 +197,7 @@ const buildCashRegisterSettlementModule = ({ connection = pool } = {}) => {
          WHERE orders.shopid = ? AND ${tableClause}
            AND orders.delivery_id IS NULL AND COALESCE(orders.fulfillment_type, '') <> 'delivery'
            AND orders.status = 3 AND ${CASH_REGISTER_DUE_AND_ARCHIVABLE_SQL}
-         ORDER BY orders.id FOR UPDATE`,
+         ORDER BY orders.id${forUpdate ? ' FOR UPDATE' : ''}`,
         [shopId, servicePointId == null ? customerId : servicePointId],
       );
       return rows.filter(order => order.delivery_id == null && order.fulfillment_type !== 'delivery'

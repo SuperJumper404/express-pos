@@ -118,8 +118,8 @@ const fixture = ({
         row.shopid === shopId && orderIds.includes(row.order_id)
       )));
     },
-    listEligibleTableOrders: async ({ shopId, servicePointId, customerId }) => clone(
-      (state.events.push(`eligible:${servicePointId == null ? `legacy-${customerId}` : servicePointId}`),
+    listEligibleTableOrders: async ({ shopId, servicePointId, customerId, forUpdate = true }) => clone(
+      (state.events.push(`eligible${forUpdate ? '' : '-preflight'}:${servicePointId == null ? `legacy-${customerId}` : servicePointId}`),
       state.orders.filter((order) => order.shopid === shopId
         && isCashRegisterOrderDueAndArchivable(order)
         && (servicePointId == null
@@ -286,7 +286,7 @@ test("settles every eligible order at a table in one transaction", async () => {
   const f = fixture();
   const result = await f.service.createSettlement(manualInput());
   assert.deepStrictEqual(f.state.events, [
-    "reconcile-read:12,22,31", "begin", "shop:7", "orders:12,22,31",
+    "reconcile-read:12,22,31", "eligible-preflight:9", "begin", "shop:7", "orders:12,22,31",
     "terminal-lock:12,22,31", "eligible:9", "settlement:501",
     "archive:12", "archive:22", "archive:31", "commit",
   ]);
@@ -511,6 +511,36 @@ test("reconciles online Stripe orders before opening the archive transaction", a
   }
 });
 
+test("rejects invalid table selections before any Stripe reconciliation or committed payment conversion", async () => {
+  const scenarios = [
+    { patch: { status: 2 } },
+    { patch: { delivery_id: '41' } },
+    { patch: { fulfillment_type: 'delivery' } },
+    { patch: { service_point_id: 10 } },
+    { patch: { service_point_type: 'kiosk' } },
+    { patch: { subtotal: 'invalid' } },
+    { input: { orderIds: [12, 31] } },
+    { input: { discountType: 'amount', discountValue: 100 }, code: 'SETTLEMENT_INVALID_INPUT', status: 400 },
+  ];
+  for (const scenario of scenarios) {
+    const orders = baseOrders();
+    orders[0] = { ...orders[0], payment_status: 'requires_payment', payment_provider: 'stripe', stripe_payment_intent_id: 'pi_31' };
+    Object.assign(orders[1], scenario.patch || {});
+    let reconciled = false;
+    const f = fixture({ orders, reconcile: async (order, state) => {
+      reconciled = true;
+      Object.assign(state.orders.find(row => row.id === order.id), { payment_status: 'unpaid', payment_provider: null });
+      return order;
+    } });
+    const before = clone(f.state.orders);
+    await expectCode(() => f.service.createSettlement(manualInput(scenario.input)),
+      scenario.code || 'TABLE_ORDERS_CHANGED', scenario.status || 409);
+    assert.strictEqual(reconciled, false);
+    assert.deepStrictEqual(f.state.orders, before);
+    assert(!f.state.events.includes('begin'));
+  }
+});
+
 test("archives after pending Stripe cancellation is persisted and transactionally revalidated", async () => {
   const pendingOrder = {
     ...baseOrders()[0],
@@ -621,6 +651,7 @@ test("accepts table service points and legacy table identity but rejects non-tab
 test("production store forwards its exact transaction connection and locks completeness before archival", async () => {
   const events = [];
   let eligibleSql = "";
+  let eligiblePreflightSql = "";
   let terminalAllocationSql = "";
   const settlementRow = {
     id: 501,
@@ -646,16 +677,15 @@ test("production store forwards its exact transaction connection and locks compl
     query: async (sql) => {
       if (/FROM shop/.test(sql)) { events.push("shop-lock"); return [[{ id: 7 }]]; }
       if (/idempotency_key = \?/.test(sql)) { events.push("idempotency"); return [[]]; }
-      if (/orders\.id IN/.test(sql)) { events.push("submitted-lock"); return [baseOrders().sort((a, b) => a.id - b.id)]; }
+      if (/orders\.id IN/.test(sql)) { events.push(/FOR UPDATE/.test(sql) ? "submitted-lock" : "submitted-read"); return [baseOrders().sort((a, b) => a.id - b.id)]; }
       if (/FROM stripe_terminal_payment_orders AS allocations/.test(sql)) {
         terminalAllocationSql = sql;
         events.push("terminal-allocation-lock");
         return [[]];
       }
       if (/orders\.status = 3/.test(sql)) {
-        assert.match(sql, /FOR UPDATE\s*$/);
-        eligibleSql = sql;
-        events.push("eligible-lock");
+        if (/FOR UPDATE\s*$/.test(sql)) { eligibleSql = sql; events.push("eligible-lock"); }
+        else { eligiblePreflightSql = sql; events.push("eligible-read"); }
         return [baseOrders().sort((a, b) => a.id - b.id)];
       }
       if (/INSERT INTO cash_register_settlements/.test(sql)) { events.push("insert"); return [{ insertId: 501 }]; }
@@ -672,6 +702,7 @@ test("production store forwards its exact transaction connection and locks compl
   const store = buildCashRegisterSettlementModule({ connection: pool });
   const service = buildCashRegisterSettlementService({
     settlementStore: store,
+    reconcileOrderBeforeSettlement: async order => order,
     archiveOrderInTransaction: async ({ connection, orderId, lockedOrder, discount }) => {
       assert.strictEqual(connection, transactionConnection);
       assert(events.includes("eligible-lock"));
@@ -685,11 +716,15 @@ test("production store forwards its exact transaction connection and locks compl
   await service.createSettlement(manualInput());
   assert(events.indexOf("shop-lock") < events.lastIndexOf("idempotency"));
   assert(events.indexOf("submitted-lock") < events.indexOf("eligible-lock"));
+  assert(events.indexOf("submitted-read") < events.indexOf("eligible-read"));
+  assert(events.indexOf("eligible-read") < events.indexOf("begin"));
   assert(events.indexOf("terminal-allocation-lock") < events.indexOf("archive:12"));
   assert(events.indexOf("eligible-lock") < events.indexOf("archive:12"));
   assert.match(terminalAllocationSql, /payments\.status IN \('creating', 'processing'\)/);
   assert.match(terminalAllocationSql, /FOR UPDATE\s*$/);
   assert.match(eligibleSql, /payment_status = 'requires_payment'/);
+  assert.doesNotMatch(eligiblePreflightSql, /FOR UPDATE/);
+  assert.match(eligibleSql, /FOR UPDATE\s*$/);
   assert.match(eligibleSql, /payment_status = 'paid'/);
   assert.match(eligibleSql, /stock_reservation_status/);
   assert.match(eligibleSql, /used_payment_method/);

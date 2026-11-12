@@ -130,6 +130,14 @@ const assertLockedOrders = ({ orders, orderIds, shopId, terminalPaymentId }) => 
 const sameIds = (left, right) => left.length === right.length
   && left.every((id, index) => id === right[index]);
 
+const orderAmountCents = (order) => {
+  const amountCents = toCents(order.subtotal);
+  if (!Number.isSafeInteger(amountCents) || amountCents <= 0) {
+    fail(409, "TABLE_ORDERS_CHANGED", "Table orders changed.");
+  }
+  return amountCents;
+};
+
 const requestFingerprint = (input) => crypto.createHash("sha256").update(JSON.stringify([
   input.orderIds,
   input.actorId,
@@ -216,13 +224,25 @@ const buildCashRegisterSettlementService = ({
         shopId: input.shopId,
         orderIds: input.orderIds,
       });
-      if (orders.length === input.orderIds.length) {
-        for (const order of orders) {
-          if (order.payment_status !== "requires_payment") continue;
-          const reconciled = await reconcileOrderBeforeSettlement(order);
-          if (!isCashRegisterOrderDueAndArchivable(reconciled)) {
-            fail(409, "TABLE_ORDERS_CHANGED", "Table orders changed.");
-          }
+      assertLockedOrders({ ...input, orders });
+      const subtotalCents = orders.reduce((sum, order) => sum + orderAmountCents(order), 0);
+      if (!Number.isSafeInteger(subtotalCents)) invalid("orders");
+      calculateDiscountCents({ ...input, subtotalCents });
+      const firstOrder = orders[0];
+      const eligible = await settlementStore.listEligibleTableOrders({
+        shopId: input.shopId,
+        servicePointId: firstOrder.service_point_id,
+        customerId: firstOrder.customerID,
+        forUpdate: false,
+      });
+      if (!sameIds(eligible.map(order => Number(order.id)).sort((a, b) => a - b), input.orderIds)) {
+        fail(409, "TABLE_ORDERS_CHANGED", "Table orders changed.");
+      }
+      for (const order of orders) {
+        if (order.payment_status !== "requires_payment") continue;
+        const reconciled = await reconcileOrderBeforeSettlement(order);
+        if (!isCashRegisterOrderDueAndArchivable(reconciled)) {
+          fail(409, "TABLE_ORDERS_CHANGED", "Table orders changed.");
         }
       }
     }
@@ -257,10 +277,7 @@ const buildCashRegisterSettlementService = ({
       }
       assertLockedOrders({ ...input, orders });
       const subtotalCents = orders.reduce((sum, order) => {
-        const amountCents = toCents(order.subtotal);
-        if (!Number.isSafeInteger(amountCents) || amountCents <= 0) {
-          fail(409, "TABLE_ORDERS_CHANGED", "Table orders changed.");
-        }
+        const amountCents = orderAmountCents(order);
         order.amountCents = amountCents;
         return sum + amountCents;
       }, 0);
