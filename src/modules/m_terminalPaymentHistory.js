@@ -216,7 +216,8 @@ const buildTerminalPaymentHistoryModule = ({ connection, withTransaction, delive
       AND p.id IN (${paymentIds.map(() => "?").join(", ")})`, [shopId, ...paymentIds]) : [];
     const settlements = settlementIds.length ? await query(`SELECT s.* FROM cash_register_settlements s
       WHERE s.shopid = ? AND s.id IN (${settlementIds.map(() => "?").join(", ")})`, [shopId, ...settlementIds]) : [];
-    const settlementArchives = settlementIds.length ? await query(`${archiveProjection} WHERE a.shopid = ? AND ${visible}
+    const settlementArchives = settlementIds.length ? await query(`SELECT a.id, a.cash_register_settlement_id,
+      a.ordernumber, a.subtotal FROM archives a WHERE a.shopid = ? AND ${visible}
       AND a.cash_register_settlement_id IN (${settlementIds.map(() => "?").join(", ")}) ORDER BY a.id`, [shopId, ...settlementIds]) : [];
     const items = keys.map(key => {
       if (key.entry_type === "order") {
@@ -234,7 +235,8 @@ const buildTerminalPaymentHistoryModule = ({ connection, withTransaction, delive
         if (Number(settlement.shopid) !== shopId || amountCents < 0) fail("TERMINAL_INTERNAL_ERROR");
         const id = Number(settlement.id);
         const archivedOrders = settlementArchives.filter(row => Number(row.cash_register_settlement_id) === id)
-          .map(row => ({ ...row, id: Number(row.id), cash_register_settlement_id: id }));
+          .map(row => ({ id: Number(row.id), cash_register_settlement_id: id,
+            ordernumber: String(row.ordernumber || row.id), subtotal: row.subtotal }));
         if (!archivedOrders.length) return null;
         return { id, entryType: "settlement", rowKey: `settlement:${id}`, eventAt: dateString(key.event_at),
           isSettlement: true, cash_register_settlement_id: id,

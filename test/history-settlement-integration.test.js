@@ -17,7 +17,8 @@ const fixture = ({ totalAmount = '25.00' } = {}) => {
       payment_method: 'Especes', created_at: '2026-11-12 12:00:00',
     }]];
     if (/FROM archives a/.test(sql)) return [/cash_register_settlement_id IN/.test(sql) ? [
-      { id: '201', shopid: 7, cash_register_settlement_id: '123', subtotal: '15.00', ordernumber: 'A201' },
+      { id: '201', shopid: 7, cash_register_settlement_id: '123', subtotal: '15.00', ordernumber: 'A201',
+        client_order_token: 'private-client-token', token: 'private-receipt-token', phone: '+33612345678' },
       { id: '202', shopid: 7, cash_register_settlement_id: '123', subtotal: '10.00', ordernumber: 'A202' },
     ] : [{ id: 123, shopid: 7, subtotal: '9.00', ordernumber: 'A123' }]];
     if (/FROM stripe_terminal_payments p/.test(sql)) return [[{
@@ -45,6 +46,11 @@ test('history keeps one complete settlement before pagination alongside collidin
   assert.equal(group.payment_status, 'paid');
   assert.deepEqual(group.archivedOrders.map(row => [row.id, row.cash_register_settlement_id, row.subtotal]),
     [[201, 123, '15.00'], [202, 123, '10.00']]);
+  for (const child of group.archivedOrders) {
+    assert.equal(child.client_order_token, undefined);
+    assert.equal(child.token, undefined);
+    assert.equal(child.phone, undefined);
+  }
   const page = f.calls.find(call => /UNION ALL/.test(call.sql) && !/COUNT\(\*\) AS total/.test(call.sql));
   assert.match(page.sql, /a\.cash_register_settlement_id IS NULL/);
   assert.match(page.sql, /FROM cash_register_settlements s/);
