@@ -8,7 +8,8 @@ const { TerminalPaymentError, buildStripeTerminalPaymentService } = require("./s
 const { cardWaitExpired, staleTerminalCreation } = require("../helpers/terminalCardWait");
 const {
   buildTerminalCardTicket,
-  terminalCardReceiptDetails,
+  resolveTerminalCardTicket,
+  parseTerminalCardReceiptDetails,
   serializeTerminalCardReceiptDetails,
 } = require("../helpers/stripeTerminalCardTicket");
 
@@ -205,6 +206,7 @@ const buildStripeTerminalKioskPaymentService = ({
       fail("TERMINAL_STRIPE_ERROR");
     }
     if (intent.status === "succeeded") {
+      const cardTicket = await resolveTerminalCardTicket(session, intent, stripe);
       await store.finalizeKioskPaymentSucceeded({
         shopId: session.shopid,
         paymentId: session.id,
@@ -213,7 +215,7 @@ const buildStripeTerminalKioskPaymentService = ({
           ? intent.latest_charge
           : (intent.latest_charge || {}).id || null,
         cardReceiptDetails: serializeTerminalCardReceiptDetails(
-          terminalCardReceiptDetails(typeof intent.latest_charge === "object" ? intent.latest_charge : null),
+          parseTerminalCardReceiptDetails(cardTicket),
         ),
         timestamp: new Date(),
         payment: TERMINAL_PAYMENT_METHOD,

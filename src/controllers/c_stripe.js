@@ -56,7 +56,9 @@ const getTerminalStore = () => {
     )),
   };
 };
-const handleTerminalWebhookEvent = (event) => buildStripeTerminalWebhookHandler({ terminalStore: getTerminalStore() })(event);
+const handleTerminalWebhookEvent = (event) => buildStripeTerminalWebhookHandler({
+  terminalStore: getTerminalStore(), stripe: { get paymentIntents() { return getStripe().paymentIntents; } },
+})(event);
 
 const syncStripeAccountStatus = async (shop, stripeAccount) => {
   const status = {
