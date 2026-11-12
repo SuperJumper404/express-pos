@@ -60,6 +60,11 @@ const archiveSqlRepository = {
   linkTerminalAttachmentsToArchive: ({ shopId, orderId, archiveId, connection }) => queryResult(connection,
     "UPDATE stripe_terminal_payment_attachments SET archive_id = ? WHERE shopid = ? AND order_id = ? AND archive_id IS NULL",
     [archiveId, shopId, orderId]),
+  findArchiveById: ({ archiveId, connection }) => queryResult(
+    connection,
+    "SELECT * FROM archives WHERE id = ? LIMIT 1",
+    [archiveId],
+  ).then((rows) => rows[0] || null),
   findOrderDetails: ({ orderId, connection }) => queryResult(
     connection,
     "SELECT * FROM orderdetail WHERE orderid = ? ORDER BY id FOR UPDATE",
@@ -388,6 +393,8 @@ const buildOrderArchiveModule = ({
   createToken = nanoid,
   loyalty = repository === archiveSqlRepository ? require('./m_loyalty').buildLoyalty() : null,
 } = {}) => {
+  const legacyArchiveCall = Symbol("legacyArchiveCall");
+
   const hydrateActiveDetails = async (rows, orderId, connection) => {
     const detailIds = rows.map((row) => row.orderDetailsId).filter(Boolean);
     const snapshots = await repository.findActiveSnapshots({ detailIds, connection });
@@ -430,181 +437,242 @@ const buildOrderArchiveModule = ({
     });
   };
 
-  const mArchiveOrder = (id, paymentMethod, shopId, discount = {}, operatorId) => runInTransaction(
-    async (connection) => {
-      if (shopId != null && repository.lockShopForArchive) {
-        await repository.lockShopForArchive({ shopId, connection });
-      }
-      const order = await repository.findOrderForArchive({
-        orderId: id,
-        shopId,
-        connection,
-      });
-      if (!order) throw new Error("Commande introuvable");
-      if (order.delivery_id == null && repository.assertNoActiveTerminalPayment) {
-        await repository.assertNoActiveTerminalPayment({ connection, shopId: order.shopid, orderId: order.id });
-      }
+  const archiveOrderInTransaction = async ({
+    connection,
+    orderId,
+    paymentMethod,
+    shopId,
+    discount = {},
+    settlementId,
+    operatorId,
+    lockedOrder,
+  }, callMode) => {
+    if (!connection) {
+      throw new TypeError("archiveOrderInTransaction requires a connection");
+    }
+    if (lockedOrder && Number(lockedOrder.id) !== Number(orderId)) {
+      throw new Error("Locked order does not match orderId");
+    }
+    if (lockedOrder && shopId != null && Number(lockedOrder.shopid) !== Number(shopId)) {
+      throw new Error("Locked order does not match shopId");
+    }
+    if (!lockedOrder && shopId != null && repository.lockShopForArchive) {
+      await repository.lockShopForArchive({ shopId, connection });
+    }
+    const order = lockedOrder || await repository.findOrderForArchive({
+      orderId,
+      shopId,
+      connection,
+    });
+    if (!order) throw new Error("Commande introuvable");
 
-      let deliveryContext;
-      if (order.delivery_id != null) {
-        deliveryContext = await deliveryOrders.resolveDeliveryOrder({ shopId: order.shopid, deliveryId: order.delivery_id, connection, forUpdate: true });
-        if (order.payment_status === "unpaid" && deliveryContext.delivery.delivery_status === "issue") {
-          throw new DomainError(409, "DELIVERY_TRANSITION_INVALID", "Resolve the delivery issue before manual settlement");
-        }
-        if (Number(order.status) !== 3) {
-          throw new DomainError(409, "DELIVERY_PREPARATION_NOT_FINISHED", "Delivery preparation must be finished before archive");
-        }
-        if (discount.hiddenFromHistory) {
-          throw new DomainError(409, "DELIVERY_ARCHIVE_NOT_ALLOWED", "Delivery cancellation requires its explicit workflow");
-        }
-        assertDeliverySettlementDiscount(order, discount);
-        buildCashRegisterArchiveFields({ order, paymentMethod });
-        await assertNoPendingDeliveryTerminal({ orderId: order.id, shopId: order.shopid, connection });
-      }
+    if (order.delivery_id == null && repository.assertNoActiveTerminalPayment) {
+      await repository.assertNoActiveTerminalPayment({ connection, shopId: order.shopid, orderId: order.id });
+    }
 
-      const hiddenFromHistory = Boolean(discount.hiddenFromHistory);
-      if (hiddenFromHistory) assertTerminalOrderCanBeDiscarded(order);
-      if (hiddenFromHistory && Array.isArray(discount.allowedStatuses)) {
-        const allowedStatuses = new Set(discount.allowedStatuses.map(Number));
-        if (!allowedStatuses.has(Number(order.status))) {
-          throw new DomainError(
-            409,
-            "ORDER_DELETE_NOT_ALLOWED",
-            "Seules les commandes non pretes peuvent etre supprimees.",
-          );
-        }
+    let deliveryContext;
+    if (order.delivery_id != null) {
+      deliveryContext = await deliveryOrders.resolveDeliveryOrder({ shopId: order.shopid, deliveryId: order.delivery_id, connection, forUpdate: true });
+      if (order.payment_status === "unpaid" && deliveryContext.delivery.delivery_status === "issue") {
+        throw new DomainError(409, "DELIVERY_TRANSITION_INVALID", "Resolve the delivery issue before manual settlement");
       }
-      let terminalAllocation;
-      if (!hiddenFromHistory && order.stripe_terminal_payment_id != null) {
-        buildCashRegisterArchiveFields({ order });
-        terminalAllocation = await repository.findTerminalAllocationForArchive({
-          shopId: order.shopid, orderId: order.id, paymentId: order.stripe_terminal_payment_id, connection,
-        });
-        if (!terminalAllocation || !Number.isSafeInteger(terminalAllocation.amount_cents)
-          || terminalAllocation.amount_cents < 0) {
-          throw new DomainError(409, "TERMINAL_PAYMENT_NOT_SETTLED", "Le paiement terminal ne peut pas etre archive.");
-        }
+      if (Number(order.status) !== 3) {
+        throw new DomainError(409, "DELIVERY_PREPARATION_NOT_FINISHED", "Delivery preparation must be finished before archive");
       }
+      if (discount.hiddenFromHistory) {
+        throw new DomainError(409, "DELIVERY_ARCHIVE_NOT_ALLOWED", "Delivery cancellation requires its explicit workflow");
+      }
+      assertDeliverySettlementDiscount(order, discount);
+      buildCashRegisterArchiveFields({ order, paymentMethod });
+      await assertNoPendingDeliveryTerminal({ orderId: order.id, shopId: order.shopid, connection });
+    }
 
-      const orderDetails = await repository.findOrderDetails({
-        orderId: id,
-        connection,
+    const hiddenFromHistory = Boolean(discount.hiddenFromHistory);
+    if (hiddenFromHistory) assertTerminalOrderCanBeDiscarded(order);
+    if (hiddenFromHistory && Array.isArray(discount.allowedStatuses)) {
+      const allowedStatuses = new Set(discount.allowedStatuses.map(Number));
+      if (!allowedStatuses.has(Number(order.status))) {
+        throw new DomainError(
+          409,
+          "ORDER_DELETE_NOT_ALLOWED",
+          "Seules les commandes non pretes peuvent etre supprimees.",
+        );
+      }
+    }
+    let terminalAllocation;
+    if (!hiddenFromHistory && order.stripe_terminal_payment_id != null) {
+      buildCashRegisterArchiveFields({ order });
+      terminalAllocation = await repository.findTerminalAllocationForArchive({
+        shopId: order.shopid, orderId: order.id, paymentId: order.stripe_terminal_payment_id, connection,
       });
-      if (deliveryContext) {
-        const view = deliveryOrders.toDeliveryView(deliveryContext);
-        const products = orderDetails.reduce((sum, detail) => assertCents(sum + toCents(detail.total)), 0);
-        if (assertCents(products + view.financials.delivery_charge.feeCents) !== toCents(order.subtotal)
-          || (terminalAllocation && terminalAllocation.amount_cents !== toCents(order.subtotal))) {
-          throw new DomainError(409, "DELIVERY_TOTAL_MISMATCH", "Delivery settlement must match its accepted total");
-        }
+      if (!terminalAllocation || !Number.isSafeInteger(terminalAllocation.amount_cents)
+        || terminalAllocation.amount_cents < 0) {
+        throw new DomainError(409, "TERMINAL_PAYMENT_NOT_SETTLED", "Le paiement terminal ne peut pas etre archive.");
       }
-      let loyaltyDiscount;
-      if (loyalty && !hiddenFromHistory && !terminalAllocation && order.payment_status !== 'paid') {
-        const base = applyArchiveDiscountToDetails({ order, orderDetails, discount: deliveryContext ? {} : discount });
-        const subtotalCents = cents(base.archiveDiscountFields.subtotal == null ? order.subtotal : base.archiveDiscountFields.subtotal);
-        loyaltyDiscount = await loyalty.getOrderDiscount({ connection, shopId: Number(order.shopid), orderId: order.id,
-          subtotalCents: subtotalCents + cents(base.archiveDiscountFields.discount_amount || 0), otherDiscountCents: cents(base.archiveDiscountFields.discount_amount || 0) });
-        if (loyaltyDiscount.discountCents && deliveryContext) throw new DomainError(409, 'LOYALTY_DELIVERY_REQUOTE_REQUIRED', 'Reward requires a new confirmed delivery quote');
-        if (loyaltyDiscount.discountCents) {
-          const gross = orderDetails.length ? orderDetails.reduce((sum, detail) => sum + cents(detail.total), 0) : cents(order.subtotal);
-          discount = { ...discount, discountType: 'amount', discountValue: (gross - subtotalCents + loyaltyDiscount.discountCents) / 100 };
-        }
+    }
+
+    const orderDetails = await repository.findOrderDetails({
+      orderId,
+      connection,
+    });
+    if (deliveryContext) {
+      const view = deliveryOrders.toDeliveryView(deliveryContext);
+      const products = orderDetails.reduce((sum, detail) => assertCents(sum + toCents(detail.total)), 0);
+      if (assertCents(products + view.financials.delivery_charge.feeCents) !== toCents(order.subtotal)
+        || (terminalAllocation && terminalAllocation.amount_cents !== toCents(order.subtotal))) {
+        throw new DomainError(409, "DELIVERY_TOTAL_MISMATCH", "Delivery settlement must match its accepted total");
       }
-      const discountApplication = applyArchiveDiscountToDetails({
-        order,
-        orderDetails,
-        discount: deliveryContext ? {} : terminalAllocation && orderDetails.length ? {
-          discountType: "amount",
-          discountValue: (orderDetails.reduce((sum, detail) => sum + cents(detail.total), 0)
-            - terminalAllocation.amount_cents) / 100,
-        } : terminalAllocation ? {} : discount,
-      });
-      if (!deliveryContext && terminalAllocation && !orderDetails.length) {
-        const discountAmount = (cents(order.subtotal) - terminalAllocation.amount_cents) / 100;
-        discountApplication.archiveDiscountFields = {
-          subtotal: terminalAllocation.amount_cents / 100, subtotal_before_discount: parseMoney(order.subtotal),
-          discount_type: "amount", discount_value: discountAmount, discount_amount: discountAmount,
-        };
+    }
+    let loyaltyDiscount;
+    if (loyalty && !hiddenFromHistory && !terminalAllocation && order.payment_status !== 'paid') {
+      const base = applyArchiveDiscountToDetails({ order, orderDetails, discount: deliveryContext ? {} : discount });
+      const subtotalCents = cents(base.archiveDiscountFields.subtotal == null ? order.subtotal : base.archiveDiscountFields.subtotal);
+      loyaltyDiscount = await loyalty.getOrderDiscount({ connection, shopId: Number(order.shopid), orderId: order.id,
+        subtotalCents: subtotalCents + cents(base.archiveDiscountFields.discount_amount || 0), otherDiscountCents: cents(base.archiveDiscountFields.discount_amount || 0) });
+      if (loyaltyDiscount.discountCents && deliveryContext) throw new DomainError(409, 'LOYALTY_DELIVERY_REQUOTE_REQUIRED', 'Reward requires a new confirmed delivery quote');
+      if (loyaltyDiscount.discountCents) {
+        const gross = orderDetails.length ? orderDetails.reduce((sum, detail) => sum + cents(detail.total), 0) : cents(order.subtotal);
+        discount = { ...discount, discountType: 'amount', discountValue: (gross - subtotalCents + loyaltyDiscount.discountCents) / 100 };
       }
-      const archivePaymentFields = hiddenFromHistory
-        ? buildHiddenArchivePaymentFields(order)
-        : buildCashRegisterArchiveFields({
-          order,
-          paymentMethod,
-        });
-      const archive = {
-        ...pickArchiveOrderFields(order),
-        ...discountApplication.archiveDiscountFields,
-        ...archivePaymentFields,
-        ...buildHiddenArchiveVisibilityFields(discount),
-        token: createToken(),
+    }
+    const discountApplication = applyArchiveDiscountToDetails({
+      order,
+      orderDetails,
+      discount: deliveryContext ? {} : terminalAllocation && orderDetails.length ? {
+        discountType: "amount",
+        discountValue: (orderDetails.reduce((sum, detail) => sum + cents(detail.total), 0)
+          - terminalAllocation.amount_cents) / 100,
+      } : terminalAllocation ? {} : discount,
+    });
+    if (!deliveryContext && terminalAllocation && !orderDetails.length) {
+      const discountAmount = (cents(order.subtotal) - terminalAllocation.amount_cents) / 100;
+      discountApplication.archiveDiscountFields = {
+        subtotal: terminalAllocation.amount_cents / 100, subtotal_before_discount: parseMoney(order.subtotal),
+        discount_type: "amount", discount_value: discountAmount, discount_amount: discountAmount,
       };
-      if (deliveryContext && order.payment_status === "unpaid") {
-        await recordRegisterSettlement({ current: deliveryContext, operatorId, paymentMethod, connection });
-      }
-      if (loyalty) {
-        if (hiddenFromHistory) await loyalty.release({ connection, shopId: Number(order.shopid), orderId: order.id });
-        else if (archive.payment_status === 'paid') await loyalty.settlePaidOrder({ connection,
-          shopId: Number(order.shopid), orderId: order.id, paymentKey: `counter:${order.id}`, paidCents: cents(archive.subtotal) });
-      }
-      const archiveResult = await repository.insertArchive({ archive, connection });
-      const archiveOrderId = archiveResult.insertId;
-      if (repository.linkTerminalAttachmentsToArchive) {
-        await repository.linkTerminalAttachmentsToArchive({ shopId: order.shopid, orderId: order.id, archiveId: archiveOrderId, connection });
-      }
-      if (deliveryContext) {
-        await deliveryOrders.archiveDeliveryOrder({ shopId: order.shopid, deliveryId: order.delivery_id,
-          archiveId: archiveOrderId, preparationStatus: order.status, connection });
-      }
+    }
+    const archivePaymentFields = hiddenFromHistory
+      ? buildHiddenArchivePaymentFields(order)
+      : buildCashRegisterArchiveFields({
+        order,
+        paymentMethod,
+      });
+    const archive = {
+      ...pickArchiveOrderFields(order),
+      ...discountApplication.archiveDiscountFields,
+      ...archivePaymentFields,
+      ...buildHiddenArchiveVisibilityFields(discount),
+      token: createToken(),
+    };
+    if (settlementId != null) archive.cash_register_settlement_id = settlementId;
+    if (deliveryContext && order.payment_status === "unpaid") {
+      await recordRegisterSettlement({ current: deliveryContext, operatorId, paymentMethod, connection });
+    }
+    if (loyalty) {
+      if (hiddenFromHistory) await loyalty.release({ connection, shopId: Number(order.shopid), orderId: order.id });
+      else if (archive.payment_status === 'paid') await loyalty.settlePaidOrder({ connection,
+        shopId: Number(order.shopid), orderId: order.id, paymentKey: `counter:${order.id}`, paidCents: cents(archive.subtotal) });
+    }
+    const archiveResult = await repository.insertArchive({ archive, connection });
+    const archiveOrderId = archiveResult.insertId;
+    if (repository.linkTerminalAttachmentsToArchive) {
+      await repository.linkTerminalAttachmentsToArchive({ shopId: order.shopid, orderId: order.id, archiveId: archiveOrderId, connection });
+    }
+    if (deliveryContext) {
+      await deliveryOrders.archiveDeliveryOrder({ shopId: order.shopid, deliveryId: order.delivery_id,
+        archiveId: archiveOrderId, preparationStatus: order.status, connection });
+    }
 
-      const detailIds = orderDetails.map((detail) => detail.id);
-      const activeSnapshots = await repository.findActiveSnapshots({
-        detailIds,
+    const detailIds = orderDetails.map((detail) => detail.id);
+    const activeSnapshots = await repository.findActiveSnapshots({
+      detailIds,
+      connection,
+    });
+    const snapshotsByDetail = groupBy(activeSnapshots, "orderdetail_id");
+
+    const archivedDetails = [];
+
+    for (const detail of discountApplication.details) {
+      const archiveDetail = {
+        orderId: archiveOrderId,
+        productid: detail.productid,
+        qty: detail.qty,
+        total: detail.total,
+        price: detail.price,
+        vat_rate: detail.vat_rate,
+        unit_price_ht: detail.unit_price_ht,
+        unit_vat: detail.unit_vat,
+        total_ht: detail.total_ht,
+        total_vat: detail.total_vat,
+      };
+      const archiveDetailResult = await repository.insertArchiveDetail({
+        detail: archiveDetail,
         connection,
       });
-      const snapshotsByDetail = groupBy(activeSnapshots, "orderdetail_id");
-
-      for (const detail of discountApplication.details) {
-        const archiveDetailResult = await repository.insertArchiveDetail({
-          detail: {
-            orderId: archiveOrderId,
-            productid: detail.productid,
-            qty: detail.qty,
-            total: detail.total,
-            price: detail.price,
-            vat_rate: detail.vat_rate,
-            unit_price_ht: detail.unit_price_ht,
-            unit_vat: detail.unit_vat,
-            total_ht: detail.total_ht,
-            total_vat: detail.total_vat,
+      archivedDetails.push({ id: archiveDetailResult.insertId, ...archiveDetail });
+      for (const snapshot of snapshotsByDetail.get(detail.id) || []) {
+        await repository.insertArchiveSnapshot({
+          snapshot: {
+            archivesdetail_id: archiveDetailResult.insertId,
+            product_customization_step_id: snapshot.product_customization_step_id,
+            product_customization_step_choice_id:
+              snapshot.product_customization_step_choice_id,
+            step_name: snapshot.step_name,
+            step_position: snapshot.step_position,
+            choice_type: snapshot.choice_type,
+            choice_name: snapshot.choice_name,
+            choice_position: snapshot.choice_position,
+            unit_extra_price: snapshot.unit_extra_price,
+            linked_product_id: snapshot.linked_product_id,
+            created: snapshot.created,
           },
           connection,
         });
-        for (const snapshot of snapshotsByDetail.get(detail.id) || []) {
-          await repository.insertArchiveSnapshot({
-            snapshot: {
-              archivesdetail_id: archiveDetailResult.insertId,
-              product_customization_step_id: snapshot.product_customization_step_id,
-              product_customization_step_choice_id:
-                snapshot.product_customization_step_choice_id,
-              step_name: snapshot.step_name,
-              step_position: snapshot.step_position,
-              choice_type: snapshot.choice_type,
-              choice_name: snapshot.choice_name,
-              choice_position: snapshot.choice_position,
-              unit_extra_price: snapshot.unit_extra_price,
-              linked_product_id: snapshot.linked_product_id,
-              created: snapshot.created,
-            },
-            connection,
-          });
-        }
       }
+    }
 
-      await repository.deleteActiveSnapshots({ detailIds, connection });
-      await repository.deleteLegacyCustomizations({ orderId: id, connection });
-      await repository.deleteOrderDetails({ orderId: id, connection });
-      return repository.deleteOrder({ orderId: id, connection });
+    let persistedArchive = { id: archiveOrderId, ...archive };
+    let persistedDetails = archivedDetails;
+    if (callMode !== legacyArchiveCall) {
+      if (typeof repository.findArchiveById !== "function"
+        || typeof repository.findArchiveDetailsByArchiveId !== "function") {
+        throw new TypeError("Archive repository requires read-back interfaces");
+      }
+      persistedArchive = await repository.findArchiveById({
+        archiveId: archiveOrderId,
+        connection,
+      });
+      persistedDetails = await repository.findArchiveDetailsByArchiveId({
+        archiveId: archiveOrderId,
+        connection,
+      });
+      if (!persistedArchive) throw new Error("Archive introuvable apres insertion");
+    }
+
+    await repository.deleteActiveSnapshots({ detailIds, connection });
+    await repository.deleteLegacyCustomizations({ orderId, connection });
+    await repository.deleteOrderDetails({ orderId, connection });
+    await repository.deleteOrder({ orderId, connection });
+
+    return {
+      archiveId: archiveOrderId,
+      token: persistedArchive.token,
+      archive: persistedArchive,
+      details: persistedDetails,
+    };
+  };
+
+  const mArchiveOrder = (id, paymentMethod, shopId, discount = {}, operatorId) => runInTransaction(
+    async (connection) => {
+      await archiveOrderInTransaction({
+        connection,
+        orderId: id,
+        paymentMethod,
+        shopId,
+        discount,
+        operatorId,
+      }, legacyArchiveCall);
+      return { affectedRows: 1 };
     },
   );
 
@@ -629,6 +697,7 @@ const buildOrderArchiveModule = ({
   };
 
   return {
+    archiveOrderInTransaction,
     hydrateArchivedDetails,
     mArchiveOrder,
     mDetailArchivedOrder,
@@ -1156,30 +1225,10 @@ module.exports = {
   },
   mAllArchivedOrders: (shopid, { omitNewDeliveries = false } = {}) => {
     return new Promise((resolve, reject) => {
+      const { sql, params } = buildAllArchivedOrdersQuery(shopid, { omitNewDeliveries });
       conn.query(
-        `SELECT archives.*, CAST(archives.delivery_id AS CHAR) AS delivery_id,
-                CAST(archives.customer_account_id AS CHAR) AS customer_account_id,
-                service_points.name AS service_point_name,
-                CASE WHEN archives.payment_provider = 'stripe_terminal'
-                  AND terminal_payment.status = 'succeeded'
-                THEN ROUND(archives.subtotal * 100) ELSE NULL END AS stripe_terminal_amount_cents,
-                CASE WHEN archives.payment_provider = 'stripe_terminal'
-                  AND terminal_payment.status = 'succeeded'
-                THEN terminal_payment.stripe_charge_id ELSE NULL END AS stripe_terminal_charge_id
-                ,CASE WHEN archives.payment_provider = 'stripe_terminal'
-                  AND terminal_payment.status = 'succeeded'
-                THEN terminal_payment.card_receipt_details ELSE NULL END AS stripe_terminal_card_receipt_details,
-                terminal_payment.reader_label AS terminal_reader_label
-         FROM archives
-         LEFT JOIN service_points ON service_points.id = archives.service_point_id
-         LEFT JOIN stripe_terminal_payments terminal_payment
-           ON terminal_payment.id = archives.stripe_terminal_payment_id
-           AND terminal_payment.shopid = archives.shopid
-         WHERE archives.shopid = ?
-           ${omitNewDeliveries ? "AND archives.delivery_id IS NULL AND COALESCE(archives.fulfillment_type,'') <> 'delivery'" : ""}
-           AND COALESCE(archives.hidden_from_history, 0) = 0
-         ORDER BY archives.archived_at DESC, archives.id DESC`,
-        [shopid],
+        sql,
+        params,
         (err, result) => {
           if (!err) {
             resolve(result);
@@ -1349,6 +1398,39 @@ module.exports = {
   },
 };
 
+const buildAllArchivedOrdersQuery = (shopid, { omitNewDeliveries = false } = {}) => ({
+  sql: `SELECT archives.*, CAST(archives.delivery_id AS CHAR) AS delivery_id,
+                CAST(archives.customer_account_id AS CHAR) AS customer_account_id,
+                service_points.name AS service_point_name,
+                CASE WHEN archives.payment_provider = 'stripe_terminal'
+                  AND terminal_payment.status = 'succeeded'
+                THEN ROUND(archives.subtotal * 100) ELSE NULL END AS stripe_terminal_amount_cents,
+                CASE WHEN archives.payment_provider = 'stripe_terminal'
+                  AND terminal_payment.status = 'succeeded'
+                THEN terminal_payment.stripe_charge_id ELSE NULL END AS stripe_terminal_charge_id
+                ,CASE WHEN archives.payment_provider = 'stripe_terminal'
+                  AND terminal_payment.status = 'succeeded'
+                THEN terminal_payment.card_receipt_details ELSE NULL END AS stripe_terminal_card_receipt_details,
+                terminal_payment.reader_label AS terminal_reader_label,
+                settlements.table_reference AS settlement_table_reference,
+                settlements.total_amount AS settlement_total_amount,
+                settlements.payment_method AS settlement_payment_method,
+                settlements.created_at AS settlement_created_at
+         FROM archives
+         LEFT JOIN service_points ON service_points.id = archives.service_point_id
+         LEFT JOIN stripe_terminal_payments terminal_payment
+           ON terminal_payment.id = archives.stripe_terminal_payment_id
+           AND terminal_payment.shopid = archives.shopid
+         LEFT JOIN cash_register_settlements AS settlements
+           ON settlements.id = archives.cash_register_settlement_id
+           AND settlements.shopid = archives.shopid
+         WHERE archives.shopid = ?
+           ${omitNewDeliveries ? "AND archives.delivery_id IS NULL AND COALESCE(archives.fulfillment_type,'') <> 'delivery'" : ""}
+           AND COALESCE(archives.hidden_from_history, 0) = 0
+         ORDER BY archives.archived_at DESC, archives.id DESC`,
+  params: [shopid],
+});
+
 const legacyAllArchivedOrdersWithDetails = module.exports.mAllArchivedOrdersWithDetails;
 const legacyAllArchivedOrders = module.exports.mAllArchivedOrders;
 const legacyAllOrders = module.exports.mAllOrder;
@@ -1393,6 +1475,8 @@ module.exports.collectDeliveryOrderPayment = ({ orderId, shopId, paymentMethod, 
     paymentKey: `counter:${orderId}`, paidCents: toCents(order.subtotal) });
   return queryResult(connection, "UPDATE orders SET ? WHERE shopid = ? AND id = ? AND payment_status = 'unpaid'", [buildCashRegisterCollectionFields(paymentMethod), shopId, orderId]);
 });
+module.exports.archiveOrderInTransaction = orderArchiveModule.archiveOrderInTransaction;
+module.exports.buildAllArchivedOrdersQuery = buildAllArchivedOrdersQuery;
 module.exports.buildOrderArchiveModule = buildOrderArchiveModule;
 module.exports.pickArchiveOrderFields = pickArchiveOrderFields;
 module.exports.mArchiveOrder = orderArchiveModule.mArchiveOrder;

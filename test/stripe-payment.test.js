@@ -1897,7 +1897,10 @@ const runCashRegisterArchiveContract = async () => {
     getStripe: () => ({
       paymentIntents: {
         retrieve: async () => ({ id: "pi_42", status: "requires_payment" }),
-        cancel: async (id) => stripeCalls.push(["cancel", id]),
+        cancel: async (id) => {
+          stripeCalls.push(["cancel", id]);
+          return { id, status: "canceled" };
+        },
       },
       charges: { retrieve: async () => null },
     }),
@@ -2055,7 +2058,28 @@ const runCashRegisterArchiveContract = async () => {
     getStripe: () => ({
       paymentIntents: {
         retrieve: async () => ({ id: "pi_42", status: "requires_payment" }),
-        cancel: async () => {},
+        cancel: async () => ({ id: "pi_42", status: "processing" }),
+      },
+      charges: { retrieve: async () => null },
+    }),
+    markPaymentSucceeded: harness.payments.markPaymentSucceeded,
+    markStripeOrderPayAtCounter: harness.payments.markStripeOrderPayAtCounter,
+    findOrderById: async () => [harness.getState().orders[0]],
+  });
+  await assert.rejects(
+    () => sync(harness.getState().orders[0]),
+    (error) => error.code === "STRIPE_PAYMENT_NOT_SETTLED",
+  );
+  assert.strictEqual(harness.getState().orders[0].payment_status, "requires_payment");
+  assert.strictEqual(harness.getState().reservations[0].status, "reserved");
+  assert.strictEqual(harness.getState().movements.length, 0);
+
+  harness = makeStripeLifecycleHarness();
+  sync = buildPendingStripeArchiveSync({
+    getStripe: () => ({
+      paymentIntents: {
+        retrieve: async () => ({ id: "pi_42", status: "requires_payment" }),
+        cancel: async () => ({ id: "pi_42", status: "canceled" }),
       },
       charges: { retrieve: async () => null },
     }),

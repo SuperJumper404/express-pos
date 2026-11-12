@@ -19,6 +19,37 @@ const isTemporaryCounterPayment = (order = {}) => {
 const isPaymentAlreadyCollected = (order = {}) =>
   order.payment_status === PAYMENT_STATUSES.PAID && !isTemporaryCounterPayment(order);
 
+const isCashRegisterOrderDueAndArchivable = (order = {}) => {
+  if (Number(order.status) !== 3) return false;
+  if (order.payment_status === "unpaid") return true;
+  if (order.payment_status === PAYMENT_STATUSES.PAID) {
+    return isTemporaryCounterPayment(order);
+  }
+  if (order.payment_status !== PAYMENT_STATUSES.REQUIRES_PAYMENT) return false;
+  return !(order.payment_provider === "stripe"
+    && order.stock_reservation_status === "released");
+};
+
+const CASH_REGISTER_DUE_AND_ARCHIVABLE_SQL = `(
+  orders.payment_status = 'unpaid'
+  OR (
+    orders.payment_status = 'requires_payment'
+    AND NOT (
+      COALESCE(orders.payment_provider, '') = 'stripe'
+      AND COALESCE(stock_reservations.stock_reservation_status, '') = 'released'
+    )
+  )
+  OR (
+    orders.payment_status = 'paid'
+    AND (
+      LOWER(COALESCE(orders.payment, '')) LIKE '%comptoir%'
+      OR LOWER(COALESCE(orders.payment, '')) LIKE '%encaisser%'
+      OR LOWER(COALESCE(orders.used_payment_method, '')) LIKE '%comptoir%'
+      OR LOWER(COALESCE(orders.used_payment_method, '')) LIKE '%encaisser%'
+    )
+  )
+)`;
+
 const shouldCancelPendingStripePayment = (order = {}) =>
   order.payment_status === PAYMENT_STATUSES.REQUIRES_PAYMENT &&
   order.payment_provider === "stripe" &&
@@ -118,6 +149,8 @@ module.exports = {
   PAYMENT_STATUSES,
   buildCashRegisterCollectionFields,
   buildCashRegisterArchiveFields,
+  CASH_REGISTER_DUE_AND_ARCHIVABLE_SQL,
+  isCashRegisterOrderDueAndArchivable,
   isPaymentAlreadyCollected,
   shouldCancelPendingStripePayment,
 };

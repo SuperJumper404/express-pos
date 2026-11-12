@@ -162,8 +162,10 @@ const buildPendingStripeArchiveSync = ({
     return refreshedOrder;
   }
 
-  if (paymentIntent.status !== "canceled") {
-    await stripe.paymentIntents.cancel(paymentIntentId);
+  const canceledIntent = paymentIntent.status === "canceled"
+    ? paymentIntent : await stripe.paymentIntents.cancel(paymentIntentId);
+  if (!canceledIntent || canceledIntent.status !== "canceled") {
+    throw stripePaymentNotSettledError();
   }
 
   const transition = await commitPayAtCounter(order.id, order.shopid, paymentIntentId);

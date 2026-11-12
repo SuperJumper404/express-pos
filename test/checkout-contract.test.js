@@ -2730,7 +2730,7 @@ const cloneArchiveState = (state) => ({
   nextArchiveDetailId: state.nextArchiveDetailId,
 });
 
-const makeArchiveHarness = ({ failAfterActiveDeletion = false } = {}) => {
+const makeArchiveHarness = ({ failAfterActiveDeletion = false, loyalty = null } = {}) => {
   let state = {
     orders: [{
       id: 42,
@@ -2810,11 +2810,13 @@ const makeArchiveHarness = ({ failAfterActiveDeletion = false } = {}) => {
     nextArchiveDetailId: 200,
   };
   const events = [];
+  const repositoryConnections = [];
+  const transactionConnection = { transaction: true };
   const withTransaction = async (work) => {
     const before = cloneArchiveState(state);
     events.push("begin");
     try {
-      const result = await work({ transaction: true });
+      const result = await work(transactionConnection);
       events.push("commit");
       return result;
     } catch (error) {
@@ -2824,18 +2826,27 @@ const makeArchiveHarness = ({ failAfterActiveDeletion = false } = {}) => {
     }
   };
   const repository = {
+    lockShopForArchive: async () => ({ id: 7 }),
     findOrderForArchive: async ({ orderId, shopId }) => state.orders.find(
       (row) => row.id === Number(orderId) && (shopId == null || row.shopid === Number(shopId)),
     ) || null,
     insertArchive: async ({ archive }) => {
       const id = state.nextArchiveId++;
-      state.archives.push({ id, ...archive });
+      state.archives.push({
+        id,
+        ...archive,
+        archived_at: "2026-09-27 14:15:16.123456",
+      });
       events.push(["insert-archive", id]);
       return { insertId: id };
     },
     linkTerminalAttachmentsToArchive: async ({ shopId, orderId, archiveId, connection }) => {
-      assert.strictEqual(connection.transaction, true);
+      assert.ok([true, 'caller-owned'].includes(connection.transaction));
       events.push(['link-terminal-attachments', shopId, orderId, archiveId]);
+    },
+    findArchiveById: async ({ archiveId }) => {
+      events.push(["read-archive", archiveId]);
+      return state.archives.find((row) => row.id === Number(archiveId)) || null;
     },
     findOrderDetails: async ({ orderId }) => state.details.filter(
       (row) => row.orderid === Number(orderId),
@@ -2846,9 +2857,18 @@ const makeArchiveHarness = ({ failAfterActiveDeletion = false } = {}) => {
         || left.choice_position - right.choice_position),
     insertArchiveDetail: async ({ detail }) => {
       const id = state.nextArchiveDetailId++;
-      state.archiveDetails.push({ id, ...detail });
+      state.archiveDetails.push({
+        id,
+        ...detail,
+        price: Number(detail.price).toFixed(2),
+        total: Number(detail.total).toFixed(2),
+      });
       events.push(["insert-archive-detail", id]);
       return { insertId: id };
+    },
+    findArchiveDetailsByArchiveId: async ({ archiveId }) => {
+      events.push(["read-archive-details", archiveId]);
+      return state.archiveDetails.filter((row) => row.orderId === Number(archiveId));
     },
     insertArchiveSnapshot: async ({ snapshot }) => {
       state.archiveSnapshots.push({ id: state.archiveSnapshots.length + 1, ...snapshot });
@@ -2900,16 +2920,197 @@ const makeArchiveHarness = ({ failAfterActiveDeletion = false } = {}) => {
       .sort((left, right) => left.step_position - right.step_position
         || left.choice_position - right.choice_position),
   };
+  const trackedRepository = Object.fromEntries(Object.entries(repository).map(
+    ([name, operation]) => [name, async (options) => {
+      repositoryConnections.push({ name, connection: options.connection });
+      return operation(options);
+    }],
+  ));
   const orderModule = buildOrderArchiveModule({
-    repository,
+    repository: trackedRepository,
     withTransaction,
     createToken: () => "archive-token-42",
+    loyalty,
   });
   return {
     orderModule,
     events,
     getState: () => state,
+    repositoryConnections,
+    withTransaction,
   };
+};
+
+const runArchiveConnectionPreconditionContract = async () => {
+  const harness = makeArchiveHarness();
+  await assert.rejects(
+    () => harness.orderModule.archiveOrderInTransaction({
+      orderId: 42,
+      paymentMethod: "Carte",
+      shopId: 7,
+      discount: {},
+      settlementId: 501,
+    }),
+    /connection/i,
+  );
+  assert.deepStrictEqual(harness.repositoryConnections, []);
+  assert.deepStrictEqual(harness.events, []);
+  assert.strictEqual(harness.getState().orders.length, 1);
+  assert.strictEqual(harness.getState().archives.length, 0);
+};
+
+const runLockedArchiveOrderBoundaryContracts = async () => {
+  let harness = makeArchiveHarness();
+  let lockedOrder = { ...harness.getState().orders[0], id: 43 };
+  await assert.rejects(
+    () => harness.orderModule.archiveOrderInTransaction({
+      connection: { transaction: "caller-owned" },
+      orderId: 42,
+      paymentMethod: "Carte",
+      shopId: 7,
+      discount: {},
+      lockedOrder,
+    }),
+    /locked order.*orderId/i,
+  );
+  assert.deepStrictEqual(harness.repositoryConnections, []);
+  assert.deepStrictEqual(harness.events, []);
+  assert.strictEqual(harness.getState().orders.length, 1);
+  assert.strictEqual(harness.getState().archives.length, 0);
+
+  harness = makeArchiveHarness();
+  lockedOrder = { ...harness.getState().orders[0], shopid: 8 };
+  await assert.rejects(
+    () => harness.orderModule.archiveOrderInTransaction({
+      connection: { transaction: "caller-owned" },
+      orderId: 42,
+      paymentMethod: "Carte",
+      shopId: 7,
+      discount: {},
+      lockedOrder,
+    }),
+    /locked order.*shopId/i,
+  );
+  assert.deepStrictEqual(harness.repositoryConnections, []);
+  assert.deepStrictEqual(harness.events, []);
+  assert.strictEqual(harness.getState().orders.length, 1);
+  assert.strictEqual(harness.getState().archives.length, 0);
+};
+
+const runArchivePrimitiveContracts = async () => {
+  let harness = makeArchiveHarness();
+  const connection = { transaction: "caller-owned" };
+  const result = await harness.orderModule.archiveOrderInTransaction({
+    connection,
+    orderId: 42,
+    paymentMethod: "Carte",
+    shopId: 7,
+    discount: {},
+    settlementId: 501,
+  });
+
+  assert.deepStrictEqual(harness.events, [
+    ["insert-archive", 100],
+    ['link-terminal-attachments', 7, 42, 100],
+    ["insert-archive-detail", 200],
+    ["insert-archive-snapshot", 200],
+    ["insert-archive-snapshot", 200],
+    ["insert-archive-detail", 201],
+    ["read-archive", 100],
+    ["read-archive-details", 100],
+    "delete-active-snapshots",
+    "delete-order-details",
+    "delete-order",
+  ]);
+  assert.ok(harness.repositoryConnections.length > 0);
+  assert.ok(harness.repositoryConnections.every((call) => call.connection === connection));
+  assert.strictEqual(harness.getState().archives[0].cash_register_settlement_id, 501);
+  assert.deepStrictEqual({
+    archiveId: result.archiveId,
+    token: result.token,
+    archive: {
+      id: result.archive.id,
+      cash_register_settlement_id: result.archive.cash_register_settlement_id,
+      archived_at: result.archive.archived_at,
+      subtotal: result.archive.subtotal,
+      token: result.archive.token,
+    },
+    details: result.details.map((detail) => ({
+      id: detail.id,
+      orderId: detail.orderId,
+      productid: detail.productid,
+      price: detail.price,
+      total: detail.total,
+    })),
+  }, {
+    archiveId: 100,
+    token: "archive-token-42",
+    archive: {
+      id: 100,
+      cash_register_settlement_id: 501,
+      archived_at: "2026-09-27 14:15:16.123456",
+      subtotal: 23,
+      token: "archive-token-42",
+    },
+    details: [
+      { id: 200, orderId: 100, productid: 10, price: "11.50", total: "23.00" },
+      { id: 201, orderId: 100, productid: 20, price: "5.00", total: "5.00" },
+    ],
+  });
+
+  harness = makeArchiveHarness();
+  await assert.rejects(
+    () => harness.withTransaction(async (outerConnection) => {
+      await harness.orderModule.archiveOrderInTransaction({
+        connection: outerConnection,
+        orderId: 42,
+        paymentMethod: "Carte",
+        shopId: 7,
+        discount: {},
+        settlementId: 501,
+        lockedOrder: harness.getState().orders[0],
+      });
+      throw new Error("caller transaction rollback");
+    }),
+    /caller transaction rollback/,
+  );
+  assert.deepStrictEqual(harness.events.filter((event) => typeof event === "string"), [
+    "begin",
+    "delete-active-snapshots",
+    "delete-order-details",
+    "delete-order",
+    "rollback",
+  ]);
+  assert.strictEqual(harness.getState().orders.length, 1);
+  assert.strictEqual(harness.getState().details.length, 2);
+  assert.strictEqual(harness.getState().activeSnapshots.length, 2);
+  assert.strictEqual(harness.getState().legacyCustomizations.length, 2);
+  assert.strictEqual(harness.getState().archives.length, 0);
+  assert.strictEqual(harness.getState().archiveDetails.length, 0);
+  assert.strictEqual(harness.getState().archiveSnapshots.length, 0);
+};
+
+const runSharedArchiveLoyaltyContracts = async () => {
+  const calls = [];
+  const loyalty = {
+    settlePaidOrder: async scope => calls.push(['settle', scope]),
+    release: async scope => calls.push(['release', scope]),
+  };
+  const harness = makeArchiveHarness({ loyalty });
+  const connection = { transaction: 'caller-owned' };
+  await harness.orderModule.archiveOrderInTransaction({
+    connection, orderId: 42, paymentMethod: 'Carte', shopId: 7, settlementId: 501,
+  });
+  assert.deepStrictEqual(calls, [['settle', { connection, shopId: 7, orderId: 42,
+    paymentKey: 'counter:42', paidCents: 2300 }]]);
+  assert(harness.events.some(event => Array.isArray(event) && event[0] === 'link-terminal-attachments'));
+  calls.length = 0;
+  const hidden = makeArchiveHarness({ loyalty });
+  await hidden.orderModule.mArchiveOrder(42, undefined, 7, { hiddenFromHistory: true });
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(calls[0][0], 'release');
+  assert.strictEqual(calls[0][1].connection.transaction, true);
+  assert.strictEqual(calls[0][1].orderId, 42);
 };
 
 const runArchiveSnapshotContracts = async () => {
@@ -3134,6 +3335,10 @@ runProductReadContracts()
   .then(runTransactionalCheckoutContracts)
   .then(runReservationContracts)
   .then(runCheckoutApiSurfaceContracts)
+  .then(runArchiveConnectionPreconditionContract)
+  .then(runLockedArchiveOrderBoundaryContracts)
+  .then(runArchivePrimitiveContracts)
+  .then(runSharedArchiveLoyaltyContracts)
   .then(runArchiveSnapshotContracts)
   .then(() => console.log("customization and checkout contracts passed"))
   .catch((error) => {

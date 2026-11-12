@@ -168,19 +168,35 @@ const buildTerminalPaymentHistoryModule = ({ connection, withTransaction, delive
     values.push(shopId);
     const paymentSearch = search ? "AND CONCAT_WS(' ', 'Paiement TPE', CONCAT('TPE #', p.id), p.status, p.amount_cents / 100, cashier.username, reader.label) LIKE ?" : "";
     if (search) values.push(`%${search}%`);
+    values.push(shopId);
+    const settlementSearch = search ? `AND EXISTS (SELECT 1 FROM archives child
+      WHERE child.shopid = s.shopid AND child.cash_register_settlement_id = s.id
+        AND COALESCE(child.hidden_from_history, 0) = 0
+        AND CONCAT_WS(' ', 'Encaissement table', s.table_reference, child.ordernumber,
+          child.customer, child.taken_by_name, child.prepared_by_name) LIKE ?)` : "";
+    if (search) values.push(`%${search}%`);
     const union = `SELECT a.id, 'order' AS entry_type, COALESCE(a.archived_at, a.created) AS event_at,
       CAST(a.ordernumber AS CHAR) AS reference, sp.name AS table_name, a.customer,
       a.taken_by_name, a.prepared_by_name, a.subtotal AS amount, a.payment_status, CAST(a.status AS CHAR) AS entry_status
-      FROM archives a ${archiveJoins} WHERE a.shopid = ? AND ${visible} ${archiveSearch}
+      FROM archives a ${archiveJoins} WHERE a.shopid = ? AND ${visible}
+        AND a.cash_register_settlement_id IS NULL ${archiveSearch}
       UNION ALL
       SELECT p.id, 'terminal_payment', COALESCE(p.confirmed_at, p.created_at), CONCAT('TPE #', p.id),
       NULL, NULL, cashier.username, NULL, p.amount_cents / 100, p.status, p.status
-      FROM stripe_terminal_payments p ${paymentDisplayJoins} WHERE p.shopid = ? AND p.payment_kind = 'standalone' ${paymentSearch}`;
+      FROM stripe_terminal_payments p ${paymentDisplayJoins} WHERE p.shopid = ? AND p.payment_kind = 'standalone' ${paymentSearch}
+      UNION ALL
+      SELECT s.id, 'settlement', s.created_at, CONCAT('Encaissement table ', s.table_reference),
+      s.table_reference, NULL, NULL, NULL, s.total_amount, 'paid', '3'
+      FROM cash_register_settlements s WHERE s.shopid = ?
+        AND EXISTS (SELECT 1 FROM archives child WHERE child.shopid = s.shopid
+          AND child.cash_register_settlement_id = s.id AND COALESCE(child.hidden_from_history, 0) = 0)
+        ${settlementSearch}`;
     const totalRows = await query(`SELECT COUNT(*) AS total FROM (${union}) history_entries`, values);
     const keys = await query(`SELECT * FROM (${union}) history_entries
       ORDER BY ${column} ${direction}, ${column === "event_at" ? "" : "event_at DESC, "}entry_type ASC, id DESC LIMIT ? OFFSET ?`, [...values, itemsPerPage, offset]);
     const orderIds = keys.filter(row => row.entry_type === "order").map(row => Number(row.id));
     const paymentIds = keys.filter(row => row.entry_type === "terminal_payment").map(row => Number(row.id));
+    const settlementIds = keys.filter(row => row.entry_type === "settlement").map(row => Number(row.id));
     let orders = orderIds.length ? await query(`${archiveProjection} WHERE a.shopid = ? AND ${visible}
       AND a.id IN (${orderIds.map(() => "?").join(", ")})`, [shopId, ...orderIds]) : [];
     const contexts = new Map();
@@ -198,11 +214,36 @@ const buildTerminalPaymentHistoryModule = ({ connection, withTransaction, delive
     }));
     const payments = paymentIds.length ? await query(`${historyPaymentProjection} WHERE p.shopid = ? AND p.payment_kind = 'standalone'
       AND p.id IN (${paymentIds.map(() => "?").join(", ")})`, [shopId, ...paymentIds]) : [];
+    const settlements = settlementIds.length ? await query(`SELECT s.* FROM cash_register_settlements s
+      WHERE s.shopid = ? AND s.id IN (${settlementIds.map(() => "?").join(", ")})`, [shopId, ...settlementIds]) : [];
+    const settlementArchives = settlementIds.length ? await query(`${archiveProjection} WHERE a.shopid = ? AND ${visible}
+      AND a.cash_register_settlement_id IN (${settlementIds.map(() => "?").join(", ")}) ORDER BY a.id`, [shopId, ...settlementIds]) : [];
     const items = keys.map(key => {
       if (key.entry_type === "order") {
         const order = orders.find(row => Number(row.id) === Number(key.id));
         return order && { ...order, entryType: "order", rowKey: `order:${order.id}`, eventAt: dateString(key.event_at) };
       }
+      if (key.entry_type === "settlement") {
+        const settlement = settlements.find(row => Number(row.id) === Number(key.id));
+        if (!settlement) return null;
+        let amountCents;
+        try {
+          if (settlement.total_amount == null || String(settlement.total_amount).trim() === "") throw new Error();
+          amountCents = toCents(settlement.total_amount);
+        } catch (error) { fail("TERMINAL_INTERNAL_ERROR"); }
+        if (Number(settlement.shopid) !== shopId || amountCents < 0) fail("TERMINAL_INTERNAL_ERROR");
+        const id = Number(settlement.id);
+        const archivedOrders = settlementArchives.filter(row => Number(row.cash_register_settlement_id) === id)
+          .map(row => ({ ...row, id: Number(row.id), cash_register_settlement_id: id }));
+        if (!archivedOrders.length) return null;
+        return { id, entryType: "settlement", rowKey: `settlement:${id}`, eventAt: dateString(key.event_at),
+          isSettlement: true, cash_register_settlement_id: id,
+          historyLabel: `Encaissement table ${settlement.table_reference}`,
+          ordernumber: `Encaissement table ${settlement.table_reference}`, username: settlement.table_reference,
+          subtotal: amountCents / 100, payment_status: "paid", status: 3,
+          payment: settlement.payment_method, used_payment_method: settlement.payment_method, archivedOrders };
+      }
+      if (key.entry_type !== "terminal_payment") fail("TERMINAL_INTERNAL_ERROR");
       const session = payments.find(row => Number(row.id) === Number(key.id));
       if (!session) return null;
       return { id: session.id, entryType: "terminal_payment", rowKey: `terminal-payment:${session.id}`, eventAt: dateString(key.event_at),
