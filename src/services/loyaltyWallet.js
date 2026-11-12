@@ -42,11 +42,15 @@ const buildWalletPayload = ({ program, member, shopId, shopName, offersUrl }) =>
   const rewards = (program.rewards || []).filter(reward => (!reward.expiresAt || Date.parse(reward.expiresAt) > Date.now()) && Number.isFinite(reward.points)).sort((a, b) => a.points - b.points);
   const usable = rewards.find(reward => reward.points <= available);
   const next = rewards.find(reward => reward.points > available);
+  const goals = rewards.filter(reward => Number.isSafeInteger(reward.points) && reward.points > 0);
+  const goal = goals.find(reward => reward.points > available) || goals[goals.length - 1];
+  const appleProgress = goal ? { value: Math.min(available, goal.points), max: goal.points,
+    ratio: Math.min(available / goal.points, 1), rewardName: goal.name } : null;
   return { name: program.name || "SmartEat", restaurantName: typeof shopName === 'string' && shopName.trim() ? shopName.trim() : program.name || 'SmartEat',
     active: program.enabled !== false, shopId, balance, available, qr: member.qr, cardNumber: member.cardNumber || member.card_number || null, walletAssetVersion: program.walletAssetVersion || null,
     walletMessage: Number(member.marketingConsent || member.marketing_consent) === 1 ? member.walletMessage || member.wallet_message || '' : '', offersUrl: safeUrl(offersUrl),
-    offer: usable ? `${usable.name} — ${usable.points} points (conditions dans SmartEat)` : "Découvrez vos récompenses dans SmartEat",
-    next: next ? `${next.name} à ${next.points} points` : "Tous les paliers atteints",
+    offer: usable ? `${usable.name} — ${usable.points} points (conditions dans SmartEat)` : "Découvrez vos récompenses dans SmartEat", hasAvailableReward: !!usable,
+    next: next ? `${next.name} à ${next.points} points` : "Tous les paliers atteints", appleProgress,
     logoUrl: program.logoUrl ? safeUrl(program.logoUrl) : null,
     backgroundColor: /^#[a-f0-9]{6}$/i.test(program.backgroundColor || "") ? program.backgroundColor : "#173A32",
     foregroundColor: /^#[a-f0-9]{6}$/i.test(program.foregroundColor || "") ? program.foregroundColor : "#FFFFFF" };
@@ -210,9 +214,11 @@ const buildLoyaltyWallet = ({ getConfig = readConfig, repository, request = json
       backgroundColor: rgb(payload.backgroundColor), foregroundColor: rgb(payload.foregroundColor), labelColor: rgb(payload.foregroundColor),
       webServiceURL: config.appleWebServiceUrl.replace(/\/$/, ""), authenticationToken: pass.auth_token,
       barcodes: [{ format: "PKBarcodeFormatQR", message: payload.qr, messageEncoding: "iso-8859-1", ...(payload.cardNumber ? { altText: payload.cardNumber } : {}) }],
-      storeCard: { primaryFields: [{ key: "points", label: "POINTS", value: payload.balance, changeMessage: "Votre solde est de %@ points." }],
-        secondaryFields: [{ key: "offer", label: "RÉCOMPENSE", value: payload.offer }], auxiliaryFields: [{ key: "next", label: "PROCHAIN PALIER", value: payload.next }, ...(payload.cardNumber ? [{ key: 'card', label: 'CARTE', value: payload.cardNumber }] : [])],
+      storeCard: { headerFields: [{ key: "points", label: "POINTS", value: payload.balance, changeMessage: "Votre solde est de %@ points." }],
+        secondaryFields: [{ key: "offer", label: "RÉCOMPENSE", value: payload.appleProgress
+          ? `${payload.appleProgress.rewardName} — ${payload.appleProgress.value} / ${payload.appleProgress.max} points` : payload.offer }],
         backFields: [{ key: "offers", label: "Voir mes offres", value: payload.offersUrl }, { key: "conditions", label: "Conditions", value: "Consultez SmartEat pour les conditions et la confirmation d’utilisation des points." },
+          ...(payload.hasAvailableReward ? [{ key: 'availableReward', label: 'Récompense disponible', value: payload.offer }] : []),
           { key: 'message', label: 'Votre restaurant', value: payload.walletMessage, changeMessage: '%@' }] } };
     const files = { "pass.json": Buffer.from(JSON.stringify(json)) };
     const artwork = payload.walletAssetVersion ? await require('./loyaltyWalletAssets').buildLoyaltyWalletAssets({ rootPath: config.appleAssetsPath }).readAssets({ shopId: payload.shopId, assetVersion: payload.walletAssetVersion }) : {};
@@ -225,6 +231,7 @@ const buildLoyaltyWallet = ({ getConfig = readConfig, repository, request = json
       }
       catch (error) { if (name === "icon.png" || name === "icon@2x.png") throw unavailable("WALLET_ASSETS_MISSING"); }
     }
+    Object.assign(files, require('./loyaltyWalletProgress').renderWalletProgress({ images: files, progress: payload.appleProgress, backgroundColor: payload.backgroundColor }));
     const manifest = {}; for (const [name, bytes] of Object.entries(files)) manifest[name] = crypto.createHash("sha1").update(bytes).digest("hex");
     files["manifest.json"] = Buffer.from(JSON.stringify(manifest));
     const folder = await fs.mkdtemp(path.join(os.tmpdir(), "smarteat-pass-"));

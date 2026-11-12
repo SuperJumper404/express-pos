@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test:reports": "node --test test/terminal-reports.test.js test/terminal-report-closure.test.js test/terminal-report-metrics.test.js && node test/cash-closure.test.js && node test/order-metrics-revenue-series.test.js && node test/payment-method-standardization.test.js",
-    "test:loyalty": "node test/customer-sms.test.js && node test/customer-global-identity.test.js && node test/checkout-payment-authority.test.js && node test/loyalty-domain.test.js && node test/loyalty-service.test.js && node test/loyalty-authorization.test.js && node test/loyalty-payment-hooks.test.js && node test/loyalty-wallet.test.js && node test/loyalty-wallet-signing.test.js && node test/loyalty-wallet-routes.test.js && node test/loyalty-wallet-worker.test.js && node test/loyalty-wallet-tags.test.js && node test/loyalty-lookup.test.js && node test/loyalty-table-enrollment.test.js && node test/loyalty-kiosk-checkout.test.js && node test/loyalty-wallet-assets.test.js && node test/loyalty-campaigns.test.js && node test/loyalty-campaign-worker.test.js && node test/loyalty-phone.test.js && node test/loyalty-phone-routes.test.js",
+    "test:loyalty": "node test/customer-sms.test.js && node test/customer-global-identity.test.js && node test/checkout-payment-authority.test.js && node test/loyalty-domain.test.js && node test/loyalty-service.test.js && node test/loyalty-authorization.test.js && node test/loyalty-payment-hooks.test.js && node test/loyalty-wallet.test.js && node --test test/loyalty-wallet-progress.test.js && node test/loyalty-wallet-signing.test.js && node test/loyalty-wallet-routes.test.js && node test/loyalty-wallet-worker.test.js && node test/loyalty-wallet-tags.test.js && node test/loyalty-lookup.test.js && node test/loyalty-table-enrollment.test.js && node test/loyalty-kiosk-checkout.test.js && node test/loyalty-wallet-assets.test.js && node test/loyalty-campaigns.test.js && node test/loyalty-campaign-worker.test.js && node test/loyalty-phone.test.js && node test/loyalty-phone-routes.test.js",
     "test:loyalty:db": "node test/loyalty.integration.test.js",
     "pretest": "npm run test:reports && node test/env-secret-scan.test.js && node --test test/pin-vault.test.js test/staff-pin-visibility.test.js && node test/google-delivery-places.test.js && node test/google-delivery-storage.test.js && node test/google-delivery-api.test.js && node --test test/terminal-card-receipt-recovery.test.js",
     "test:google:db": "node test/google-delivery-storage.integration.test.js && node test/google-delivery-journey.integration.test.js",
@@ -62,6 +62,7 @@
     "node-cache": "^5.1.2",
     "node-mailjet": "^3.3.1",
     "nodemon": "^2.0.7",
+    "pngjs": "7.0.0",
     "stripe": "^22.1.1"
   },
   "devDependencies": {
