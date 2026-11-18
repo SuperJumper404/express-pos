@@ -25,6 +25,7 @@ const fixture = () => {
       { shopid: 7, order_id: 12, terminal_payment_id: 41, amount_cents: 1000 },
       { shopid: 7, order_id: 31, terminal_payment_id: 41, amount_cents: 500 },
     ]];
+    if (sql.includes("FROM order_stock_reservations")) return [[]];
     if (sql.includes("FROM orders o")) return [clone(state.orders)];
     if (sql.includes("FROM stripe_terminal_payments p")) {
       return [Number(params[0]) === 7 && Number(params[1]) === 41 ? [clone(state.payment)] : []];
@@ -82,6 +83,20 @@ test("browser-independent success finalizes linked orders once under duplicate d
   assert(locks[0].sql.includes("FROM orders o"));
   assert.deepStrictEqual(locks[0].params, [7, 12, 31]);
   assert(locks[1].sql.includes("FROM stripe_terminal_payments p"));
+});
+
+test("duplicate kiosk webhook settles a no-stock checkout on the same connection", async () => {
+  const f = fixture();
+  f.state().payment.cashier_user_id = 0;
+  for (const order of f.state().orders) {
+    order.payment_status = "requires_payment";
+    order.payment_provider = "stripe_terminal";
+  }
+  await f.handle(f.event());
+  await f.handle(f.event());
+  assert.strictEqual(f.state().updates, 1);
+  assert.strictEqual(f.state().payment.status, "succeeded");
+  assert.deepStrictEqual(f.queries.filter(q => q.sql.includes("FROM order_stock_reservations")).map(q => q.params[0]), [12, 31]);
 });
 
 test("reader and stale failure events before or after success never finalize or regress payment", async () => {

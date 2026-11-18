@@ -52,7 +52,12 @@ const getTerminalStore = () => {
   return {
     ...buildStripeTerminalModule({ connection }),
     withTransaction: (work) => withTransaction((transaction) => work(
-      buildStripeTerminalModule({ connection: transaction }),
+      {
+        ...buildStripeTerminalModule({ connection: transaction }),
+        finalizeKioskPaymentSucceeded: buildStripeTerminalModule({
+          connection: transaction, loyalty: require("../modules/m_loyalty").buildLoyalty(),
+        }).finalizeKioskPaymentSucceeded,
+      },
     )),
   };
 };
