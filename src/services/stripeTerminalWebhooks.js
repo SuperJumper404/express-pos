@@ -41,7 +41,9 @@ const buildStripeTerminalWebhookHandler = ({ terminalStore, stripe }) => async (
         || (payment.payment_kind !== "standalone" && metadata.payment_kind === "standalone")) {
         throw new Error("Terminal payment mismatch");
       }
-      const finalize = payment.payment_kind === "standalone" ? store.finalizeStandalonePaymentSucceeded : store.finalizePaymentSucceeded;
+      let finalize = store.finalizePaymentSucceeded;
+      if (payment.payment_kind === "standalone") finalize = store.finalizeStandalonePaymentSucceeded;
+      else if (payment.cashier_user_id === 0) finalize = store.finalizeKioskPaymentSucceeded;
       const cardTicket = await resolveTerminalCardTicket(payment, intent, stripe);
       const result = await finalize({
         shopId, paymentId, stripePaymentIntentId: intent.id,

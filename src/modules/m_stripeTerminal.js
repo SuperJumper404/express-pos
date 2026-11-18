@@ -638,6 +638,14 @@ const buildStripeTerminalModule = ({ connection, lockContext = null, loyalty = n
     if (result.affectedRows !== 1) throw new Error("Terminal payment finalization incomplete");
     if (loyalty) for (const allocation of allocations) await loyalty.settlePaidOrder({ connection: loyaltyConnection,
       shopId: Number(shopId), orderId: allocation.order_id, paymentKey: `terminal:${paymentId}`, paidCents: allocation.amount_cents });
+    // Kiosk checkout reserves only tracked ingredients. Settle existing rows
+    // alongside the order, including a legitimate empty reservation set.
+    for (const allocation of allocations) {
+      await require("./m_checkout").finalizeReservations({
+        orderId: allocation.order_id, status: "commit", operator: 0,
+        existingReservationsOnly: true, connection,
+      });
+    }
     return { finalized: true };
   };
 
@@ -772,14 +780,15 @@ const buildStripeTerminalModule = ({ connection, lockContext = null, loyalty = n
 
   const listExpiredCardWaitPayments = ({ now = new Date() } = {}) => query(
     `SELECT p.* FROM stripe_terminal_payments p
-     WHERE p.status IN ('creating', 'processing') AND p.stripe_payment_intent_id IS NOT NULL
+     WHERE p.status IN ('creating', 'processing')
+       AND (p.stripe_payment_intent_id IS NOT NULL OR (p.cashier_user_id = 0 AND p.status = 'creating'))
        AND (p.card_wait_started_at <= ? OR (p.status = 'creating' AND p.card_wait_started_at IS NULL
          AND p.created_at <= ?)) ORDER BY COALESCE(p.card_wait_started_at, p.created_at), p.id`,
     [new Date(now.getTime() - CARD_WAIT_TIMEOUT_MS), new Date(now.getTime() - STALE_CREATION_TIMEOUT_MS)],
   );
 
   return {
-    listExpiredCardWaitPayments,
+    connection, listExpiredCardWaitPayments,
     async applyLoyaltyDiscounts({ shopId, orders, allocations }) {
       if (!loyalty) return { allocations, totalCents: allocations.reduce((sum, row) => sum + row.amountCents, 0) };
       const adjusted = [];

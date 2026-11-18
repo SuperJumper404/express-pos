@@ -702,7 +702,7 @@ const buildCheckoutModule = ({
   );
 
   const finalizeReservations = ({
-    orderId, status, operator, connection: suppliedConnection,
+    orderId, status, operator, connection: suppliedConnection, existingReservationsOnly = false,
   } = {}) => {
     if (!isPositiveId(orderId)) return Promise.reject(invalidRequest("order_id"));
     const action = status === "committed" ? "commit" : status === "released" ? "release" : status;
@@ -718,7 +718,7 @@ const buildCheckoutModule = ({
         orderId: Number(orderId),
         connection,
       });
-      if (action === "commit" && reservations.length === 0) {
+      if (action === "commit" && reservations.length === 0 && !existingReservationsOnly) {
         const order = await repository.lockOrderForReservationBackfill({
           orderId: Number(orderId),
           connection,
