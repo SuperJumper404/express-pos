@@ -1,0 +1,81 @@
+name: Deploy backend to Google VM
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Action sur la VM Google
+        type: choice
+        required: true
+        default: preflight
+        options:
+          - preflight
+          - deploy
+
+permissions:
+  contents: read
+
+concurrency:
+  group: google-vm-backend
+  cancel-in-progress: false
+
+jobs:
+  production:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Verify SSH identity and run Docker Compose
+        shell: bash
+        env:
+          VM_KEY: ${{ secrets.GOOGLE_VM_SSH_KEY }}
+          VM_KNOWN_HOSTS: ${{ secrets.GOOGLE_VM_KNOWN_HOSTS }}
+          OPERATION: ${{ inputs.operation }}
+        run: |
+          set -euo pipefail
+          : "${VM_KEY:?Missing GOOGLE_VM_SSH_KEY}" "${VM_KNOWN_HOSTS:?Missing GOOGLE_VM_KNOWN_HOSTS}"
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VM_KEY" > ~/.ssh/google_vm
+          printf '%s\n' "$VM_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+            -i ~/.ssh/google_vm ns_ayness@34.61.179.207 \
+            bash -se -- "$OPERATION" "$GITHUB_SHA" <<'REMOTE'
+          set -euo pipefail
+          cd "$HOME/smarteat/backend"
+          exec 9>"$HOME/.google-deploy-backend.lock"
+          flock -w 60 9
+          test "$(git remote get-url origin)" = "https://github.com/SuperJumper404/express-pos.git"
+          test "$(git symbolic-ref --short HEAD)" = master
+          test -s .env.production
+          test -s compose.vps.yml
+          if grep -q "encrypted:" .env.production; then exit 1; fi
+          export APP_ENV=production ENV_FILE=.env.production
+          compose=(docker compose -p backend --env-file .env.production -f compose.yml -f compose.vps.yml)
+          "${compose[@]}" config --quiet
+          "${compose[@]}" ps
+          if [[ "$1" == preflight ]]; then
+            curl -fsS --max-time 10 http://127.0.0.1:5005/baseurl/api/v1/testapi -o /dev/null
+            exit 0
+          fi
+          git fetch origin master
+          git merge-base --is-ancestor "$2" FETCH_HEAD
+          git merge-base --is-ancestor HEAD "$2"
+          # Refuse a source update that would replace the VM's production configuration.
+          git diff --quiet HEAD "$2" -- .env.production compose.vps.yml || {
+            echo "Production configuration changed upstream; reconcile it on the VM first." >&2
+            exit 1
+          }
+          git merge --ff-only "$2"
+          "${compose[@]}" config --quiet
+          "${compose[@]}" up -d --no-deps --force-recreate app
+          for attempt in $(seq 1 180); do
+            if curl -fsS --max-time 4 http://127.0.0.1:5005/baseurl/api/v1/testapi -o /dev/null; then
+              printf 'Healthy at commit %s\n' "$(git rev-parse HEAD)"
+              exit 0
+            fi
+            sleep 5
+          done
+          "${compose[@]}" ps
+          exit 1
+          REMOTE
