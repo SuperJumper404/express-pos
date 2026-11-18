@@ -28,18 +28,18 @@ jobs:
       - name: Verify SSH identity and run Docker Compose
         shell: bash
         env:
-          VM_KEY: ${{ secrets.GOOGLE_VM_SSH_KEY }}
+          SSHPASS: ${{ secrets.GOOGLE_VM_PASSWORD }}
           VM_KNOWN_HOSTS: ${{ secrets.GOOGLE_VM_KNOWN_HOSTS }}
           OPERATION: ${{ inputs.operation }}
         run: |
           set -euo pipefail
-          : "${VM_KEY:?Missing GOOGLE_VM_SSH_KEY}" "${VM_KNOWN_HOSTS:?Missing GOOGLE_VM_KNOWN_HOSTS}"
+          : "${SSHPASS:?Missing GOOGLE_VM_PASSWORD}" "${VM_KNOWN_HOSTS:?Missing GOOGLE_VM_KNOWN_HOSTS}"
+          if ! command -v sshpass >/dev/null; then sudo apt-get update -qq && sudo apt-get install -y sshpass; fi
           umask 077
           mkdir -p ~/.ssh
-          printf '%s\n' "$VM_KEY" > ~/.ssh/google_vm
           printf '%s\n' "$VM_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
-            -i ~/.ssh/google_vm ns_ayness@34.61.179.207 \
+          sshpass -e ssh -o StrictHostKeyChecking=yes -o PreferredAuthentications=password \
+            -p 22 ns_ayness@34.61.179.207 \
             bash -se -- "$OPERATION" "$GITHUB_SHA" <<'REMOTE'
           set -euo pipefail
           cd "$HOME/smarteat/backend"
