@@ -1,5 +1,6 @@
 const express = require("express");
 const {
+  callOrders,
   listPoints,
   listTables,
   listKiosks,
@@ -19,6 +20,7 @@ const routers = express.Router();
 
 routers
   .post("/table-access", createTableAccessSession)
+  .get("/service-points/call-orders", authentication, callOrders)
   .get("/service-points", authentication, listPoints)
   .get("/service-points/tables", authentication, listTables)
   .get("/service-points/kiosks", authentication, authAdmin, listKiosks)

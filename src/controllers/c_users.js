@@ -126,13 +126,14 @@ const createSession = async (user) => {
 };
 
 const createKioskSession = (point) => {
+  const source = point.type === "call_display" ? "call_display" : "borne";
   const token = jwt.sign(
     {
       access: 2,
       shopid: point.shopid,
       subject_type: "service_point",
       service_point_id: point.id,
-      source: "borne",
+      source,
     },
     envJWTKEY,
     { expiresIn: "1d" },
@@ -147,7 +148,7 @@ const createKioskSession = (point) => {
     shopid: point.shopid,
     username: point.name,
     access: 2,
-    source: "borne",
+    source,
     token,
   };
 };

@@ -59,6 +59,10 @@ const buildAuthentication = ({ findUserByIdAndShop = defaultFindUserByIdAndShop 
     (["PATCH", "PUT", "DELETE"].includes(req.method) && accountSegments[1] === "user");
   req.shopid = decoded.shopid;
   if (decoded.subject_type === "service_point") {
+    if (decoded.source === "call_display" &&
+      !(req.method === "GET" && surfacePath.replace(/\/$/, "") === "/service-points/call-orders")) {
+      return custom(res, 403, "Borne en lecture seule.", null, null);
+    }
     if (accountWrite) return custom(res, 403, "Access denied", {}, null);
     req.access = decoded.access;
     req.sessionSubject = "service_point";

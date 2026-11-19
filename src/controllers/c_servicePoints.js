@@ -24,12 +24,27 @@ const normalizeBooleanFlag = (value) =>
 const isEditableTable = (point) =>
   point && point.type === "table" && Number(point.is_system) !== 1;
 const isEditableKiosk = (point) =>
-  point && point.type === "kiosk" && Number(point.is_system) !== 1;
+  point && ["kiosk", "call_display"].includes(point.type) && Number(point.is_system) !== 1;
 
 const buildServicePointsController = (repository) => {
   const getRepository = () => repository || require("../modules/m_servicePoints");
 
   return {
+  callOrders: async (req, res) => {
+    if (req.sessionSubject !== "service_point" || req.orderSource !== "call_display") {
+      return custom(res, 403, "Accès réservé à la borne d’appel.", null, null);
+    }
+    try {
+      const point = await getRepository().findServicePoint({ servicePointId: req.servicePointId, shopId: req.shopid });
+      if (!point || point.type !== "call_display" || Number(point.is_active) !== 1) {
+        return custom(res, 403, "Borne désactivée.", null, null);
+      }
+      res.set("Cache-Control", "no-store");
+      return success(res, "Commandes en cours.", null, await getRepository().listCallOrders(req.shopid));
+    } catch (error) {
+      return failed(res, "Lecture des commandes impossible.", "CALL_DISPLAY_UNAVAILABLE");
+    }
+  },
   listPoints: async (req, res) => {
     try {
       const points = await getRepository().listServicePoints({
@@ -142,6 +157,8 @@ const buildServicePointsController = (repository) => {
     }
 
     try {
+      const type = req.body.type === undefined ? "kiosk" : req.body.type;
+      if (!["kiosk", "call_display"].includes(type)) return custom(res, 422, "Type de borne invalide.", null, null);
       const printerIp = normalizePrinterIp(req.body && req.body.printer_ip);
       const smartPrintApp = normalizeBooleanFlag(req.body && req.body.smart_print_app);
       for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -151,6 +168,7 @@ const buildServicePointsController = (repository) => {
           const created = await getRepository().createKioskPoint({
             shopId: req.shopid,
             name,
+            ...(type === "call_display" ? { type } : {}),
             kioskLoginId,
             kioskPin,
             kioskPinHash: await hashStaffPin(kioskPin),

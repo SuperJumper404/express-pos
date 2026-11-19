@@ -43,7 +43,9 @@ const listServicePoints = async ({
 
   if (activeOnly) clauses.push("`is_active` = 1");
   if (tablesOnly) clauses.push("`type` = 'table'");
-  if (kiosksOnly) clauses.push("`type` = 'kiosk'");
+  // The customer-facing service point list must not expose display credentials.
+  if (!kiosksOnly) clauses.push("`type` <> 'call_display'");
+  if (kiosksOnly) clauses.push("`type` IN ('kiosk', 'call_display')");
 
   return query(
     `SELECT \`id\`, \`shopid\`, \`name\`, \`type\`, \`system_key\`, \`is_system\`, \`is_active\`, \`sort_order\`, \`public_access_version\`, \`kiosk_login_id\`, \`kiosk_pin\`, \`printer_ip\`, \`smart_print_app\`, \`created\`, \`updated\`
@@ -83,13 +85,14 @@ const createTablePoint = ({ shopId, name }) =>
 
 const findKioskByLoginId = ({ kioskLoginId }) =>
   query(
-    "SELECT `id`, `shopid`, `name`, `type`, `is_active`, `kiosk_login_id`, `kiosk_pin_hash`, `public_access_version`, `printer_ip`, `smart_print_app` FROM `service_points` WHERE `kiosk_login_id` = ? AND `type` = 'kiosk' LIMIT 1",
+    "SELECT `id`, `shopid`, `name`, `type`, `is_active`, `kiosk_login_id`, `kiosk_pin_hash`, `public_access_version`, `printer_ip`, `smart_print_app` FROM `service_points` WHERE `kiosk_login_id` = ? AND `type` IN ('kiosk', 'call_display') LIMIT 1",
     [kioskLoginId],
   ).then((rows) => rows[0] || null);
 
 const createKioskPoint = ({
   shopId,
   name,
+  type = SERVICE_POINT_TYPES.KIOSK,
   kioskLoginId,
   kioskPin,
   kioskPinHash,
@@ -101,7 +104,7 @@ const createKioskPoint = ({
     [{
       shopid: shopId,
       name,
-      type: SERVICE_POINT_TYPES.KIOSK,
+      type,
       is_system: 0,
       is_active: 1,
       sort_order: 900,
@@ -147,14 +150,14 @@ const updateKioskPoint = ({
   if (smartPrintApp !== undefined) updates.smart_print_app = smartPrintApp;
 
   return query(
-    "UPDATE `service_points` SET ? WHERE `id` = ? AND `shopid` = ? AND `type` = 'kiosk' AND `is_system` = 0",
+    "UPDATE `service_points` SET ? WHERE `id` = ? AND `shopid` = ? AND `type` IN ('kiosk', 'call_display') AND `is_system` = 0",
     [updates, servicePointId, shopId],
   );
 };
 
 const updateKioskCredentials = ({ servicePointId, shopId, kioskLoginId, kioskPin, kioskPinHash }) =>
   query(
-    "UPDATE `service_points` SET `kiosk_login_id` = ?, `kiosk_pin` = ?, `kiosk_pin_hash` = ?, `updated` = NOW() WHERE `id` = ? AND `shopid` = ? AND `type` = 'kiosk' AND `is_system` = 0",
+    "UPDATE `service_points` SET `kiosk_login_id` = ?, `kiosk_pin` = ?, `kiosk_pin_hash` = ?, `updated` = NOW() WHERE `id` = ? AND `shopid` = ? AND `type` IN ('kiosk', 'call_display') AND `is_system` = 0",
     [kioskLoginId, kioskPin, kioskPinHash, servicePointId, shopId],
   );
 
@@ -177,6 +180,10 @@ const reorderTablePoints = async ({ shopId, ids }) => {
 
 return {
   SERVICE_POINT_TYPES,
+  listCallOrders: shopId => query(
+    "SELECT id, ordernumber, status, DATE_FORMAT(status_entered_at, '%Y-%m-%d %H:%i:%s.%f') AS entered FROM orders WHERE shopid = ? AND status IN (1,2,3) ORDER BY status, status_entered_at, id",
+    [shopId],
+  ),
   listServicePoints,
   findServicePoint,
   findSystemPoint,
