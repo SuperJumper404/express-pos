@@ -332,6 +332,17 @@ test("rejects mixed table, foreign shop and ineligible status selections", async
   }
 });
 
+test("groups only selected orders and replays the same receipt", async () => {
+  const f = fixture();
+  const input = manualInput({ selectionOnly: true, orderIds: [31, 12] });
+  const receipt = await f.service.createSettlement(input);
+  assert.deepStrictEqual(receipt.archivedOrders.map(order => order.sourceOrderId), [12, 31]);
+  assert(!f.state.events.includes("archive:22"));
+  const replay = await f.service.createSettlement(input);
+  assert.strictEqual(replay.id, receipt.id);
+  assert.strictEqual(replay.idempotentReplay, true);
+});
+
 test("rejects a manual settlement that omits another eligible table order", async () => {
   const f = fixture();
   await expectCode(

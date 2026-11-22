@@ -181,6 +181,7 @@ const buildCashRegisterSettlementsController = ({
         discountValue: discount.discountValue == null
           ? body.discountValue : discount.discountValue,
         idempotencyKey: body.idempotencyKey,
+        ...(body.selectionOnly === true ? { selectionOnly: true } : {}),
         terminalPaymentId: body.terminalPaymentId,
       });
       return custom(

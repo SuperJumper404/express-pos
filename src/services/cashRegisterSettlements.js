@@ -58,6 +58,7 @@ const normalizeInput = (input = {}) => {
     shopId: Number(input.shopId),
     actorId: input.actorId == null ? null : Number(input.actorId),
     orderIds: normalizeOrderIds(input.orderIds),
+    selectionOnly: input.selectionOnly === true,
     paymentMethod,
     discountType: discountValue > 0 ? discountType : "none",
     discountValue: discountValue > 0 ? discountValue : 0,
@@ -228,15 +229,17 @@ const buildCashRegisterSettlementService = ({
       const subtotalCents = orders.reduce((sum, order) => sum + orderAmountCents(order), 0);
       if (!Number.isSafeInteger(subtotalCents)) invalid("orders");
       calculateDiscountCents({ ...input, subtotalCents });
-      const firstOrder = orders[0];
-      const eligible = await settlementStore.listEligibleTableOrders({
-        shopId: input.shopId,
-        servicePointId: firstOrder.service_point_id,
-        customerId: firstOrder.customerID,
-        forUpdate: false,
-      });
-      if (!sameIds(eligible.map(order => Number(order.id)).sort((a, b) => a - b), input.orderIds)) {
-        fail(409, "TABLE_ORDERS_CHANGED", "Table orders changed.");
+      if (!input.selectionOnly) {
+        const firstOrder = orders[0];
+        const eligible = await settlementStore.listEligibleTableOrders({
+          shopId: input.shopId,
+          servicePointId: firstOrder.service_point_id,
+          customerId: firstOrder.customerID,
+          forUpdate: false,
+        });
+        if (!sameIds(eligible.map(order => Number(order.id)).sort((a, b) => a - b), input.orderIds)) {
+          fail(409, "TABLE_ORDERS_CHANGED", "Table orders changed.");
+        }
       }
       for (const order of orders) {
         if (order.payment_status !== "requires_payment") continue;
@@ -289,14 +292,16 @@ const buildCashRegisterSettlementService = ({
       let discountsByOrder;
 
       if (input.terminalPaymentId == null) {
-        const firstOrder = orders[0];
-        const eligible = await store.listEligibleTableOrders({
-          shopId: input.shopId,
-          servicePointId: firstOrder.service_point_id,
-          customerId: firstOrder.customerID,
-        });
-        if (!sameIds(eligible.map((order) => Number(order.id)).sort((a, b) => a - b), input.orderIds)) {
-          fail(409, "TABLE_ORDERS_CHANGED", "Table orders changed.");
+        if (!input.selectionOnly) {
+          const firstOrder = orders[0];
+          const eligible = await store.listEligibleTableOrders({
+            shopId: input.shopId,
+            servicePointId: firstOrder.service_point_id,
+            customerId: firstOrder.customerID,
+          });
+          if (!sameIds(eligible.map((order) => Number(order.id)).sort((a, b) => a - b), input.orderIds)) {
+            fail(409, "TABLE_ORDERS_CHANGED", "Table orders changed.");
+          }
         }
         discountCents = calculateDiscountCents({ subtotalCents, discountType, discountValue });
         discountsByOrder = allocateDiscount(orders, discountCents, subtotalCents);
