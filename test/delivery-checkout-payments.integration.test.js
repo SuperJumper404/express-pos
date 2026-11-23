@@ -1,7 +1,19 @@
 const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const path = require("node:path");
 const { withDeliveryDatabase } = require("./helpers/deliveryDatabase");
 
 withDeliveryDatabase(async db => {
+  // Reproduce a failed MySQL migration with committed DDL and a missing trigger.
+  await db.pool.query("DROP TRIGGER orders_call_status_update; DROP TRIGGER delivery_terminal_request_reassigned");
+  for (const file of ["20261119010000_call_display.sql", "20261123010000_courier_delivery_payments.sql"]) {
+    const [, up] = readFileSync(path.join(__dirname, "../db/migrations", file), "utf8").split(/^-- migrate:(?:up|down)\s*$/m);
+    await db.pool.query(up);
+  }
+  const [[triggers]] = await db.pool.query(`SELECT COUNT(*) AS count FROM information_schema.TRIGGERS
+    WHERE TRIGGER_SCHEMA=DATABASE() AND TRIGGER_NAME IN ('orders_call_status_update','delivery_terminal_request_reassigned')`);
+  assert.equal(Number(triggers.count), 2);
+
   await db.seedScenario();
   require.cache[require.resolve("../src/config/dbPool")] = { exports: db.pool };
   const { buildDeliveryCheckoutPayments } = require("../src/services/deliveryCheckoutPayments");

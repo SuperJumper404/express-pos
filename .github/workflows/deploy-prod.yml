@@ -92,10 +92,10 @@ jobs:
             gzip "$BACKUP_DIR/database.sql"
             echo "PRODUCTION_BACKUP_PATH=$BACKUP_DIR"
 
-            rm -rf "$APP_DIR"
-            git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
+            CANDIDATE_DIR="$BACKUP_DIR/new-source"
+            git clone --branch "$BRANCH" "$REPO_URL" "$CANDIDATE_DIR"
 
-            cd "$APP_DIR"
+            cd "$CANDIDATE_DIR"
 
             export DOTENV_PRIVATE_KEY='${{ secrets.DOTENV_PRIVATE_KEY }}'
             test -n "$DOTENV_PRIVATE_KEY"
@@ -110,6 +110,12 @@ jobs:
               cp "$BACKUP_DIR/runtime.env.production" .env.production
               ! grep -q "encrypted:" .env.production
             fi
+
+            sh scripts/migrate-compose-database.sh express_pos_app_production express_pos_db_production "$PWD/db/migrations"
+
+            rm -rf "$APP_DIR"
+            mv "$CANDIDATE_DIR" "$APP_DIR"
+            cd "$APP_DIR"
 
             WALLET_COMPOSE=/home/smarteatprod/.smarteat/apple-wallet/production/compose-wallet.sh
             if [ ! -x "$WALLET_COMPOSE" ] && [ -x /home/smarteatprod/.smarteat/apple-wallet/prod/compose-wallet.sh ]; then

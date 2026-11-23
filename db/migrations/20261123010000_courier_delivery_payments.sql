@@ -1,7 +1,16 @@
 -- migrate:up
-ALTER TABLE users ADD COLUMN terminal_requested_at DATETIME DEFAULT NULL;
+-- MySQL may have committed the column on an earlier attempt.
+SET @delivery_terminal_ddl = IF(
+  EXISTS (SELECT 1 FROM information_schema.COLUMNS
+          WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='users' AND COLUMN_NAME='terminal_requested_at'),
+  'SELECT 1',
+  'ALTER TABLE users ADD COLUMN terminal_requested_at DATETIME DEFAULT NULL'
+);
+PREPARE delivery_terminal_ddl FROM @delivery_terminal_ddl;
+EXECUTE delivery_terminal_ddl;
+DEALLOCATE PREPARE delivery_terminal_ddl;
 
-CREATE TABLE delivery_checkout_sessions (
+CREATE TABLE IF NOT EXISTS delivery_checkout_sessions (
   delivery_id BIGINT UNSIGNED NOT NULL,
   shopid INT NOT NULL,
   stripe_session_id VARCHAR(191) NOT NULL,
@@ -13,11 +22,11 @@ CREATE TABLE delivery_checkout_sessions (
   CONSTRAINT fk_delivery_checkout_delivery FOREIGN KEY (shopid, delivery_id) REFERENCES deliveries (shopid, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TRIGGER delivery_terminal_request_assigned AFTER INSERT ON stripe_terminal_readers FOR EACH ROW
+CREATE TRIGGER IF NOT EXISTS delivery_terminal_request_assigned AFTER INSERT ON stripe_terminal_readers FOR EACH ROW
 UPDATE users SET terminal_requested_at=NULL
 WHERE shopid=NEW.shopid AND id=NEW.assigned_user_id AND NEW.is_active=1 AND terminal_requested_at IS NOT NULL;
 
-CREATE TRIGGER delivery_terminal_request_reassigned AFTER UPDATE ON stripe_terminal_readers FOR EACH ROW
+CREATE TRIGGER IF NOT EXISTS delivery_terminal_request_reassigned AFTER UPDATE ON stripe_terminal_readers FOR EACH ROW
 UPDATE users SET terminal_requested_at=NULL
 WHERE shopid=NEW.shopid AND id=NEW.assigned_user_id AND NEW.is_active=1 AND terminal_requested_at IS NOT NULL
   AND (OLD.is_active<>NEW.is_active OR NOT (OLD.assigned_user_id <=> NEW.assigned_user_id));
