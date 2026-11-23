@@ -247,13 +247,14 @@ async function main() {
             const deadline = Date.now() + 5000;
             let waits = [];
             while (Date.now() < deadline) {
-              waits = await db.readRows(`SELECT DISTINCT w.REQUESTING_THREAD_ID FROM performance_schema.data_lock_waits w
+              waits = await db.readRows(`SELECT DISTINCT w.REQUESTING_THREAD_ID, l.OBJECT_NAME FROM performance_schema.data_lock_waits w
                 JOIN performance_schema.data_locks l ON l.ENGINE_LOCK_ID = w.REQUESTING_ENGINE_LOCK_ID
-                WHERE l.OBJECT_SCHEMA = ? AND l.OBJECT_NAME = 'orders'`, [db.database]);
+                WHERE l.OBJECT_SCHEMA = ? AND l.OBJECT_NAME IN ('orders', 'shop')`, [db.database]);
               if (waits.length === 2) break;
               await new Promise(resolve => setTimeout(resolve, 20));
             }
-            assert.equal(waits.length, 2, "Webhook and collector must both reach an actual commercial-row wait");
+            // The first transaction holds the shop barrier while waiting for the order.
+            assert.deepEqual(waits.map(wait => wait.OBJECT_NAME).sort(), ["orders", "shop"]);
           } finally {
             await barrier.commit();
             barrier.release();

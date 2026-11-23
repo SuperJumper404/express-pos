@@ -26,6 +26,14 @@ async function main() {
   assert.equal(isOrderTakerAccess(6), false);
   assert.deepEqual(normalizeModulePermissions(["orders", "delivery"], 6), []);
   assert.doesNotThrow(() => assertStaffSurface({ access: 6, method: "GET", path: "/courier/cash-balance" }));
+  for (const [method, path] of [
+    ["GET", "/courier/deliveries/41/online-payment"],
+    ["POST", "/courier/deliveries/41/online-payment"],
+    ["POST", "/courier/deliveries/41/online-payment/cancel"],
+    ["GET", "/courier/terminal"],
+    ["POST", "/courier/terminal/request"],
+  ]) assert.doesNotThrow(() => assertStaffSurface({ access: 6, method, path }));
+  assert.throws(() => assertStaffSurface({ access: 6, method: "POST", path: "/stripe/terminal/payments" }), { code: "DELIVERY_FORBIDDEN" });
   const authentication = buildAuthentication({ findUserByIdAndShop: async ({ id, shopId }) => {
     const user = users.get(Number(id));
     return user && user.shopid === shopId ? user : null;

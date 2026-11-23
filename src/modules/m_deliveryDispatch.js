@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const pool = require("../config/dbPool");
 const DomainError = require("../helpers/domainError");
 const { withTransaction } = require("../helpers/withTransaction");
+const { assertNoActiveTerminalPayment } = require("../helpers/terminalOrderPayment");
 const { resolveDeliveryOrder, toDeliveryView } = require("./m_deliveryOrders");
 const { readManualSources, manualRefundEligible } = require("./m_deliveryRegisterPayments");
 const { assertDeliveryActor, assertDeliveryOwner, isCourier, isDeliveryOperator, forbidden } = require("../helpers/deliveryAuthorization");
@@ -64,6 +65,7 @@ const terminalContext = (events, delivery) => {
 };
 
 const repository = {
+  assertNoActiveTerminalPayment,
   lockShop: async ({ shopId, connection }) => (await query(connection, "SELECT id FROM shop WHERE id = ? FOR UPDATE", [shopId]))[0],
   resolve: resolveDeliveryOrder,
   findAccount: async ({ id, shopId, connection }) => (await query(connection,
@@ -109,8 +111,11 @@ const repository = {
   },
   listCouriers: ({ shopId, connection }) => query(connection,
     `SELECT u.id, u.username, u.status, u.courier_available AS available,
+      CASE WHEN r.id IS NULL THEN u.terminal_requested_at END AS terminalRequestedAt,
+      r.label AS terminalLabel,
       (SELECT COUNT(*) FROM deliveries d WHERE d.shopid = u.shopid AND d.courier_id = u.id AND d.delivery_status IN ('assigned','in_transit','issue')) AS missionCount
-      FROM users u WHERE u.shopid = ? AND u.access = 6 ORDER BY u.id`, [shopId]),
+      FROM users u LEFT JOIN stripe_terminal_readers r ON r.shopid=u.shopid AND r.active_assigned_user_id=u.id
+      WHERE u.shopid = ? AND u.access = 6 ORDER BY u.id`, [shopId]),
   listFinancialHolders: ({ shopId, connection }) => query(connection,
     `SELECT u.id,u.username,u.status,(u.access=6) AS currentCourier FROM users u WHERE u.shopid=? AND
       (u.access=6 OR EXISTS (SELECT 1 FROM delivery_payment_collections c WHERE c.shopid=u.shopid AND c.courier_id=u.id)) ORDER BY u.id`, [shopId]),
@@ -222,6 +227,7 @@ const buildDeliveryDispatch = ({ repository: repo = repository, runInTransaction
         if (!reason) throw invalid();
         if (!["unassigned", "assigned", "in_transit"].includes(delivery.delivery_status) ||
           (delivery.delivery_status === "unassigned" && (!operator || delivery.courier_id !== null))) throw conflict();
+        if (repo.assertNoActiveTerminalPayment) await repo.assertNoActiveTerminalPayment({ connection, shopId: actor.shopId, orderId: order.id });
         delivery.delivery_status = "issue";
       } else if (name === "deliver") {
         if (delivery.delivery_status !== "in_transit") throw conflict();

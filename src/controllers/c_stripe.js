@@ -64,6 +64,7 @@ const getTerminalStore = () => {
 const handleTerminalWebhookEvent = (event) => buildStripeTerminalWebhookHandler({
   terminalStore: getTerminalStore(), stripe: { get paymentIntents() { return getStripe().paymentIntents; } },
 })(event);
+const handleDeliveryCheckoutEvent = require("../services/deliveryCheckoutPayments").buildDeliveryCheckoutPayments().webhook;
 
 const syncStripeAccountStatus = async (shop, stripeAccount) => {
   const status = {
@@ -854,6 +855,7 @@ const refundIdempotencyKey = (shopId, orderId, generation) => (
 
 const buildStripeWebhookEventHandler = ({
   handleTerminalEvent = handleTerminalWebhookEvent,
+  handleDeliveryEvent = handleDeliveryCheckoutEvent,
   reconcileTerminalRefund = (refund) => terminalOrderRefundService.reconcileTerminalRefund(refund),
   getStripe: getStripeClient = getStripe,
   markPaymentAttemptFailed: markAttemptFailed = markPaymentAttemptFailed,
@@ -884,6 +886,8 @@ const buildStripeWebhookEventHandler = ({
   };
 
   return async (event) => {
+    const deliveryResult = await handleDeliveryEvent(event);
+    if (deliveryResult) return deliveryResult;
     const terminalResult = await handleTerminalEvent(event);
     if (terminalResult) return terminalResult;
     const paymentIntent = event.data.object;

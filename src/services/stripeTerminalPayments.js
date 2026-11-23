@@ -369,7 +369,8 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
     const shop = await shopStore.findShop({ shopId });
     const reserved = await databaseTransaction(async (store) => {
       let locked;
-      try { locked = await store.lockReaderAndOrders({ shopId, userId: cashierUserId, orderIds }); }
+      try { locked = await store.lockReaderAndOrders({ shopId, userId: cashierUserId, orderIds,
+        ...(input.courierDelivery && { courierDelivery: input.courierDelivery }) }); }
       catch (error) {
         const codes = {
           "No active assigned Terminal reader": "TERMINAL_NO_READER",
@@ -384,6 +385,11 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
         && Number(input.discountValue || 0) !== 0) fail("DELIVERY_REQUOTE_REQUIRED");
       if (activePayment) {
         if (activePayment.payment_kind === "standalone") fail("TERMINAL_READER_BUSY");
+        if (input.courierDelivery) {
+          const allocations = await store.listPaymentAllocations({ shopId, paymentId: activePayment.id });
+          if (allocations.length !== 1 || allocations[0].order_id !== orderIds[0]
+            || Number(activePayment.cashier_user_id) !== cashierUserId) fail("TERMINAL_READER_BUSY");
+        }
         if (activePayment.stripe_payment_intent_id) return { activePayment };
         if (Number(activePayment.cashier_user_id) !== cashierUserId) fail("TERMINAL_READER_BUSY");
         if (activePayment.status === "creating" && !activePayment.stripe_payment_intent_id) {
@@ -518,13 +524,15 @@ const buildStripeTerminalPaymentService = ({ stripe, terminalStore, shopStore })
   const cancelPayment = safe(async (input) => {
     const session = await payment(input);
     if (!active(session)) return dto(session);
-    if (session.payment_kind === "standalone" && session.status === "creating" && !session.stripe_payment_intent_id) {
+    const standalone = session.payment_kind === "standalone";
+    if ((standalone || input.courierDelivery) && session.status === "creating" && !session.stripe_payment_intent_id) {
       // Serialize against the whole creation/handoff operation, then inspect the
       // durable marker again. Only a request never submitted to Stripe is free.
       const result = await terminalStore.withPaymentCreationLock({ shopId: session.shopid, paymentId: session.id }, store => databaseTransaction(async transactionStore => {
         const current = await payment(input, transactionStore, true);
         if (!active(current)) return dto(current, transactionStore);
-        if (current.stripe_create_submitted_at != null) fail("TERMINAL_RECOVERY_REQUIRED");
+        // An order intent without a saved ID hasn't been sent to the reader.
+        if (standalone && current.stripe_create_submitted_at != null) fail("TERMINAL_RECOVERY_REQUIRED");
         if (current.status !== "creating" || current.stripe_payment_intent_id) fail("TERMINAL_PAYMENT_CREATING");
         await update(current, { status: "canceled" }, transactionStore);
         return dto(await payment(input, transactionStore), transactionStore);

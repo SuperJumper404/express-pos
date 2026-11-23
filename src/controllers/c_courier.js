@@ -22,22 +22,35 @@ const deliveryMutation = req => {
 };
 const buildCourierController = ({ dispatch = require("../modules/m_deliveryDispatch").buildDeliveryDispatch(),
   collections = require("../modules/m_deliveryCollections").buildDeliveryCollections(),
-  cash = require("../modules/m_courierCash").buildCourierCash() } = {}) => ({
-  cashBalance: deliveryEndpoint(req => cash.balance({ actor: deliveryActor(req), courierId: req.id })),
-  readAvailability: deliveryEndpoint(req => dispatch.readAvailability({ actor: deliveryActor(req) })),
-  list: deliveryEndpoint(req => dispatch.list({ actor: deliveryActor(req) })),
-  detail: deliveryEndpoint(req => dispatch.get({ actor: deliveryActor(req), deliveryId: req.params.id })),
-  pickup: deliveryEndpoint(req => dispatch.pickup(deliveryMutation(req))),
-  deliver: deliveryEndpoint(req => dispatch.deliver(deliveryMutation(req))),
-  reportIssue: deliveryEndpoint(req => dispatch.reportIssue(deliveryMutation(req))),
-  collectPayment: deliveryEndpoint(req => {
-    const body = req.body || {};
-    if (Object.keys(body).some(key => !["method", "expectedVersion", "idempotencyKey"].includes(key))) {
-      throw new DomainError(400, "DELIVERY_REQUEST_INVALID", "Invalid delivery collection");
-    }
-    return collections.collect({ actor: deliveryActor(req), deliveryId: req.params.id,
-      method: body.method, expectedVersion: body.expectedVersion, idempotencyKey: body.idempotencyKey });
-  }),
-  availability: deliveryEndpoint(req => dispatch.availability({ actor: deliveryActor(req), available: (req.body || {}).available })),
-});
+  cash = require("../modules/m_courierCash").buildCourierCash(),
+  online = require("../services/courierDeliveryPayments").buildCourierDeliveryPayments() } = {}) => {
+  const onlinePayment = action => deliveryEndpoint(req => {
+    const { method, expectedVersion, attemptId } = req.body || {};
+    return online.payment({ actor: deliveryActor(req), deliveryId: req.params.id, action, method, expectedVersion, attemptId });
+  });
+  const terminal = operation => deliveryEndpoint(req => online[operation]({ shopId: req.shopid, userId: req.id }));
+  return {
+    cashBalance: deliveryEndpoint(req => cash.balance({ actor: deliveryActor(req), courierId: req.id })),
+    readAvailability: deliveryEndpoint(req => dispatch.readAvailability({ actor: deliveryActor(req) })),
+    list: deliveryEndpoint(req => dispatch.list({ actor: deliveryActor(req) })),
+    detail: deliveryEndpoint(req => dispatch.get({ actor: deliveryActor(req), deliveryId: req.params.id })),
+    pickup: deliveryEndpoint(req => dispatch.pickup(deliveryMutation(req))),
+    deliver: deliveryEndpoint(req => dispatch.deliver(deliveryMutation(req))),
+    reportIssue: deliveryEndpoint(req => dispatch.reportIssue(deliveryMutation(req))),
+    readOnlinePayment: onlinePayment("read"),
+    startOnlinePayment: onlinePayment("start"),
+    cancelOnlinePayment: onlinePayment("cancel"),
+    readTerminal: terminal("readAssignedTerminal"),
+    requestTerminal: terminal("requestAssignedTerminal"),
+    collectPayment: deliveryEndpoint(req => {
+      const body = req.body || {};
+      if (Object.keys(body).some(key => !["method", "expectedVersion", "idempotencyKey"].includes(key))) {
+        throw new DomainError(400, "DELIVERY_REQUEST_INVALID", "Invalid delivery collection");
+      }
+      return collections.collect({ actor: deliveryActor(req), deliveryId: req.params.id,
+        method: body.method, expectedVersion: body.expectedVersion, idempotencyKey: body.idempotencyKey });
+    }),
+    availability: deliveryEndpoint(req => dispatch.availability({ actor: deliveryActor(req), available: (req.body || {}).available })),
+  };
+};
 module.exports = { buildCourierController, deliveryActor, deliveryEndpoint, deliveryMutation };

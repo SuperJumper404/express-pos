@@ -476,9 +476,9 @@ const buildStripeTerminalModule = ({ connection, lockContext = null, loyalty = n
   };
 
   // The caller holds one transaction connection for all three locking reads.
-  const lockReaderAndOrders = async ({ shopId, userId, orderIds }) => {
+  const lockReaderAndOrders = async ({ shopId, userId, orderIds, courierDelivery }) => {
     requireShopId(shopId);
-    if (loyalty) await query('SELECT id FROM shop WHERE id=? FOR UPDATE', [shopId]);
+    if (loyalty || courierDelivery) await query('SELECT id FROM shop WHERE id=? FOR UPDATE', [shopId]);
     if (!Array.isArray(orderIds) || !orderIds.length
       || orderIds.some((id) => !Number.isSafeInteger(id) || id <= 0)
       || new Set(orderIds).size !== orderIds.length) {
@@ -502,6 +502,17 @@ const buildStripeTerminalModule = ({ connection, lockContext = null, loyalty = n
       || order.stripe_terminal_payment_id != null
       || (order.delivery_id != null && (order.payment_provider != null || order.stripe_payment_intent_id != null))
     ))) throw new Error("Invalid Terminal order selection");
+    if (courierDelivery) {
+      const mission = first(await query(
+        `SELECT d.version FROM deliveries d
+         JOIN users u ON u.id=d.courier_id AND u.shopid=d.shopid
+         WHERE d.shopid=? AND d.id=? AND d.origin_order_id=? AND d.courier_id=?
+           AND d.delivery_status='in_transit' AND d.closed_at IS NULL AND u.access=6 AND u.status=1 FOR UPDATE`,
+        [shopId, courierDelivery.id, orderIds[0], userId],
+      ));
+      if (orders.length !== 1 || orders[0].delivery_id !== courierDelivery.id ||
+        !mission || mission.version !== courierDelivery.expectedVersion) throw new Error("Invalid Terminal order selection");
+    }
     const activePayment = await findActivePaymentForReader({
       shopId, readerId: reader.id, forUpdate: true,
     });
