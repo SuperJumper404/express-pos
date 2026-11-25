@@ -71,6 +71,48 @@ const testStepPriceUpdate = async () => {
 };
 
 const calls = [];
+const testStepChoiceOrder = async () => {
+  const updates = [];
+  const connection = {
+    async query(sql, params) {
+      if (/SELECT step\.id FROM customization_steps step/.test(sql)) {
+        assert.deepStrictEqual(params, [10, 7]);
+        return [[{ id: 10 }]];
+      }
+      if (/SELECT[\s\S]*step\.id AS step_id/.test(sql)) {
+        return [[55, 56, 57].map((choice_id) => ({
+          step_id: 10, step_name: "Boissons", active: true, choice_id,
+        }))];
+      }
+      if (/SELECT id FROM customization_step_choices/.test(sql)) {
+        assert.match(sql, /FOR UPDATE/);
+        return [[{ id: 55 }, { id: 56 }, { id: 57 }]];
+      }
+      if (/UPDATE customization_steps/.test(sql)) return [{ affectedRows: 1 }];
+      if (/UPDATE customization_step_choices/.test(sql)) {
+        assert.match(sql, /SET default_position = \?, updated = NOW\(\)/);
+        updates.push(params);
+        return [{ affectedRows: 1 }];
+      }
+      if (/UPDATE product_customization_step_choices/.test(sql)) {
+        assert.match(sql, /ON choice\.id = product_choice\.step_choice_id AND choice\.step_id = product_step\.step_id/);
+        assert.match(sql, /SET product_choice\.position = choice\.default_position\s+WHERE product_step\.step_id = \? AND product\.shopid = \?/);
+        updates.push(params);
+        return [{ affectedRows: 5 }];
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  };
+  const reorder = (choice_order) => updateCustomizationStep({
+    shopId: 7, stepId: 10, data: { choice_order }, connection,
+  });
+  await reorder([57, 55, 56]);
+  assert.deepStrictEqual(updates, [[0, 10, 57], [1, 10, 55], [2, 10, 56], [10, 7]]);
+  await assert.rejects(reorder([55, 56]), { code: "CUSTOMIZATION_CHOICE_ORDER_CHANGED" });
+  await assert.rejects(reorder([55, 56, 56]), { code: "CUSTOMIZATION_CHOICE_ORDER_INVALID" });
+  assert.deepStrictEqual(updates, [[0, 10, 57], [1, 10, 55], [2, 10, 56], [10, 7]]);
+};
+
 const testPreservesUneditedProductPrice = async () => {
   const inserts = [];
   await replaceProductConfiguration({
@@ -80,6 +122,7 @@ const testPreservesUneditedProductPrice = async () => {
       step_id: 20,
       minimum_choices: 0,
       maximum_choices: 1,
+      keep_choice_order: true,
       choices: [
         { step_choice_id: 55, extra_price: "1.00", keep_extra_price: true },
         { step_choice_id: 56, extra_price: "4.00" },
@@ -93,8 +136,11 @@ const testPreservesUneditedProductPrice = async () => {
           return [[55, 56].map((id) => ({ id, step_id: 20, choice_type: "simple" }))];
         }
         if (/SELECT product_choice\.step_choice_id, product_choice\.extra_price/.test(sql)) {
-          assert.deepStrictEqual(params, [18, [55]]);
-          return [[{ step_choice_id: 55, extra_price: "2.00" }]];
+          assert.deepStrictEqual(params, [18, [55, 56]]);
+          return [[
+            { step_choice_id: 55, extra_price: "2.00", position: 9 },
+            { step_choice_id: 56, extra_price: "3.00", position: 1 },
+          ]];
         }
         if (/DELETE FROM/.test(sql)) return [{ affectedRows: 1 }];
         if (/INSERT INTO product_customization_steps/.test(sql)) return [{ insertId: 1 }];
@@ -106,7 +152,7 @@ const testPreservesUneditedProductPrice = async () => {
       },
     },
   });
-  assert.deepStrictEqual(inserts, [[1, 55, "2.00", 0, 1], [1, 56, "4.00", 1, 1]]);
+  assert.deepStrictEqual(inserts, [[1, 55, "2.00", 9, 1], [1, 56, "4.00", 1, 1]]);
 };
 
 const testAppendProductSteps = async () => {
@@ -155,6 +201,7 @@ const connection = {
 
 (async () => {
   await testStepPriceUpdate();
+  await testStepChoiceOrder();
   await testAppendProductSteps();
   await testPreservesUneditedProductPrice();
   const result = await createCustomizationChoice({
