@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   production:
-    if: github.ref == 'refs/heads/master'
+    if: github.ref == 'refs/heads/codex/customizations-production-20261125'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -40,7 +40,7 @@ jobs:
           printf '%s\n' "$VM_KNOWN_HOSTS" > ~/.ssh/known_hosts
           sshpass -e ssh -o StrictHostKeyChecking=yes -o PreferredAuthentications=password \
             -p 22 ns_ayness@34.61.179.207 \
-            bash -se -- "$OPERATION" "$GITHUB_SHA" <<'REMOTE'
+            bash -se -- "$OPERATION" "caac552f78e3e287309644af4d5a189cfa5a41d1" <<'REMOTE'
           set -euo pipefail
           cd "$HOME/smarteat/backend"
           exec 9>"$HOME/.google-deploy-backend.lock"
