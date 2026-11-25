@@ -1,11 +1,13 @@
 const express = require("express");
 const {
+  attachCustomizationStepToProducts,
   createCustomizationChoice,
   createCustomizationStep,
   deleteCustomizationChoice,
   deleteCustomizationChoicePermanently,
   deleteCustomizationStep,
   detailCustomizationStep,
+  duplicateCustomizationStep,
   listCustomizationSteps,
   updateCustomizationChoice,
   updateCustomizationStep,
@@ -18,6 +20,8 @@ const routers = express.Router();
 routers
   .get("/customization-steps", authentication, listCustomizationSteps)
   .post("/customization-steps", authentication, authAdmin, createCustomizationStep)
+  .post("/customization-steps/:id/duplicate", authentication, authAdmin, duplicateCustomizationStep)
+  .post("/customization-steps/:id/products", authentication, authAdmin, attachCustomizationStepToProducts)
   .get("/customization-steps/:id", authentication, detailCustomizationStep)
   .patch("/customization-steps/:id", authentication, authAdmin, updateCustomizationStep)
   .delete("/customization-steps/:id", authentication, authAdmin, deleteCustomizationStep)

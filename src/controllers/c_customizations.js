@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const catalogModule = require("../modules/m_customizations");
 const DomainError = require("../helpers/domainError");
+const { createImageCopy } = require("../helpers/catalogDuplication");
 const { envPUBLICIMAGEPATH } = require("../helpers/env");
 const { custom } = require("../helpers/response");
 
@@ -158,6 +159,33 @@ const buildCustomizationController = ({
     }
   };
 
+  const duplicateCustomizationStep = async (req, res) => {
+    const images = createImageCopy({ fileSystem, resolveImagePath: imagePath, removeImage: removeImageBestEffort });
+    let result;
+    try {
+      result = await catalog.duplicateCustomizationStep({
+        shopId: req.shopid, stepId: req.params.id, copyImage: images.copy,
+      });
+    } catch (error) {
+      images.discard();
+      return sendError(res, error);
+    }
+    return custom(res, 201, "Étape dupliquée.", null, { id: result.insertId });
+  };
+
+  const attachCustomizationStepToProducts = async (req, res) => {
+    try {
+      const result = await catalog.attachCustomizationStepToProducts({
+        shopId: req.shopid,
+        stepId: req.params.id,
+        productIds: req.body && req.body.product_ids,
+      });
+      return custom(res, 200, "Rattachements enregistrés.", null, result);
+    } catch (error) {
+      return sendError(res, error);
+    }
+  };
+
   const updateCustomizationStep = async (req, res) => {
     try {
       const data = normalizeStepData(req.body || {}, true);
@@ -276,12 +304,14 @@ const buildCustomizationController = ({
   };
 
   return {
+    attachCustomizationStepToProducts,
     createCustomizationChoice,
     createCustomizationStep,
     deleteCustomizationChoice,
     deleteCustomizationChoicePermanently,
     deleteCustomizationStep,
     detailCustomizationStep,
+    duplicateCustomizationStep,
     listCustomizationSteps,
     updateCustomizationChoice,
     updateCustomizationStep,
