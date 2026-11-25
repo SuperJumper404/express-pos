@@ -186,6 +186,19 @@ const buildCustomizationController = ({
     }
   };
 
+  const removeCustomizationStepFromProducts = async (req, res) => {
+    try {
+      const result = await catalog.removeCustomizationStepFromProducts({
+        shopId: req.shopid,
+        stepId: req.params.id,
+        productIds: req.body && req.body.product_ids,
+      });
+      return custom(res, 200, "Étape retirée des produits sélectionnés.", null, result);
+    } catch (error) {
+      return sendError(res, error);
+    }
+  };
+
   const updateCustomizationStep = async (req, res) => {
     try {
       const data = normalizeStepData(req.body || {}, true);
@@ -313,6 +326,7 @@ const buildCustomizationController = ({
     detailCustomizationStep,
     duplicateCustomizationStep,
     listCustomizationSteps,
+    removeCustomizationStepFromProducts,
     updateCustomizationChoice,
     updateCustomizationStep,
   };

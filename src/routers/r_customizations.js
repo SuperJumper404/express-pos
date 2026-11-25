@@ -9,6 +9,7 @@ const {
   detailCustomizationStep,
   duplicateCustomizationStep,
   listCustomizationSteps,
+  removeCustomizationStepFromProducts,
   updateCustomizationChoice,
   updateCustomizationStep,
 } = require("../controllers/c_customizations");
@@ -22,6 +23,7 @@ routers
   .post("/customization-steps", authentication, authAdmin, createCustomizationStep)
   .post("/customization-steps/:id/duplicate", authentication, authAdmin, duplicateCustomizationStep)
   .post("/customization-steps/:id/products", authentication, authAdmin, attachCustomizationStepToProducts)
+  .delete("/customization-steps/:id/products", authentication, authAdmin, removeCustomizationStepFromProducts)
   .get("/customization-steps/:id", authentication, detailCustomizationStep)
   .patch("/customization-steps/:id", authentication, authAdmin, updateCustomizationStep)
   .delete("/customization-steps/:id", authentication, authAdmin, deleteCustomizationStep)
