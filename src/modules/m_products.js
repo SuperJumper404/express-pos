@@ -341,8 +341,8 @@ const buildProductModule = ({
     return result;
   });
 
-  const mReplaceProductCustomizationConfig = ({ shopId, productId, steps }) => (
-    replaceConfiguration({ shopId, productId, steps })
+  const mReplaceProductCustomizationConfig = (configuration) => (
+    replaceConfiguration(configuration)
   );
 
   const mDeleteProduct = (id) => runInTransaction(async (transactionConnection) => {
