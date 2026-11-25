@@ -288,6 +288,7 @@ const buildProductController = ({
         shopId: req.shopid,
         productId: req.params.id,
         steps,
+        ...(body.append === true ? { append: true } : {}),
       });
       return success(res, "Configuration du produit mise à jour.", null, null);
     } catch (error) {

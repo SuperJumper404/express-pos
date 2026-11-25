@@ -312,17 +312,63 @@ const createCustomizationStep = ({ shopId, data, connection }) => queryRows(conn
   isDisabled(data.active) ? 0 : 1,
 ]);
 
-const updateCustomizationStep = async ({ shopId, stepId, data, connection }) => {
-  const current = await getCustomizationStep({ shopId, stepId, connection });
-  if (!current) {
-    throw new DomainError(
-      404,
-      "CUSTOMIZATION_STEP_NOT_FOUND",
-      "Customization step does not belong to this shop",
-      { step_id: stepId },
+const normalizeStepChoicePrices = (prices) => {
+  if (!Array.isArray(prices)) {
+    throw configurationError(
+      "CUSTOMIZATION_CHOICE_PRICES_INVALID",
+      "Les tarifs des choix doivent être fournis sous forme de liste.",
     );
   }
-  return queryRows(connection, `
+
+  const pricesByChoiceId = new Map();
+  for (const entry of prices) {
+    const choiceId = entry && entry.choice_id;
+    const price = entry && entry.default_extra_price;
+    if (!isValidCatalogId(choiceId) || pricesByChoiceId.has(Number(choiceId))) {
+      throw configurationError(
+        "CUSTOMIZATION_CHOICE_ID_INVALID",
+        "Un choix de personnalisation est invalide ou en double.",
+        { choice_id: choiceId },
+      );
+    }
+    const amount = typeof price === "number" || typeof price === "string"
+      ? String(price).trim()
+      : "";
+    if (!/^-?(?:\d+(?:\.\d{0,2})?|\.\d{1,2})$/.test(amount)
+      || Math.abs(Number(amount)) > 99999999.99) {
+      throw configurationError(
+        "CUSTOMIZATION_CHOICE_DEFAULT_PRICE_INVALID",
+        "Le prix du choix est invalide.",
+        { choice_id: choiceId },
+      );
+    }
+    pricesByChoiceId.set(Number(choiceId), amount);
+  }
+  return pricesByChoiceId;
+};
+
+const updateCustomizationStepInConnection = async ({ shopId, stepId, data, connection }) => {
+  const choicePrices = normalizeStepChoicePrices(
+    data.choice_prices === undefined ? [] : data.choice_prices,
+  );
+  await requireOwnedStep({ shopId, stepId, connection });
+  const current = await getCustomizationStep({ shopId, stepId, connection });
+  if (choicePrices.size > 0) {
+    const choiceIds = [...choicePrices.keys()];
+    const ownedChoices = await queryRows(connection, `
+      SELECT id FROM customization_step_choices
+      WHERE step_id = ? AND id IN (?)
+      FOR UPDATE
+    `, [stepId, choiceIds]);
+    if (ownedChoices.length !== choiceIds.length) {
+      throw configurationError(
+        "CUSTOMIZATION_CHOICE_STEP_MISMATCH",
+        "Un choix à mettre à jour n’appartient pas à cette étape.",
+        { step_id: stepId },
+      );
+    }
+  }
+  const result = await queryRows(connection, `
     UPDATE customization_steps
     SET name = ?, description = ?, active = ?, updated = NOW()
     WHERE id = ? AND shop_id = ?
@@ -333,6 +379,36 @@ const updateCustomizationStep = async ({ shopId, stepId, data, connection }) => 
     stepId,
     shopId,
   ]);
+
+  for (const [choiceId, price] of choicePrices) {
+    await queryRows(connection, `
+      UPDATE customization_step_choices
+      SET default_extra_price = ?, updated = NOW()
+      WHERE step_id = ? AND id = ?
+    `, [price, stepId, choiceId]);
+    await queryRows(connection, `
+      UPDATE product_customization_step_choices product_choice
+      JOIN product_customization_steps product_step
+        ON product_step.id = product_choice.product_customization_step_id
+      JOIN products product ON product.id = product_step.product_id
+      SET product_choice.extra_price = ?
+      WHERE product_step.step_id = ? AND product_choice.step_choice_id = ?
+        AND product.shopid = ?
+    `, [price, stepId, choiceId, shopId]);
+  }
+  return result;
+};
+
+const updateCustomizationStep = ({ shopId, stepId, data, connection }) => {
+  if (connection) {
+    return updateCustomizationStepInConnection({ shopId, stepId, data, connection });
+  }
+  return withTransaction((transactionConnection) => updateCustomizationStepInConnection({
+    shopId,
+    stepId,
+    data,
+    connection: transactionConnection,
+  }));
 };
 
 const deleteCustomizationStepInConnection = async ({ shopId, stepId, connection }) => {
@@ -816,6 +892,7 @@ const replaceProductConfigurationInConnection = async ({
   shopId,
   productId,
   steps,
+  append,
   connection,
 }) => {
   const { stepIds, choiceIds } = validateConfigurationShape(steps);
@@ -828,20 +905,50 @@ const replaceProductConfigurationInConnection = async ({
     connection,
   });
 
-  await queryRows(connection, `
-    DELETE FROM product_customization_step_choices
-    WHERE product_customization_step_id IN (
-      SELECT id FROM product_customization_steps WHERE product_id = ?
-    )
-  `, [productId]);
-  await queryRows(
-    connection,
-    "DELETE FROM product_customization_steps WHERE product_id = ?",
-    [productId],
-  );
+  let stepsToWrite = steps;
+  let nextPosition = 0;
+  const currentPrices = new Map();
+  if (append) {
+    const currentSteps = await queryRows(connection, `
+      SELECT step_id, position FROM product_customization_steps
+      WHERE product_id = ?
+      ORDER BY position DESC
+      FOR UPDATE
+    `, [productId]);
+    const attachedIds = new Set(currentSteps.map((step) => Number(step.step_id)));
+    stepsToWrite = steps.filter((step) => !attachedIds.has(Number(step.step_id)));
+    nextPosition = currentSteps.length ? Number(currentSteps[0].position) + 1 : 0;
+  } else {
+    const unchangedChoiceIds = steps.flatMap((step) => step.choices
+      .filter((choice) => choice.keep_extra_price === true)
+      .map((choice) => choice.step_choice_id));
+    if (unchangedChoiceIds.length > 0) {
+      const currentChoices = await queryRows(connection, `
+        SELECT product_choice.step_choice_id, product_choice.extra_price
+        FROM product_customization_step_choices product_choice
+        JOIN product_customization_steps product_step
+          ON product_step.id = product_choice.product_customization_step_id
+        WHERE product_step.product_id = ? AND product_choice.step_choice_id IN (?)
+        FOR UPDATE
+      `, [productId, unchangedChoiceIds]);
+      for (const choice of currentChoices) {
+        currentPrices.set(Number(choice.step_choice_id), choice.extra_price);
+      }
+    }
+    await queryRows(connection, `
+      DELETE FROM product_customization_step_choices
+      WHERE product_customization_step_id IN (
+        SELECT id FROM product_customization_steps WHERE product_id = ?
+      )
+    `, [productId]);
+    await queryRows(
+      connection,
+      "DELETE FROM product_customization_steps WHERE product_id = ?",
+      [productId],
+    );
+  }
 
-  for (let stepIndex = 0; stepIndex < steps.length; stepIndex += 1) {
-    const step = steps[stepIndex];
+  for (const [stepIndex, step] of stepsToWrite.entries()) {
     const stepResult = await queryRows(connection, `
       INSERT INTO product_customization_steps (
         product_id, step_id, position, minimum_choices, maximum_choices,
@@ -850,13 +957,14 @@ const replaceProductConfigurationInConnection = async ({
     `, [
       productId,
       step.step_id,
-      step.position == null ? stepIndex : step.position,
+      append || step.position == null ? nextPosition + stepIndex : step.position,
       step.minimum_choices,
       step.maximum_choices,
       isDisabled(step.active) ? 0 : 1,
     ]);
     for (let choiceIndex = 0; choiceIndex < step.choices.length; choiceIndex += 1) {
       const choice = step.choices[choiceIndex];
+      const price = currentPrices.get(Number(choice.step_choice_id)) ?? choice.extra_price;
       await queryRows(connection, `
         INSERT INTO product_customization_step_choices (
           product_customization_step_id, step_choice_id, extra_price,
@@ -865,7 +973,7 @@ const replaceProductConfigurationInConnection = async ({
       `, [
         stepResult.insertId,
         choice.step_choice_id,
-        choice.extra_price == null ? 0 : choice.extra_price,
+        price == null ? 0 : price,
         choice.position == null ? choiceIndex : choice.position,
         isDisabled(choice.active) ? 0 : 1,
       ]);
@@ -878,6 +986,7 @@ const replaceProductConfiguration = async ({
   shopId,
   productId,
   steps,
+  append = false,
   connection,
 }) => {
   if (connection) {
@@ -885,6 +994,7 @@ const replaceProductConfiguration = async ({
       shopId,
       productId,
       steps,
+      append,
       connection,
     });
   }
@@ -892,6 +1002,7 @@ const replaceProductConfiguration = async ({
     shopId,
     productId,
     steps,
+    append,
     connection: transactionConnection,
   }));
 };
