@@ -351,16 +351,33 @@ const updateCustomizationStepInConnection = async ({ shopId, stepId, data, conne
   const choicePrices = normalizeStepChoicePrices(
     data.choice_prices === undefined ? [] : data.choice_prices,
   );
+  const choiceOrder = data.choice_order;
+  if (choiceOrder !== undefined && (!Array.isArray(choiceOrder)
+    || !choiceOrder.every(isValidCatalogId)
+    || new Set(choiceOrder.map(Number)).size !== choiceOrder.length)) {
+    throw configurationError(
+      "CUSTOMIZATION_CHOICE_ORDER_INVALID",
+      "L’ordre des choix est invalide.",
+    );
+  }
   await requireOwnedStep({ shopId, stepId, connection });
   const current = await getCustomizationStep({ shopId, stepId, connection });
-  if (choicePrices.size > 0) {
-    const choiceIds = [...choicePrices.keys()];
+  if (choiceOrder !== undefined || choicePrices.size > 0) {
     const ownedChoices = await queryRows(connection, `
       SELECT id FROM customization_step_choices
-      WHERE step_id = ? AND id IN (?)
+      WHERE step_id = ?${choiceOrder === undefined ? " AND id IN (?)" : ""}
       FOR UPDATE
-    `, [stepId, choiceIds]);
-    if (ownedChoices.length !== choiceIds.length) {
+    `, choiceOrder === undefined ? [stepId, [...choicePrices.keys()]] : [stepId]);
+    const ownedIds = new Set(ownedChoices.map(({ id }) => Number(id)));
+    if (choiceOrder !== undefined && (choiceOrder.length !== ownedIds.size
+      || choiceOrder.some((id) => !ownedIds.has(Number(id))))) {
+      throw configurationError(
+        "CUSTOMIZATION_CHOICE_ORDER_CHANGED",
+        "La liste des choix a changé. Rechargez l’étape avant de réessayer.",
+        { step_id: stepId },
+      );
+    }
+    if ([...choicePrices.keys()].some((id) => !ownedIds.has(id))) {
       throw configurationError(
         "CUSTOMIZATION_CHOICE_STEP_MISMATCH",
         "Un choix à mettre à jour n’appartient pas à cette étape.",
@@ -395,6 +412,25 @@ const updateCustomizationStepInConnection = async ({ shopId, stepId, data, conne
       WHERE product_step.step_id = ? AND product_choice.step_choice_id = ?
         AND product.shopid = ?
     `, [price, stepId, choiceId, shopId]);
+  }
+  if (choiceOrder && choiceOrder.length > 0) {
+    for (const [position, choiceId] of choiceOrder.entries()) {
+      await queryRows(connection, `
+        UPDATE customization_step_choices
+        SET default_position = ?, updated = NOW()
+        WHERE step_id = ? AND id = ?
+      `, [position, stepId, choiceId]);
+    }
+    await queryRows(connection, `
+      UPDATE product_customization_step_choices product_choice
+      JOIN product_customization_steps product_step
+        ON product_step.id = product_choice.product_customization_step_id
+      JOIN customization_step_choices choice
+        ON choice.id = product_choice.step_choice_id AND choice.step_id = product_step.step_id
+      JOIN products product ON product.id = product_step.product_id
+      SET product_choice.position = choice.default_position
+      WHERE product_step.step_id = ? AND product.shopid = ?
+    `, [stepId, shopId]);
   }
   return result;
 };
@@ -907,7 +943,7 @@ const replaceProductConfigurationInConnection = async ({
 
   let stepsToWrite = steps;
   let nextPosition = 0;
-  const currentPrices = new Map();
+  const currentChoicesById = new Map();
   if (append) {
     const currentSteps = await queryRows(connection, `
       SELECT step_id, position FROM product_customization_steps
@@ -920,11 +956,11 @@ const replaceProductConfigurationInConnection = async ({
     nextPosition = currentSteps.length ? Number(currentSteps[0].position) + 1 : 0;
   } else {
     const unchangedChoiceIds = steps.flatMap((step) => step.choices
-      .filter((choice) => choice.keep_extra_price === true)
+      .filter((choice) => step.keep_choice_order === true || choice.keep_extra_price === true)
       .map((choice) => choice.step_choice_id));
     if (unchangedChoiceIds.length > 0) {
       const currentChoices = await queryRows(connection, `
-        SELECT product_choice.step_choice_id, product_choice.extra_price
+        SELECT product_choice.step_choice_id, product_choice.extra_price, product_choice.position
         FROM product_customization_step_choices product_choice
         JOIN product_customization_steps product_step
           ON product_step.id = product_choice.product_customization_step_id
@@ -932,7 +968,7 @@ const replaceProductConfigurationInConnection = async ({
         FOR UPDATE
       `, [productId, unchangedChoiceIds]);
       for (const choice of currentChoices) {
-        currentPrices.set(Number(choice.step_choice_id), choice.extra_price);
+        currentChoicesById.set(Number(choice.step_choice_id), choice);
       }
     }
     await queryRows(connection, `
@@ -964,7 +1000,13 @@ const replaceProductConfigurationInConnection = async ({
     ]);
     for (let choiceIndex = 0; choiceIndex < step.choices.length; choiceIndex += 1) {
       const choice = step.choices[choiceIndex];
-      const price = currentPrices.get(Number(choice.step_choice_id)) ?? choice.extra_price;
+      const currentChoice = currentChoicesById.get(Number(choice.step_choice_id));
+      const price = choice.keep_extra_price === true && currentChoice
+        ? currentChoice.extra_price
+        : choice.extra_price;
+      const position = step.keep_choice_order === true && currentChoice
+        ? currentChoice.position
+        : choice.position;
       await queryRows(connection, `
         INSERT INTO product_customization_step_choices (
           product_customization_step_id, step_choice_id, extra_price,
@@ -974,7 +1016,7 @@ const replaceProductConfigurationInConnection = async ({
         stepResult.insertId,
         choice.step_choice_id,
         price == null ? 0 : price,
-        choice.position == null ? choiceIndex : choice.position,
+        position == null ? choiceIndex : position,
         isDisabled(choice.active) ? 0 : 1,
       ]);
     }
