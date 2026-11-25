@@ -346,24 +346,33 @@ const duplicateCustomizationStep = ({ shopId, stepId, copyImage, connection }) =
   return connection ? duplicate(connection) : withTransaction(duplicate);
 };
 
+const normalizeStepProductIds = (productIds) => {
+  if (!Array.isArray(productIds) || !productIds.length || !productIds.every(isValidCatalogId)) {
+    throw configurationError("CUSTOMIZATION_PRODUCTS_INVALID", "Sélectionnez des produits valides.");
+  }
+  return [...new Set(productIds.map(Number))];
+};
+
+const requireOwnedStepProducts = async ({ shopId, productIds, connection }) => {
+  const products = await queryRows(connection, `
+    SELECT id, archived FROM products WHERE shopid = ? AND id IN (?)
+    ORDER BY id FOR UPDATE
+  `, [shopId, productIds]);
+  if (products.length !== productIds.length) {
+    throw configurationError("CUSTOMIZATION_PRODUCTS_NOT_OWNED", "Un produit est introuvable.");
+  }
+  return products;
+};
+
 const attachCustomizationStepToProducts = ({ shopId, stepId, productIds, connection }) => {
   const attach = async (connection) => {
-    if (!Array.isArray(productIds) || !productIds.length || !productIds.every(isValidCatalogId)) {
-      throw configurationError("CUSTOMIZATION_PRODUCTS_INVALID", "Sélectionnez des produits valides.");
-    }
-    const ids = [...new Set(productIds.map(Number))];
+    const ids = normalizeStepProductIds(productIds);
     await requireOwnedStep({ shopId, stepId, connection });
     const step = await getCustomizationStep({ shopId, stepId, connection });
     if (!step.active) {
       throw configurationError("CUSTOMIZATION_STEP_INACTIVE", "Activez l’étape avant de l’ajouter.");
     }
-    const products = await queryRows(connection, `
-      SELECT id, archived FROM products WHERE shopid = ? AND id IN (?)
-      ORDER BY id FOR UPDATE
-    `, [shopId, ids]);
-    if (products.length !== ids.length) {
-      throw configurationError("CUSTOMIZATION_PRODUCTS_NOT_OWNED", "Un produit est introuvable.");
-    }
+    const products = await requireOwnedStepProducts({ shopId, productIds: ids, connection });
     const current = await queryRows(connection, `
       SELECT product_id, step_id, position FROM product_customization_steps
       WHERE product_id IN (?) ORDER BY product_id, position FOR UPDATE
@@ -419,6 +428,27 @@ const attachCustomizationStepToProducts = ({ shopId, stepId, productIds, connect
     return { added: pending.length };
   };
   return connection ? attach(connection) : withTransaction(attach);
+};
+
+const removeCustomizationStepFromProducts = ({ shopId, stepId, productIds, connection }) => {
+  const remove = async (connection) => {
+    const ids = normalizeStepProductIds(productIds);
+    await requireOwnedStep({ shopId, stepId, connection });
+    await requireOwnedStepProducts({ shopId, productIds: ids, connection });
+    await queryRows(connection, `
+      DELETE product_choice
+      FROM product_customization_step_choices product_choice
+      JOIN product_customization_steps product_step
+        ON product_step.id = product_choice.product_customization_step_id
+      WHERE product_step.step_id = ? AND product_step.product_id IN (?)
+    `, [stepId, ids]);
+    const result = await queryRows(connection, `
+      DELETE FROM product_customization_steps
+      WHERE step_id = ? AND product_id IN (?)
+    `, [stepId, ids]);
+    return { removed: result.affectedRows };
+  };
+  return connection ? remove(connection) : withTransaction(remove);
 };
 
 const normalizeStepChoicePrices = (prices) => {
@@ -1172,6 +1202,7 @@ module.exports = {
   groupCustomizationStepRows,
   groupResolvedConfigurationRows,
   listCustomizationSteps,
+  removeCustomizationStepFromProducts,
   replaceProductConfiguration,
   updateCustomizationChoice,
   updateCustomizationStep,

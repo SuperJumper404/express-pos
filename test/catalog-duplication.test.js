@@ -91,6 +91,48 @@ test("discarding a failed duplication only removes the copied image", () => {
   }
 });
 
+test("bulk removal deletes only the selected products' links and their choices", async () => {
+  const deletes = [];
+  const connection = {
+    async query(sql, params) {
+      if (sql.includes("SELECT step.id FROM customization_steps")) {
+        assert.deepEqual(params, [10, 7]);
+        return [[{ id: 10 }]];
+      }
+      if (sql.includes("SELECT id, archived FROM products")) {
+        assert.deepEqual(params, [7, [5, 6]]);
+        return [[{ id: 5, archived: 0 }, { id: 6, archived: 1 }]];
+      }
+      if (sql.includes("DELETE product_choice")) {
+        assert.match(sql, /ON product_step\.id = product_choice\.product_customization_step_id/);
+        assert.match(sql, /WHERE product_step\.step_id = \? AND product_step\.product_id IN \(\?\)/);
+      } else {
+        assert.match(sql, /DELETE FROM product_customization_steps\s+WHERE step_id = \? AND product_id IN \(\?\)/);
+      }
+      deletes.push(params);
+      return [{ affectedRows: deletes.length === 1 ? 4 : 2 }];
+    },
+  };
+  const result = await catalog.removeCustomizationStepFromProducts({
+    shopId: 7, stepId: 10, productIds: [5, 6, 5], connection,
+  });
+  assert.deepEqual(result, { removed: 2 });
+  assert.deepEqual(deletes, [[10, [5, 6]], [10, [5, 6]]]);
+});
+
+test("bulk removal rejects products outside the shop before deleting any links", async () => {
+  const connection = {
+    async query(sql) {
+      if (sql.includes("SELECT step.id FROM customization_steps")) return [[{ id: 10 }]];
+      if (sql.includes("SELECT id, archived FROM products")) return [[{ id: 5 }]];
+      throw new Error("No deletes expected");
+    },
+  };
+  await assert.rejects(catalog.removeCustomizationStepFromProducts({
+    shopId: 7, stepId: 10, productIds: [5, 6], connection,
+  }), { code: "CUSTOMIZATION_PRODUCTS_NOT_OWNED" });
+});
+
 test("bulk attachment rejects a dangling linked product before writing any rows", async () => {
   const connection = {
     async query(sql, params) {
