@@ -2,6 +2,7 @@ const {
   addProduct, 
   allProduct, 
   detailProduct,
+  duplicateProduct,
   publicClickAndCollectProducts,
   reorderProducts,
   updateProductCustomizationConfig,
@@ -15,6 +16,7 @@ const routers = express.Router()
 
 routers
   .post('/product', authentication, authAdmin, singleUploadProductImg, addProduct)
+  .post('/product/:id/duplicate', authentication, authAdmin, duplicateProduct)
   .get('/products/click-and-collect/:shopid', publicClickAndCollectProducts)
   .get('/products', authentication, allProduct)
   .patch('/products/order', authentication, authAdmin, reorderProducts)

@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const productModule = require("../modules/m_products");
 const DomainError = require("../helpers/domainError");
+const { createImageCopy } = require("../helpers/catalogDuplication");
 const { envPUBLICIMAGEPATH } = require("../helpers/env");
 const { isMissing, parseMoney } = require("../helpers/money");
 const { toNonNegativeInteger } = require("../helpers/stockInventory");
@@ -200,6 +201,20 @@ const buildProductController = ({
     }
   };
 
+  const duplicateProduct = async (req, res) => {
+    const images = createImageCopy({ fileSystem, resolveImagePath: productImagePath, removeImage: removeImageBestEffort });
+    let result;
+    try {
+      result = await products.mDuplicateProduct({
+        shopId: req.shopid, productId: req.params.id, copyImage: images.copy,
+      });
+    } catch (error) {
+      images.discard();
+      return sendConfigurationError(res, error);
+    }
+    return custom(res, 201, "Produit dupliqué.", null, { id: result.insertId });
+  };
+
   const allProduct = async (req, res) => {
     try {
       const response = await products.mAllProduct(req.shopid);
@@ -332,6 +347,7 @@ const buildProductController = ({
     allProduct,
     deleteProduct,
     detailProduct,
+    duplicateProduct,
     publicClickAndCollectProducts,
     reorderProducts,
     updateProduct,

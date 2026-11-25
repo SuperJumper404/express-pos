@@ -1,5 +1,6 @@
 const pool = require("../config/dbPool");
 const DomainError = require("../helpers/domainError");
+const { copyName } = require("../helpers/catalogDuplication");
 const { withTransaction } = require("../helpers/withTransaction");
 const {
   getProductCustomizationState,
@@ -295,6 +296,57 @@ const buildProductModule = ({
     return result;
   });
 
+  const mDuplicateProduct = ({ shopId, productId, copyImage }) => runInTransaction(async (connection) => {
+    const [source] = await queryRows(connection, `
+      SELECT p.name, p.description, p.categoryid, p.price, p.image, p.track_stock,
+        p.stock_zero_behavior, p.vat_rate, p.vat_rate_dine_in, p.vat_rate_takeaway,
+        si.unit AS stock_unit, COALESCE(si.minimum_stock, 1) AS minimum_stock,
+        COALESCE(si.target_stock, p.stock) AS target_stock
+      FROM products p LEFT JOIN stock_items si ON si.id = p.stock_item_id
+      WHERE p.id = ? AND p.shopid = ? FOR UPDATE
+    `, [productId, shopId]);
+    if (!source) throw new DomainError(404, "PRODUCT_NOT_FOUND", "Produit introuvable.");
+    const [{ next_position }] = await queryRows(connection, `
+      SELECT COALESCE(MAX(sort_order), 0) + 10 AS next_position
+      FROM products WHERE shopid = ? AND archived = 0
+    `, [shopId]);
+    const { stock_unit, minimum_stock, target_stock, ...product } = source;
+    const result = await queryRows(connection, "INSERT INTO products SET ?, created = NOW()", {
+      ...product,
+      name: copyName(product.name),
+      image: copyImage(product.image) || "",
+      stock: 0,
+      is_hidden: 1,
+      shopid: shopId,
+      sort_order: next_position,
+    });
+    await upsertProductStockItem(connection, result.insertId, {
+      stock_unit,
+      minimum_stock,
+      target_stock: Math.max(Number(target_stock), Number(minimum_stock)),
+    });
+    const steps = await queryRows(connection, `
+      SELECT id, step_id, position, minimum_choices, maximum_choices, active
+      FROM product_customization_steps WHERE product_id = ?
+      ORDER BY position, id FOR UPDATE
+    `, [productId]);
+    for (const step of steps) {
+      const copy = await queryRows(connection, `
+        INSERT INTO product_customization_steps (
+          product_id, step_id, position, minimum_choices, maximum_choices, active, created, updated
+        ) VALUES (?, ?, ?, ?, ?, ?, NOW(), NULL)
+      `, [result.insertId, step.step_id, step.position, step.minimum_choices, step.maximum_choices, step.active]);
+      await queryRows(connection, `
+        INSERT INTO product_customization_step_choices (
+          product_customization_step_id, step_choice_id, extra_price, position, active
+        )
+        SELECT ?, step_choice_id, extra_price, position, active
+        FROM product_customization_step_choices WHERE product_customization_step_id = ?
+      `, [copy.insertId, step.id]);
+    }
+    return result;
+  });
+
   const mUpdateProduct = (data, id) => runInTransaction(async (transactionConnection) => {
     const productData = { ...data };
     delete productData.customization_config;
@@ -387,6 +439,7 @@ const buildProductModule = ({
     mArchiveProduct,
     mDeleteProduct,
     mDetailProduct,
+    mDuplicateProduct,
     mReplaceProductCustomizationConfig,
     mPublicClickAndCollectProducts,
     mReorderProducts,
