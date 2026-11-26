@@ -123,13 +123,14 @@ const buildDeliveryOrders = ({ clock = () => new Date(), randomToken = createTra
       throw new DomainError(409, "DELIVERY_ORDER_MISSING", "Delivery commercial link changed");
     }
     const [charge] = await query(connection, `SELECT CAST(band_fee_cents AS CHAR) AS band_fee_cents,
-      free_delivery_applied, CAST(fee_cents AS CHAR) AS fee_cents,
+      free_delivery_applied, manual_fee_override, CAST(fee_cents AS CHAR) AS fee_cents,
       CAST(total_excl_tax_cents AS CHAR) AS total_excl_tax_cents, CAST(tax_cents AS CHAR) AS tax_cents,
       vat_rate, fiscal_policy FROM delivery_charge_snapshots WHERE shopid = ? AND delivery_id = ? AND revision = ?${lock}`,
     [shopId, deliveryId, delivery.charge_revision]);
     if (!charge) throw new DomainError(409, "DELIVERY_CHARGE_MISSING", "Delivery financial snapshot is unavailable");
     delivery.charge = {
       bandFeeCents: assertCents(Number(charge.band_fee_cents)), freeDeliveryApplied: Boolean(charge.free_delivery_applied),
+      ...(Number(charge.manual_fee_override) === 1 && { manualFeeOverride: true }),
       feeCents: assertCents(Number(charge.fee_cents)), totalExclTaxCents: assertCents(Number(charge.total_excl_tax_cents)),
       taxCents: assertCents(Number(charge.tax_cents)), vatRate: Number(charge.vat_rate), fiscalPolicy: json(charge.fiscal_policy),
     };
@@ -152,6 +153,7 @@ const buildDeliveryOrders = ({ clock = () => new Date(), randomToken = createTra
     await query(connection, "INSERT INTO delivery_charge_snapshots SET ?", [{
       shopid: shopId, delivery_id: deliveryId, revision, band_fee_cents: String(charge.bandFeeCents),
       free_delivery_applied: charge.freeDeliveryApplied ? 1 : 0, fee_cents: String(charge.feeCents),
+      manual_fee_override: charge.manualFeeOverride ? 1 : 0,
       total_excl_tax_cents: String(charge.totalExclTaxCents), tax_cents: String(charge.taxCents),
       vat_rate: charge.vatRate, fiscal_policy: JSON.stringify(charge.fiscalPolicy), created_at: date(clock()),
     }]);

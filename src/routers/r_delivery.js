@@ -31,6 +31,7 @@ const buildDeliveryRouter = ({
   router.post("/deliveries/:id/tracking-token", privateHeaders, rotationContext, controller.trackingRotate);
   router.post("/delivery/address-resolutions", authentication, controller.resolveAddress);
   router.post("/delivery/address-suggestions", authentication, controller.suggestAddresses);
+  router.post("/delivery/address-preview", authentication, controller.previewAddress);
   router.post("/delivery/quotes", authentication, controller.createQuote);
   router.get("/delivery/settings", authentication, controller.getSettings);
   router.get("/delivery/availability", authentication, controller.availability);

@@ -114,8 +114,8 @@ const buildDeliveryGeocoding = ({
   baseUrl, cache = new Map(),
 } = {}) => {
   const inflight = new Map();
-  const search = async ({ shopId, postal }) => {
-    const key = crypto.createHash("sha256").update(JSON.stringify(postal)).digest("hex");
+  const search = async ({ shopId, query, postcode, origin }) => {
+    const key = crypto.createHash("sha256").update(JSON.stringify([query, postcode, origin])).digest("hex");
     const time = new Date(clock()).getTime();
     const cached = cache.get(key);
     if (cached && cached.expiresAt > time) return cached.features;
@@ -126,11 +126,15 @@ const buildDeliveryGeocoding = ({
         url = new URL(`${(baseUrl || require("../helpers/env").getDeliveryConfig().geocodingBaseUrl).replace(/\/$/, "")}/search`);
         if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) throw unavailable();
       } catch (_) { throw unavailable(); }
-      url.searchParams.set("q", `${postal.street} ${postal.postalCode} ${postal.city}`);
+      url.searchParams.set("q", query);
       url.searchParams.set("index", "address");
-      url.searchParams.set("autocomplete", "0");
-      url.searchParams.set("postcode", postal.postalCode);
-      url.searchParams.set("limit", "10");
+      url.searchParams.set("autocomplete", postcode ? "0" : "1");
+      if (postcode) url.searchParams.set("postcode", postcode);
+      if (origin) {
+        url.searchParams.set("lat", String(origin.latitude));
+        url.searchParams.set("lon", String(origin.longitude));
+      }
+      url.searchParams.set("limit", postcode ? "10" : "5");
       await reserveQuota({ shopId });
       let data;
       try { data = await transport(url, { timeoutMs: 5000 }); } catch (_) { throw unavailable(); }
@@ -147,10 +151,25 @@ const buildDeliveryGeocoding = ({
     try { return await pending; } finally { inflight.delete(key); }
   };
   return {
+    async suggest({ shopId, input, origin }) {
+      const features = await search({ shopId, query: input, origin });
+      return features.flatMap(feature => {
+        const p = feature.properties;
+        if (p.type !== "housenumber" || typeof p.housenumber !== "string" || typeof p.street !== "string") return [];
+        try {
+          const address = normalizeAddress({ street: p.housenumber + " " + p.street, postalCode: p.postcode, city: p.city, country: "FR" });
+          const candidate = postalCandidate(feature, address);
+          return candidate ? [candidate] : [];
+        } catch (error) {
+          if (error.code !== "DELIVERY_ADDRESS_INVALID") throw error;
+          return [];
+        }
+      });
+    },
     async resolve({ shopId, address, candidateId }) {
       const normalized = normalizeAddress(address);
-      const postal = { street: normalized.street, postalCode: normalized.postalCode, city: normalized.city, country: normalized.country };
-      const features = await search({ shopId, postal });
+      const { street, postalCode, city } = normalized;
+      const features = await search({ shopId, query: [street, postalCode, city].join(" "), postcode: postalCode });
       const candidates = features.map(feature => postalCandidate(feature, normalized)).filter(Boolean);
       const selected = candidateId === undefined
         ? (candidates.length === 1 && candidates[0].precision === "housenumber" ? candidates[0] : null)

@@ -39,7 +39,8 @@ async function main() {
       const items = overrides.items || [{ productId: 21, quantity: 1, selectedChoiceIds: [] }];
       const discount = overrides.discount || { type: "none", value: 0 };
       const addressResolutionToken = signAddressResolution({ shopId: 7, addressSnapshot: overrides.address || address, now: clock(), tokenCodec });
-      const quote = await quotes.createQuote({ shopId: 7, items, discount, addressResolutionToken });
+      const quote = await quotes.createQuote({ shopId: 7, items, discount, addressResolutionToken,
+        deliveryFeeOverrideCents: overrides.deliveryFeeOverrideCents });
       return {
         shopId: 7, actorId: 10, customer: { id: 70, name: "Guest", phone: "0700000000" },
         items, expectedTotal: quote.grandTotalCents / 100,
@@ -131,6 +132,15 @@ async function main() {
     await assert.rejects(checkout.createCheckout({ ...discounted, actorId: null, sessionSubject: "service_point", servicePointId: 71, orderSource: "web" }), { code: "DELIVERY_FORBIDDEN" });
     await assert.rejects(checkout.createCheckout({ ...attempt, clientOrderToken: "missing-proof", deliveryQuoteToken: undefined }), { code: "CHECKOUT_REQUEST_INVALID" });
     console.log("PASS SQL POS/web-only origins, verified discount caller and guest account isolation");
+
+    const manual = await makeAttempt("manual-delivery-fee", { deliveryFeeOverrideCents: 0 });
+    await assert.rejects(checkout.createCheckout({ ...manual, actorId: null, sessionSubject: "service_point",
+      servicePointId: 71, orderSource: "web" }), { code: "DELIVERY_FORBIDDEN" });
+    const custom = await checkout.createCheckout(manual);
+    const [charge] = await db.readRows("SELECT band_fee_cents, fee_cents, free_delivery_applied, manual_fee_override FROM delivery_charge_snapshots WHERE delivery_id = ?", [custom.delivery.id]);
+    assert.deepStrictEqual([Number(charge.band_fee_cents), Number(charge.fee_cents), charge.free_delivery_applied, charge.manual_fee_override], [400, 0, 0, 1]);
+    assert.equal(custom.total, 20);
+    assert.equal((await checkout.createCheckout(manual)).orderId, custom.orderId);
 
     const concurrentAttempt = await makeAttempt("concurrent-checkout");
     const winners = await Promise.all([checkout.createCheckout(concurrentAttempt), checkout.createCheckout(concurrentAttempt)]);

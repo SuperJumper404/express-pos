@@ -111,9 +111,10 @@ const buildPersonalCustomersController = ({ customers, quotes,
       ...bodyFields(req, ["addressResolutionToken", "complement", "instructions", "makeDefault"]) })),
     deleteAddress: endpoint(req => { bodyFields(req, []); return service(req).deleteAddress({ ...scope(req), addressId: req.params.addressId }); }),
     suggestAddresses: endpoint(req => {
-      const body = bodyFields(req, ["input", "sessionToken"]);
+      const body = bodyFields(req, ["input", "sessionToken", "includeDistance"]);
       return (quotes || require("../modules/m_deliveryQuotes").buildDeliveryQuotes()).suggestAddresses({
-        shopId: req.customerSession.shopId, input: body.input, sessionToken: body.sessionToken });
+        shopId: req.customerSession.shopId, input: body.input, sessionToken: body.sessionToken,
+        ...(body.includeDistance !== undefined && { includeDistance: body.includeDistance }) });
     }),
     resolveAddress: endpoint(req => {
       const body = bodyFields(req, ["addressId", "address", "candidateId", "selectionToken"]);

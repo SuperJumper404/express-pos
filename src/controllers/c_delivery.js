@@ -84,8 +84,9 @@ const buildDeliveryController = ({
     suggestAddresses: endpoint(req => {
       requireQuoteActor(req);
       const body = req.body || {};
-      if (Object.keys(body).some(key => !["input", "sessionToken"].includes(key))) throw new DomainError(400, "DELIVERY_REQUEST_INVALID", "Invalid address search");
-      return quotes.suggestAddresses({ shopId: req.shopid, input: body.input, sessionToken: body.sessionToken });
+      if (Object.keys(body).some(key => !["input", "sessionToken", "includeDistance"].includes(key))) throw new DomainError(400, "DELIVERY_REQUEST_INVALID", "Invalid address search");
+      return quotes.suggestAddresses({ shopId: req.shopid, input: body.input, sessionToken: body.sessionToken,
+        ...(body.includeDistance !== undefined && { includeDistance: body.includeDistance }) });
     }),
     resolveAddress: endpoint(req => {
       requireQuoteActor(req);
@@ -94,9 +95,18 @@ const buildDeliveryController = ({
         || (Object.prototype.hasOwnProperty.call(body, "selectionToken") && Object.keys(body).length !== 1)) throw new DomainError(400, "DELIVERY_REQUEST_INVALID", "Choose a stored or suggested address");
       return quotes.resolveAddress({ shopId: req.shopid, address: body.address, candidateId: body.candidate_id, selectionToken: body.selectionToken });
     }),
+    previewAddress: endpoint(req => {
+      requireQuoteActor(req);
+      const body = req.body || {};
+      if (Object.keys(body).length !== 1 || typeof body.address_resolution_token !== "string") {
+        throw new DomainError(400, "DELIVERY_REQUEST_INVALID", "An address resolution is required");
+      }
+      return quotes.previewAddress({ shopId: req.shopid, addressResolutionToken: body.address_resolution_token });
+    }),
     createQuote: endpoint(req => {
       requireQuoteActor(req);
       const body = req.body || {};
+      if (body.delivery_fee_override_cents !== undefined && req.sessionSubject !== "staff") throw forbidden();
       let discount = body.discount;
       if (body.discount_type !== undefined || body.discount_value !== undefined) {
         if (discount !== undefined) throw new DomainError(400, "DELIVERY_REQUEST_INVALID", "Ambiguous discount intent");
@@ -108,7 +118,8 @@ const buildDeliveryController = ({
         productId: item && item.product_id, quantity: item && item.quantity,
         selectedChoiceIds: item && item.selected_product_step_choice_ids === undefined ? [] : item && item.selected_product_step_choice_ids,
       }));
-      return quotes.createQuote({ shopId: req.shopid, items, discount, addressResolutionToken: body.address_resolution_token });
+      return quotes.createQuote({ shopId: req.shopid, items, discount, addressResolutionToken: body.address_resolution_token,
+        ...(body.delivery_fee_override_cents !== undefined && { deliveryFeeOverrideCents: body.delivery_fee_override_cents }) });
     }),
     getSettings: endpoint(req => { requireAdmin(req); return settings.getSettings({ shopId: req.shopid }); }),
     availability: endpoint(async req => {

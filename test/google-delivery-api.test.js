@@ -5,6 +5,9 @@ const { buildDeliveryQuotes } = require("../src/modules/m_deliveryQuotes");
 const { buildDeliveryTokenCodec, validateAddressResolution } = require("../src/helpers/deliveryAddress");
 const { buildDeliveryController } = require("../src/controllers/c_delivery");
 const { buildDeliveryRouter } = require("../src/routers/r_delivery");
+const { buildDeliveryGeocoding } = require("../src/services/deliveryGeocoding");
+const { quoteDeliveryOrder } = require("../src/modules/m_orderQuote");
+const DomainError = require("../src/helpers/domainError");
 const sessionToken = "147ab164-bb20-4b99-9a51-19a9832619cb";
 const resolved = { provider: "google_places", placeId: "fixture-place", street: "60 Rue Francois Ier", postalCode: "75008", city: "Paris", country: "FR", latitude: 48.8, longitude: 2.3 };
 const fixture = () => {
@@ -68,4 +71,73 @@ test("staff lookup rejects courier and untrusted scope or coordinates before pro
     assert.equal((await send("/delivery/address-resolutions", { selectionToken })).status, 200);
     assert.equal(f.calls.length, 2);
   } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
+test("French fallback returns a signed precise result and delivery distance without a cart", async () => {
+  const settings = { enabled: true, origin: { latitude: 48.8, longitude: 2.3 }, maxDistanceMeters: 1000, minimumItemsCents: 500,
+    freeDeliveryEnabled: false, freeDeliveryThresholdCents: null, fiscalPolicy: { mode: "configured_rate", vatRate: 10 },
+    bands: [{ upToMeters: 1000, feeCents: 200 }] };
+  const geocoder = buildDeliveryGeocoding({
+    baseUrl: "https://fixture.invalid/geocodage",
+    reserveQuota: async () => {},
+    transport: async url => {
+      assert.equal(url.searchParams.get("autocomplete"), "1");
+      assert.equal(url.searchParams.get("lon"), "2.3");
+      return { type: "FeatureCollection", features: [
+        { type: "Feature", geometry: { type: "Point", coordinates: [2.32, 48.8] },
+          properties: { _type: "address", type: "housenumber", id: "fixture", housenumber: "7", street: "Rue Test", name: "7 Rue Test", label: "7 Rue Test 75008 Paris", postcode: "75008", city: "Paris" } },
+      ] };
+    },
+  });
+  const quotes = buildDeliveryQuotes({
+    repository: { getSettings: async () => settings }, geocoder, tokenCodec: fixture().tokenCodec,
+    places: { suggest: async () => { throw new DomainError(503, "DELIVERY_GEOCODING_UNAVAILABLE"); } },
+    quoteOrderItems: async () => assert.fail("Preview must not quote a cart"),
+  });
+  const { suggestions: [suggestion] } = await quotes.suggestAddresses({ shopId: 7, input: "7 Rue Test", sessionToken, includeDistance: true });
+  assert.equal(suggestion.provider, "ign");
+  assert.ok(suggestion.distanceMeters > 1000);
+  await assert.rejects(quotes.resolveAddress({ shopId: 8, selectionToken: suggestion.selectionToken }), { code: "DELIVERY_ADDRESS_INVALID" });
+  const proof = await quotes.resolveAddress({ shopId: 7, selectionToken: suggestion.selectionToken });
+  assert.equal(proof.addressSnapshot.street, "7 Rue Test");
+  const preview = await quotes.previewAddress({ shopId: 7, addressResolutionToken: proof.addressResolutionToken });
+  assert.equal(preview.distanceMeters, suggestion.distanceMeters);
+  assert.equal(preview.inRange, false);
+  assert.deepEqual(preview.feeOptionsCents, [200]);
+});
+
+test("cashier override stays signed through repricing and is refused for a web order", async () => {
+  const settings = { revision: 1, enabled: true, origin: { latitude: 48.8, longitude: 2.3 }, maxDistanceMeters: 1000, minimumItemsCents: 0,
+    freeDeliveryEnabled: false, freeDeliveryThresholdCents: null, fiscalPolicy: { mode: "configured_rate", vatRate: 10 },
+    bands: [{ upToMeters: 1000, feeCents: 200 }] };
+  const quoteItems = async () => ({ total: 25, resolvedItems: [{ lineTotal: 25, quantity: 1, vatRate: 10 }] });
+  const quotes = buildDeliveryQuotes({
+    repository: { getSettings: async () => settings }, tokenCodec: fixture().tokenCodec,
+    geocoder: { resolve: async () => resolved }, quoteOrderItems: quoteItems,
+  });
+  const { addressResolutionToken } = await quotes.resolveAddress({ shopId: 7, address: resolved });
+  const items = [{ productId: 21, quantity: 1, selectedChoiceIds: [] }];
+  const input = { shopId: 7, items, addressResolutionToken };
+  assert.equal((await quotes.createQuote(input)).deliveryFeeCents, 200);
+  await assert.rejects(quotes.createQuote({ ...input, deliveryFeeOverrideCents: -1 }), { code: "DELIVERY_MONEY_INVALID" });
+  for (const cents of [0, 500]) {
+    const quote = await quotes.createQuote({ ...input, deliveryFeeOverrideCents: cents });
+    assert.equal(quote.suggestedFeeCents, 200);
+    assert.equal(quote.deliveryFeeCents, cents);
+    assert.equal(quote.chargeSnapshot.bandFeeCents, 200);
+    assert.equal(quote.chargeSnapshot.manualFeeOverride, true);
+    const checkout = { ...input, expectedTotal: quote.grandTotalCents / 100, discountType: "none", discountValue: 0, deliveryQuoteToken: quote.quoteToken };
+    await assert.rejects(quoteDeliveryOrder({ checkout, deliveryQuotes: quotes, quoteItems }), { code: "DELIVERY_FORBIDDEN" });
+    assert.equal((await quoteDeliveryOrder({ checkout, deliveryQuotes: quotes, quoteItems, allowFeeOverride: true })).total, (2500 + cents) / 100);
+  }
+  const controller = buildDeliveryController({ quotes, settings: {}, dispatch: {}, cash: {}, refunds: {}, tracking: {} });
+  const response = () => ({ set() {}, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; } });
+  const web = response();
+  const body = { items: [{ product_id: 21, quantity: 1 }], address_resolution_token: addressResolutionToken, delivery_fee_override_cents: 0 };
+  await controller.createQuote({ shopid: 7, sessionSubject: "service_point", servicePointId: 71, body }, web);
+  assert.equal(web.statusCode, 403);
+  const staff = response();
+  await controller.createQuote({ shopid: 7, sessionSubject: "staff", id: 10, access: 1, body }, staff);
+  assert.equal(staff.statusCode, 200);
+  assert.equal(staff.body.data.deliveryFeeCents, 0);
 });

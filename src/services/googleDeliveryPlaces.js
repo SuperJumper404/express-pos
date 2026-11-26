@@ -78,19 +78,21 @@ const buildGoogleDeliveryPlaces = ({
     return data;
   };
   return {
-    async suggest({ shopId, input, sessionToken }) {
+    async suggest({ shopId, input, sessionToken, origin }) {
       assertScope(shopId);
       if (!validText(input) || input.trim().length < 3 || !validSessionToken(sessionToken)) throw invalid();
       const data = await call(shopId, new URL("https://places.googleapis.com/v1/places:autocomplete"), {
-        method: "POST", headers: { "X-Goog-FieldMask": "suggestions.placePrediction.placeId,suggestions.placePrediction.text.text" },
+        method: "POST", headers: { "X-Goog-FieldMask": "suggestions.placePrediction.placeId,suggestions.placePrediction.text.text"
+          + (origin ? ",suggestions.placePrediction.distanceMeters" : "") },
         body: { input: input.trim().normalize("NFC"), sessionToken, languageCode: "fr", regionCode: "fr", includedRegionCodes: ["fr"],
-          includedPrimaryTypes: ["street_address", "premise", "subpremise"], includeQueryPredictions: false },
+          includedPrimaryTypes: ["street_address", "premise", "subpremise"], includeQueryPredictions: false, ...(origin && { origin }) },
       });
       if (!data || typeof data !== "object" || Array.isArray(data) || (data.suggestions !== undefined && !Array.isArray(data.suggestions))) throw unavailable();
       return (data.suggestions || []).slice(0, 5).map(item => {
         const prediction = item && item.placePrediction;
         if (!prediction || !validPlaceId(prediction.placeId) || !prediction.text || !validText(prediction.text.text, 1024)) throw unavailable();
-        return { placeId: prediction.placeId, label: prediction.text.text.trim() };
+        return { placeId: prediction.placeId, label: prediction.text.text.trim(),
+          ...(origin && Number.isSafeInteger(prediction.distanceMeters) && prediction.distanceMeters >= 0 && { distanceMeters: prediction.distanceMeters }) };
       });
     },
     async resolve(input) {

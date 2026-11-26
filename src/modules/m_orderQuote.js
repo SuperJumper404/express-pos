@@ -175,12 +175,16 @@ const applyDeliveryDiscountToItems = (items, discountCents) => {
 };
 
 // Both checkout and explicit amendments compare signed intent with current server pricing.
-const quoteDeliveryOrder = async ({ checkout, connection, deliveryQuotes, quoteItems = orderQuoteModule.quoteOrderItems }) => {
+const quoteDeliveryOrder = async ({ checkout, connection, deliveryQuotes, allowFeeOverride = false, quoteItems = orderQuoteModule.quoteOrderItems }) => {
   const signed = deliveryQuotes.validateQuoteToken(checkout.deliveryQuoteToken, { shopId: checkout.shopId, connection });
+  if (signed.deliveryFeeOverrideCents !== undefined && !allowFeeOverride) {
+    throw new DomainError(403, "DELIVERY_FORBIDDEN", "Delivery fee override requires a staff checkout");
+  }
   const discount = { type: checkout.discountType, value: checkout.discountValue };
   const current = await deliveryQuotes.createQuote({
     shopId: checkout.shopId, items: checkout.items, discount,
     addressResolutionToken: checkout.addressResolutionToken, connection,
+    ...(signed.deliveryFeeOverrideCents !== undefined && { deliveryFeeOverrideCents: signed.deliveryFeeOverrideCents }),
   });
   if (JSON.stringify(quoteIntent(signed)) !== JSON.stringify(quoteIntent(current))
     || JSON.stringify(canonicalItems(signed.items)) !== JSON.stringify(canonicalItems(checkout.items))

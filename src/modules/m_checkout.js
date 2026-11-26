@@ -943,7 +943,7 @@ const buildCheckoutModule = ({
           || (!staff && resolveCheckoutPaymentState(checkout.paymentMode).payment_status === "paid")
           || checkout.paymentMode === "stripe_terminal_kiosk") throw new DomainError(403, "DELIVERY_FORBIDDEN", "Delivery checkout is not authorized");
         deliveryActor = { subject: checkout.sessionSubject, id: checkout.actorId || checkout.servicePointId, shopId: checkout.shopId, access: actor && actor.access };
-        deliveryPricing = await quoteDeliveryOrder({ checkout, connection, deliveryQuotes, quoteItems: quoteOrderItems });
+        deliveryPricing = await quoteDeliveryOrder({ checkout, connection, deliveryQuotes, allowFeeOverride: Boolean(staff), quoteItems: quoteOrderItems });
       }
       const {
         resolvedItems,
