@@ -12,6 +12,7 @@ const routerCashRegisterSettlements = require("./src/routers/r_cashRegisterSettl
 const routerShop = require("./src/routers/r_shop");
 const routerPrinting = require("./src/routers/r_printing");
 const routerStripe = require("./src/routers/r_stripe");
+const routerMollie = require("./src/routers/r_mollie");
 const routerCustomizations = require("./src/routers/r_customizations");
 const routerServicePoints = require("./src/routers/r_servicePoints");
 const routerDelivery = require("./src/routers/r_delivery");
@@ -101,6 +102,7 @@ app.use(`${prefix}`, routerCashRegisterSettlements);
 app.use(`${prefix}`, routerShop);
 app.use(`${prefix}`, routerPrinting);
 app.use(`${prefix}`, routerStripe.routers);
+app.use(`${prefix}`, routerMollie);
 app.use(`${prefix}`, routerCustomizations);
 app.use(`${prefix}`, routerServicePoints);
 app.use(`${prefix}`, routerDelivery);
