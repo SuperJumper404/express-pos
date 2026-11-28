@@ -22,112 +22,117 @@ concurrency:
 jobs:
   production:
     if: github.ref == 'refs/heads/master'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, smarteat-google-deploy]
     timeout-minutes: 30
     steps:
-      - name: Verify SSH identity and run Docker Compose
+      - name: Load SSH password from runner environment file
         shell: bash
-        env:
-          SSHPASS: ${{ secrets.GOOGLE_VM_PASSWORD }}
-          VM_KNOWN_HOSTS: ${{ secrets.GOOGLE_VM_KNOWN_HOSTS }}
-          DOTENV_PRIVATE_KEY: ${{ secrets.DOTENV_PRIVATE_KEY }}
-          MOLLIE_PRODUCTION_ENV: ${{ secrets.MOLLIE_PRODUCTION_ENV }}
-          OPERATION: ${{ inputs.operation }}
         run: |
           set -euo pipefail
-          : "${SSHPASS:?Missing GOOGLE_VM_PASSWORD}" "${VM_KNOWN_HOSTS:?Missing GOOGLE_VM_KNOWN_HOSTS}"
-          : "${DOTENV_PRIVATE_KEY:?Missing DOTENV_PRIVATE_KEY}"
-          : "${MOLLIE_PRODUCTION_ENV:?Missing MOLLIE_PRODUCTION_ENV}"
-          if ! command -v sshpass >/dev/null; then sudo apt-get update -qq && sudo apt-get install -y sshpass; fi
-          umask 077
-          mkdir -p ~/.ssh
-          printf '%s\n' "$VM_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          {
-            printf 'export DOTENV_PRIVATE_KEY=%q\n' "$DOTENV_PRIVATE_KEY"
-            printf 'MOLLIE_PRODUCTION_ENV=%q\n' "$MOLLIE_PRODUCTION_ENV"
-            cat <<'REMOTE'
-          set -euo pipefail
-          umask 077
-          cd "$HOME/smarteat/backend"
-          exec 9>"$HOME/.google-deploy-backend.lock"
-          flock -w 60 9
-          test "$(git remote get-url origin)" = "https://github.com/SuperJumper404/express-pos.git"
-          test "$(git symbolic-ref --short HEAD)" = master
-          test -s .env.production
-          test -s compose.vps.yml
-          if grep -q "encrypted:" .env.production; then exit 1; fi
-          export APP_ENV=production ENV_FILE=.env.production
-          compose=(docker compose -p backend --env-file .env.production -f compose.yml -f compose.vps.yml)
-          "${compose[@]}" config --quiet
-          git fetch origin master
-          git merge-base --is-ancestor "$2" FETCH_HEAD
-          git merge-base --is-ancestor HEAD "$2"
-          # Refuse a source update that would replace the VM's production configuration.
-          git diff --quiet HEAD "$2" -- .env.production compose.vps.yml || {
-            echo "Production configuration changed upstream; reconcile it on the VM first." >&2
-            exit 1
-          }
-
-          # Decrypt the Actions secret and preserve the rest of the VM configuration.
-          release_env=$(mktemp -d "$PWD/.mollie-deploy.XXXXXX")
-          trap 'rm -f -- "$release_env/.env" "$release_env/mollie" "$release_env/runtime"; rmdir -- "$release_env"' EXIT
-          printf '%s\n' "$MOLLIE_PRODUCTION_ENV" > "$release_env/.env"
-          unset MOLLIE_PRODUCTION_ENV
-          docker run --rm -e DOTENV_PRIVATE_KEY -v "$release_env:/release:ro" node:20-alpine \
-            npx --yes @dotenvx/dotenvx@1.55.1 decrypt --ops-off --stdout -f /release/.env > "$release_env/mollie"
-          unset DOTENV_PRIVATE_KEY
-          mollie_keys='MOLLIE_(CLIENT_ID|CLIENT_SECRET|TOKEN_ENCRYPTION_KEY|OAUTH_REDIRECT_URI|CONNECT_RETURN_URL)'
-          if grep -q 'encrypted:' "$release_env/mollie" ||
-             [[ $(grep -Ec "^${mollie_keys}=.+" "$release_env/mollie") != 5 ]]; then
-            echo "Mollie configuration could not be fully decrypted." >&2
+          env_file="$HOME/.config/smarteat/google-vm.env"
+          if [[ ! -r "$env_file" ]]; then
+            echo "Runner environment file is missing: $env_file" >&2
             exit 1
           fi
-          awk -v keys="$mollie_keys" '$0 !~ "^[[:space:]]*(export[[:space:]]+)?" keys "[[:space:]]*=" { print }' \
-            .env.production > "$release_env/runtime"
-          grep -E "^${mollie_keys}=" "$release_env/mollie" >> "$release_env/runtime"
-          ENV_FILE="$release_env/runtime" docker compose -p backend --env-file "$release_env/runtime" \
-            -f compose.yml -f compose.vps.yml config --quiet
-          "${compose[@]}" ps
-          if [[ "$1" == preflight ]]; then
-            curl -fsS --max-time 10 http://127.0.0.1:5005/baseurl/api/v1/testapi -o /dev/null
-            exit 0
+          mapfile -t passwords < <(sed -n 's/^GOOGLE_VM_PASSWORD=//p' "$env_file")
+          if [[ ${#passwords[@]} -ne 1 || -z ${passwords[0]-} ]]; then
+            echo "The runner environment file must define GOOGLE_VM_PASSWORD once." >&2
+            exit 1
           fi
+          password=${passwords[0]%$'\r'}
+          if [[ -z "$password" ]]; then
+            echo "GOOGLE_VM_PASSWORD is empty." >&2
+            exit 1
+          fi
+          printf '::add-mask::%s\n' "${password//%/%25}"
+          printf 'GOOGLE_VM_PASSWORD=%s\n' "$password" >> "$GITHUB_ENV"
 
-          git merge --ff-only "$2"
-          mv -- "$release_env/runtime" .env.production
-          "${compose[@]}" up -d --no-deps --force-recreate app
-          for attempt in $(seq 1 180); do
-            if curl -fsS --max-time 4 http://127.0.0.1:5005/baseurl/api/v1/testapi -o /dev/null; then
-              "${compose[@]}" exec -T app node <<'CHECK'
-          const mysql = require('mysql2/promise')
-          const { readMollieConfig } = require('./src/services/mollieOAuth')
+      - name: Deploy on server with Docker Compose
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          OPERATION: ${{ inputs.operation }}
+          DEPLOY_SHA: ${{ github.sha }}
+        with:
+          host: 34.61.179.207
+          username: ns_ayness
+          password: ${{ env.GOOGLE_VM_PASSWORD }}
+          port: 22
+          fingerprint: SHA256:ZmotlkmXzO36LvM2XtOKb4Yiu0BBh18BMSWxjdjBQJY
+          command_timeout: 25m
+          envs: OPERATION,DEPLOY_SHA
+          script: |
+            bash -se <<'REMOTE'
+            set -euo pipefail
+            cd "$HOME/smarteat/backend"
+            exec 9>"$HOME/.google-deploy-backend.lock"
+            flock -w 60 9
 
-          async function check() {
-            if (!readMollieConfig()) throw new Error('Invalid Mollie configuration')
-            const db = await mysql.createConnection(process.env.DATABASE_URL)
-            try {
-              const [migrations] = await db.execute(
-                'SELECT version FROM schema_migrations WHERE version = ?',
-                ['20261127230000']
-              )
-              if (migrations.length !== 1) throw new Error('Mollie migration is missing')
-            } finally {
-              await db.end()
-            }
-          }
+            test "$(git remote get-url origin)" = "https://github.com/SuperJumper404/express-pos.git"
+            test "$(git symbolic-ref --short HEAD)" = master
+            test -s .env.production
+            test -s compose.vps.yml
+            if grep -q 'encrypted:' .env.production; then
+              echo "The VM requires a decrypted .env.production." >&2
+              exit 1
+            fi
+            for key in MOLLIE_CLIENT_ID MOLLIE_CLIENT_SECRET MOLLIE_TOKEN_ENCRYPTION_KEY \
+              MOLLIE_OAUTH_REDIRECT_URI MOLLIE_CONNECT_RETURN_URL; do
+              if ! grep -Eq "^[[:space:]]*${key}[[:space:]]*=[[:space:]]*[^[:space:]]" .env.production; then
+                echo "Missing $key in the VM's .env.production." >&2
+                exit 1
+              fi
+            done
+            export APP_ENV=production ENV_FILE=.env.production
+            compose=(docker compose -p backend --env-file .env.production -f compose.yml -f compose.vps.yml)
+            "${compose[@]}" config --quiet
 
-          check().catch(() => {
-            console.error('Mollie production configuration or migration check failed.')
-            process.exitCode = 1
-          })
-          CHECK
-              printf 'Healthy at commit %s\n' "$(git rev-parse HEAD)"
+            git fetch origin master
+            git merge-base --is-ancestor "$DEPLOY_SHA" FETCH_HEAD
+            git merge-base --is-ancestor HEAD "$DEPLOY_SHA"
+            if ! git diff --quiet HEAD "$DEPLOY_SHA" -- .env.production compose.vps.yml; then
+              printf 'Production configuration differs between %s and %s:\n' "$(git rev-parse --short HEAD)" "$DEPLOY_SHA" >&2
+              git diff --name-only HEAD "$DEPLOY_SHA" -- .env.production compose.vps.yml >&2
+              exit 1
+            fi
+            if [[ "$OPERATION" == preflight ]]; then
+              "${compose[@]}" ps
+              curl -fsS --max-time 10 http://127.0.0.1:5005/baseurl/api/v1/testapi -o /dev/null
               exit 0
             fi
-            sleep 5
-          done
-          "${compose[@]}" ps
-          exit 1
-          REMOTE
-          } | sshpass -e ssh -o StrictHostKeyChecking=yes -o PreferredAuthentications=password \
-            -p 22 ns_ayness@34.61.179.207 bash -se -- "$OPERATION" "$GITHUB_SHA"
+            test "$OPERATION" = deploy
+
+            git merge --ff-only "$DEPLOY_SHA"
+            "${compose[@]}" up -d --no-deps --force-recreate app
+            for attempt in $(seq 1 180); do
+              if curl -fsS --max-time 4 http://127.0.0.1:5005/baseurl/api/v1/testapi -o /dev/null; then
+                "${compose[@]}" exec -T app node <<'CHECK'
+            const mysql = require('mysql2/promise')
+            const { readMollieConfig } = require('./src/services/mollieOAuth')
+
+            async function check() {
+              if (!readMollieConfig()) throw new Error('Invalid Mollie configuration')
+              const db = await mysql.createConnection(process.env.DATABASE_URL)
+              try {
+                const [migrations] = await db.execute(
+                  'SELECT version FROM schema_migrations WHERE version = ?',
+                  ['20261127230000']
+                )
+                if (migrations.length !== 1) throw new Error('Mollie migration is missing')
+              } finally {
+                await db.end()
+              }
+            }
+
+            check().catch(() => {
+              console.error('Mollie production configuration or migration check failed.')
+              process.exitCode = 1
+            })
+            CHECK
+                printf 'Healthy at commit %s\n' "$(git rev-parse HEAD)"
+                exit 0
+              fi
+              sleep 5
+            done
+            "${compose[@]}" ps
+            exit 1
+            REMOTE
